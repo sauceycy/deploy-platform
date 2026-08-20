@@ -80,6 +80,8 @@ const APP_STATE_KEY = "deploy-platform-state";
 const state = {
   currentUser: null,
   selectedId: null,
+  selectedTaskIds: new Set(),
+  batchQueue: [],
   filter: "all",
   search: "",
   view: "tasks",
@@ -118,6 +120,9 @@ const branchForm = document.getElementById("branchForm");
 const branchSelect = document.getElementById("branchSelect");
 const branchStatus = document.getElementById("branchStatus");
 const confirmBranchDeploy = document.getElementById("confirmBranchDeploy");
+const drawerTitle = document.getElementById("drawerTitle");
+const selectAllTasks = document.getElementById("selectAllTasks");
+const batchDeploy = document.getElementById("batchDeploy");
 
 function hasPermission(permission) {
   if (!state.currentUser) return false;
@@ -252,7 +257,11 @@ function filteredTasks() {
   const query = state.search.trim().toLowerCase();
   return tasks.filter((task) => {
     const statusMatch = state.filter === "all" || task.status === state.filter;
-    const searchMatch = !query || [task.name, task.repo, task.owner, task.tag].some((value) => value.toLowerCase().includes(query));
+    const searchMatch =
+      !query ||
+      [task.name, task.repo, task.owner, task.tag, task.env, task.language, task.sdk, task.workdir, task.lastBranch || ""].some((value) =>
+        String(value || "").toLowerCase().includes(query),
+      );
     return statusMatch && searchMatch;
   });
 }
@@ -265,16 +274,27 @@ function renderMetrics() {
 }
 
 function renderRows() {
+  const existingIds = new Set(tasks.map((task) => String(task.id)));
+  state.selectedTaskIds.forEach((id) => {
+    if (!existingIds.has(id)) state.selectedTaskIds.delete(id);
+  });
   const rows = filteredTasks();
   if (rows.length === 0) {
     taskRows.innerHTML = `<div class="empty-row">暂无发布任务</div>`;
+    selectAllTasks.checked = false;
+    selectAllTasks.indeterminate = false;
+    selectAllTasks.disabled = true;
+    batchDeploy.disabled = true;
     return;
   }
 
   taskRows.innerHTML = rows
     .map(
       (task) => `
-      <div class="task-row ${task.id === state.selectedId ? "selected" : ""}" role="row" data-task-id="${task.id}">
+      <div class="task-row ${String(task.id) === String(state.selectedId) ? "selected" : ""}" role="row" data-task-id="${task.id}">
+        <div>
+          <input type="checkbox" data-task-select="${task.id}" ${state.selectedTaskIds.has(String(task.id)) ? "checked" : ""} aria-label="选择 ${task.name}" />
+        </div>
         <div class="task-main">
           <strong>${task.name}</strong>
           <span>${task.env} · ${task.owner || "未设置负责人"} · ${task.lastRun}</span>
@@ -298,6 +318,10 @@ function renderRows() {
             <i data-lucide="panel-right-open"></i>
             <span>详情</span>
           </button>
+          <button class="ghost-button" type="button" data-action="edit" data-task-id="${task.id}" ${hasPermission("task.create") ? "" : "disabled"}>
+            <i data-lucide="square-pen"></i>
+            <span>编辑</span>
+          </button>
           <button class="ghost-button" type="button" data-action="run" data-task-id="${task.id}" ${hasPermission("task.deploy") ? "" : "disabled"}>
             <i data-lucide="rocket"></i>
             <span>发布</span>
@@ -307,10 +331,16 @@ function renderRows() {
     `,
     )
     .join("");
+  const visibleIds = rows.map((task) => String(task.id));
+  const checkedVisibleIds = visibleIds.filter((id) => state.selectedTaskIds.has(id));
+  selectAllTasks.checked = visibleIds.length > 0 && checkedVisibleIds.length === visibleIds.length;
+  selectAllTasks.indeterminate = checkedVisibleIds.length > 0 && checkedVisibleIds.length < visibleIds.length;
+  selectAllTasks.disabled = !hasPermission("task.deploy") || visibleIds.length === 0;
+  batchDeploy.disabled = !hasPermission("task.deploy") || state.selectedTaskIds.size === 0;
 }
 
 function renderDetail() {
-  const task = tasks.find((item) => item.id === state.selectedId);
+  const task = tasks.find((item) => String(item.id) === String(state.selectedId));
   if (!task) {
     detailPanel.innerHTML = `
       <div class="empty-state compact">
@@ -584,15 +614,60 @@ function renderClusters() {
     .join("");
 }
 
-function updateSdkOptions(language) {
+function updateSdkOptions(language, force = false) {
   const options = sdkOptions[language] || [];
   sdkSelect.innerHTML = options.map((sdk, index) => `<option ${index === 0 ? "selected" : ""}>${sdk}</option>`).join("");
   const commandInput = taskForm.elements.buildCommand;
-  if (!commandInput.value) commandInput.value = buildCommands[language] || "";
+  if (force || !commandInput.value) commandInput.value = buildCommands[language] || "";
+}
+
+function resetTaskForm() {
+  taskForm.reset();
+  taskForm.elements.taskId.value = "";
+  taskForm.elements.env.value = "test";
+  taskForm.elements.language.value = "java";
+  clusterDrafts.splice(0, clusterDrafts.length);
+  updateSdkOptions("java", true);
+  renderClusters();
 }
 
 function openDrawer() {
   if (!requirePermission("task.create")) return;
+  drawerTitle.textContent = "创建发布任务";
+  resetTaskForm();
+  backdrop.hidden = false;
+  drawer.classList.add("open");
+  drawer.setAttribute("aria-hidden", "false");
+}
+
+function openTaskEditor(taskId) {
+  if (!requirePermission("task.create")) return;
+  const task = tasks.find((item) => String(item.id) === String(taskId));
+  if (!task) return;
+  drawerTitle.textContent = "编辑发布任务";
+  taskForm.elements.taskId.value = task.id;
+  taskForm.elements.name.value = task.name || "";
+  taskForm.elements.owner.value = task.owner || "";
+  taskForm.elements.env.value = task.env || "test";
+  taskForm.elements.tag.value = task.tag || "";
+  taskForm.elements.repo.value = task.repo || "";
+  taskForm.elements.workdir.value = task.workdir || ".";
+  taskForm.elements.language.value = task.language || "java";
+  updateSdkOptions(task.language || "java", true);
+  taskForm.elements.sdk.value = task.sdk || sdkOptions[task.language || "java"]?.[0] || "";
+  taskForm.elements.buildCommand.value = task.buildCommand || "";
+  taskForm.elements.containerPort.value = task.containerPort || "";
+  taskForm.elements.servicePort.value = task.servicePort || "";
+  taskForm.elements.replicas.value = task.replicas || "";
+  taskForm.elements.healthPath.value = task.healthPath || "";
+  taskForm.elements.notifyChannel.value = task.notify?.channel || "企业微信";
+  taskForm.elements.notifyTarget.value = task.notify?.target || "";
+  taskForm.elements.notifyBuildFail.checked = task.notify?.events?.includes("构建失败") ?? true;
+  taskForm.elements.notifyDeployFail.checked = task.notify?.events?.includes("部署失败") ?? true;
+  taskForm.elements.notifyHealthFail.checked = task.notify?.events?.includes("健康检查失败") ?? true;
+  taskForm.elements.notifySuccess.checked = task.notify?.events?.includes("发布成功") ?? false;
+  clusterDrafts.splice(0, clusterDrafts.length, ...(task.clusters || []).map((cluster) => ({ ...cluster })));
+  renderClusters();
   backdrop.hidden = false;
   drawer.classList.add("open");
   drawer.setAttribute("aria-hidden", "false");
@@ -669,15 +744,13 @@ function saveTask(event) {
   event.preventDefault();
   if (!requirePermission("task.create")) return;
   const preview = buildPreviewObject();
-  const newTask = {
-    id: Date.now(),
+  const taskId = taskForm.elements.taskId.value;
+  const taskPayload = {
     name: preview.task.name,
     owner: preview.task.owner,
     env: preview.task.env,
     tag: preview.task.tag,
     repo: preview.repository.url,
-    branch: "",
-    lastBranch: "",
     workdir: preview.repository.workdir,
     language: preview.build.language,
     sdk: preview.build.sdk,
@@ -686,15 +759,34 @@ function saveTask(event) {
     servicePort: preview.runtime.servicePort,
     replicas: preview.runtime.replicas,
     healthPath: preview.runtime.healthPath,
-    status: "pending",
-    lastRun: "草稿",
-    alerts: 0,
-    clusters: preview.clusters.map((cluster) => ({ ...cluster, status: "success" })),
+    clusters: preview.clusters.map((cluster) => ({ ...cluster, status: cluster.status || "success" })),
     notify: preview.notify,
   };
-  tasks.unshift(newTask);
-  state.selectedId = newTask.id;
-  addAudit("创建任务", newTask.name);
+
+  if (taskId) {
+    const task = tasks.find((item) => String(item.id) === String(taskId));
+    if (!task) {
+      window.alert("任务不存在，无法保存编辑");
+      return;
+    }
+    Object.assign(task, taskPayload);
+    state.selectedId = task.id;
+    addAudit("编辑任务", task.name);
+  } else {
+    const newTask = {
+      id: Date.now(),
+      ...taskPayload,
+      branch: "",
+      lastBranch: "",
+      status: "pending",
+      lastRun: "草稿",
+      alerts: 0,
+    };
+    tasks.unshift(newTask);
+    state.selectedId = newTask.id;
+    addAudit("创建任务", newTask.name);
+  }
+
   render();
   persistState();
   closeDrawer();
@@ -746,8 +838,9 @@ async function openBranchDialog(taskId) {
   }
 }
 
-function closeBranchDialog() {
-  branchDialog.close();
+function closeBranchDialog(clearQueue = true) {
+  if (clearQueue) state.batchQueue = [];
+  if (branchDialog.open) branchDialog.close();
   branchForm.reset();
 }
 
@@ -760,13 +853,30 @@ async function runTask(taskId, branch) {
   });
   const result = await response.json();
   if (!response.ok) {
+    state.batchQueue = [];
     window.alert(result.error || "发布请求失败");
     return;
   }
   hydrateState(result.state);
+  state.selectedTaskIds.delete(String(taskId));
   render();
-  closeBranchDialog();
-  window.setTimeout(refreshRemoteState, 1500);
+  closeBranchDialog(false);
+  if (state.batchQueue.length > 0) {
+    window.setTimeout(() => openBranchDialog(state.batchQueue.shift()), 250);
+  } else {
+    window.setTimeout(refreshRemoteState, 1500);
+  }
+}
+
+function startBatchDeploy() {
+  if (!requirePermission("task.deploy")) return;
+  const taskIds = Array.from(state.selectedTaskIds).filter((id) => tasks.some((task) => String(task.id) === id));
+  if (taskIds.length === 0) {
+    window.alert("请先选择要发布的任务");
+    return;
+  }
+  state.batchQueue = taskIds;
+  openBranchDialog(state.batchQueue.shift());
 }
 
 function saveCluster(event) {
@@ -1043,6 +1153,20 @@ taskSearch.addEventListener("input", (event) => {
   renderRows();
 });
 
+selectAllTasks.addEventListener("change", (event) => {
+  const visibleIds = filteredTasks().map((task) => String(task.id));
+  visibleIds.forEach((id) => {
+    if (event.target.checked) {
+      state.selectedTaskIds.add(id);
+    } else {
+      state.selectedTaskIds.delete(id);
+    }
+  });
+  renderRows();
+});
+
+batchDeploy.addEventListener("click", startBatchDeploy);
+
 document.querySelectorAll(".segment").forEach((button) => {
   button.addEventListener("click", () => {
     document.querySelectorAll(".segment").forEach((item) => item.classList.remove("active"));
@@ -1057,6 +1181,18 @@ document.querySelectorAll(".nav-item").forEach((button) => {
 });
 
 document.addEventListener("change", (event) => {
+  const taskCheckbox = event.target.closest("[data-task-select]");
+  if (taskCheckbox) {
+    const taskId = String(taskCheckbox.dataset.taskSelect);
+    if (taskCheckbox.checked) {
+      state.selectedTaskIds.add(taskId);
+    } else {
+      state.selectedTaskIds.delete(taskId);
+    }
+    renderRows();
+    return;
+  }
+
   const input = event.target.closest("[data-role][data-permission]");
   if (!input || !hasPermission("rbac.manage")) return;
   const role = roles[input.dataset.role];
@@ -1079,9 +1215,14 @@ document.addEventListener("click", (event) => {
 
   const actionButton = event.target.closest("[data-action]");
   if (actionButton) {
-    const taskId = Number(actionButton.dataset.taskId);
+    const taskId = actionButton.dataset.taskId;
     const action = actionButton.dataset.action;
-    state.selectedId = taskId;
+    const task = tasks.find((item) => String(item.id) === String(taskId));
+    state.selectedId = task?.id || taskId;
+    if (action === "edit") {
+      openTaskEditor(taskId);
+      return;
+    }
     if (action === "run") {
       openBranchDialog(taskId);
       return;

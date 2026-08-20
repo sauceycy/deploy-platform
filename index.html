@@ -96,7 +96,7 @@
           <div class="topbar-actions">
             <label class="search-box">
               <i data-lucide="search"></i>
-              <input id="taskSearch" type="search" placeholder="搜索任务、仓库、负责人" />
+              <input id="taskSearch" type="search" placeholder="搜索任务、仓库、负责人、环境、语言、SDK" />
             </label>
             <button class="icon-button" type="button" title="刷新">
               <i data-lucide="refresh-cw"></i>
@@ -144,10 +144,15 @@
                   <i data-lucide="download"></i>
                   <span>导出</span>
                 </button>
+                <button class="ghost-button" id="batchDeploy" type="button" data-permission-required="task.deploy">
+                  <i data-lucide="rocket"></i>
+                  <span>批量发布</span>
+                </button>
               </div>
 
               <div class="task-table" role="table" aria-label="任务列表">
                 <div class="task-row table-head" role="row">
+                  <span><input id="selectAllTasks" type="checkbox" aria-label="全选任务" /></span>
                   <span>任务</span>
                   <span>语言 / SDK</span>
                   <span>仓库</span>
@@ -304,6 +309,7 @@
       </div>
 
       <form class="task-form" id="taskForm">
+        <input type="hidden" name="taskId" />
         <section class="form-section">
           <h3>基础信息</h3>
           <div class="form-grid">
