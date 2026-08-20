@@ -1,18 +1,21 @@
 # Deploy Platform Preview
 
-一个面向 Kubernetes 多集群发布的任务管理平台原型。
+一个面向 Kubernetes 多集群发布的任务管理平台 MVP。
 
-当前版本聚焦前端交互预览，覆盖以下核心需求：
+当前版本覆盖以下核心能力：
 
 - 创建发布任务
 - 登录鉴权
 - 角色权限管理
+- PostgreSQL 持久化
 - 配置仓库地址、分支、工作路径
 - 配置编译语言与 SDK 版本
 - 配置编译命令、端口、副本数、健康检查
 - 配置多集群部署目标
 - 配置告警通知事件与通知渠道
-- 查看任务列表、任务详情和配置预览
+- Worker 拉代码、编译、构建镜像、推送镜像
+- Agent 拉取部署任务并创建 Deployment / Service / Ingress
+- 查看任务列表、任务详情、执行日志和配置预览
 
 ## 初始账号
 
@@ -37,7 +40,13 @@ cd deploy-platform
 docker compose up -d --build
 ```
 
-配置数据会保存到：
+默认使用 PostgreSQL，数据会保存到：
+
+```text
+./postgres-data
+```
+
+如果不配置 `DATABASE_URL`，平台会 fallback 到 SQLite：
 
 ```text
 ./data/deploy-platform.sqlite3
@@ -48,6 +57,78 @@ docker compose up -d --build
 ```text
 http://localhost:8080
 ```
+
+## 镜像仓库
+
+真实发布到 Kubernetes 时，业务集群必须能拉取构建出的镜像。建议配置 Harbor 或其他镜像仓库：
+
+```bash
+export REGISTRY_URL=harbor.example.com
+export IMAGE_NAMESPACE=deploy-platform
+export REGISTRY_USERNAME='robot$deploy'
+export REGISTRY_PASSWORD='your-password'
+docker compose up -d --build
+```
+
+平台容器会挂载宿主机 Docker Socket：
+
+```text
+/var/run/docker.sock
+```
+
+用于执行 SDK 容器编译、Docker build 和 Docker push。
+
+如果你的 Docker Compose 不是在项目目录启动，显式设置宿主数据目录：
+
+```bash
+export HOST_DATA_DIR=/absolute/path/to/deploy-platform/data
+docker compose up -d --build
+```
+
+## Agent 部署
+
+1. 先在平台「集群管理」里添加集群，例如：
+
+```text
+集群名称：dev-01
+环境：dev
+namespace：default
+```
+
+2. 构建并推送平台镜像到你的镜像仓库。
+
+3. 修改 `k8s-agent.yaml`：
+
+```yaml
+image: your-registry.example.com/deploy-platform:latest
+PLATFORM_URL: http://你的平台地址:8080
+CLUSTER_NAME: dev-01
+AGENT_TOKEN: dev-agent-token
+```
+
+4. 在目标 Kubernetes 集群执行：
+
+```bash
+kubectl apply -f k8s-agent.yaml
+```
+
+Agent 会轮询平台的 `/api/agent/tasks`，收到发布任务后执行：
+
+```text
+kubectl apply -f manifest
+kubectl rollout status deployment/<app>
+```
+
+## 发布流程
+
+1. 添加集群
+2. 创建发布任务
+3. 填写仓库、分支、工作路径、语言、SDK、编译命令
+4. 绑定部署集群
+5. 点击发布
+6. 平台 Worker 拉代码、执行编译、构建镜像、推送镜像
+7. Agent 创建 Deployment、Service 和可选 Ingress
+8. 任务详情中查看执行日志
 
 停止：
 
@@ -67,7 +148,7 @@ docker compose ps
 docker compose logs -f deploy-platform-web
 ```
 
-备份配置数据库：
+备份 SQLite 配置数据库：
 
 ```bash
 cp data/deploy-platform.sqlite3 deploy-platform.sqlite3.bak
@@ -101,7 +182,7 @@ python3 -m http.server 8080
 http://localhost:8080
 ```
 
-## 后续实现方向
+## 后续增强方向
 
 平台后端建议拆分为：
 
@@ -109,7 +190,6 @@ http://localhost:8080
 - API Server
 - Build Worker
 - Cluster Agent
-- PostgreSQL
 - Redis
 - Harbor 或其他镜像仓库
 

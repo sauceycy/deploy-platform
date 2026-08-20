@@ -600,6 +600,19 @@ svg {
   color: var(--green);
 }
 
+.status-chip.pending,
+.status-chip.queued {
+  background: var(--surface-3);
+  color: var(--muted);
+}
+
+.status-chip.building,
+.status-chip.deploying,
+.status-chip.running {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
 .status-chip.partial {
   background: var(--amber-soft);
   color: var(--amber);
@@ -705,6 +718,21 @@ svg {
   margin-top: 3px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.log-box {
+  max-height: 220px;
+  margin-top: 10px;
+  overflow: auto;
+  white-space: pre-wrap;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111827;
+  color: #e5edf8;
+  padding: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .management-view {

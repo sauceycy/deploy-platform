@@ -71,6 +71,9 @@ const clusters = [];
 const buildTemplates = [];
 const notifyChannels = [];
 const auditLogs = [];
+const executions = [];
+const agentTasks = [];
+const agentHeartbeats = [];
 const clusterDrafts = [];
 const APP_STATE_KEY = "deploy-platform-state";
 
@@ -146,6 +149,9 @@ function exportState() {
     buildTemplates,
     notifyChannels,
     auditLogs,
+    executions,
+    agentTasks,
+    agentHeartbeats,
   };
 }
 
@@ -171,6 +177,9 @@ function hydrateState(nextState) {
   replaceArray(buildTemplates, nextState.buildTemplates);
   replaceArray(notifyChannels, nextState.notifyChannels);
   replaceArray(auditLogs, nextState.auditLogs);
+  replaceArray(executions, nextState.executions);
+  replaceArray(agentTasks, nextState.agentTasks);
+  replaceArray(agentHeartbeats, nextState.agentHeartbeats);
   state.selectedId = tasks[0]?.id || null;
 }
 
@@ -198,10 +207,15 @@ function persistState() {
 
 function statusLabel(status) {
   return {
+    pending: "待发布",
+    queued: "排队中",
+    building: "构建中",
+    deploying: "部署中",
+    running: "执行中",
     success: "部署成功",
     partial: "部分成功",
     failed: "部署失败",
-  }[status];
+  }[status] || status;
 }
 
 function languageLabel(language) {
@@ -301,6 +315,7 @@ function renderDetail() {
     `;
     return;
   }
+  const latestExecution = executions.find((execution) => String(execution.taskId) === String(task.id));
 
   detailPanel.innerHTML = `
     <div class="detail-title">
@@ -359,6 +374,20 @@ function renderDetail() {
         <span>目标</span><strong>${task.notify.target || "未设置"}</strong>
         <span>事件</span><strong>${task.notify.events.join("、") || "未设置"}</strong>
       </div>
+    </section>
+
+    <section class="detail-section">
+      <h3>最近执行</h3>
+      ${
+        latestExecution
+          ? `<div class="kv-grid">
+              <span>执行 ID</span><strong>${latestExecution.id}</strong>
+              <span>状态</span><strong>${statusLabel(latestExecution.status)}</strong>
+              <span>镜像</span><strong>${latestExecution.image || "未生成"}</strong>
+            </div>
+            <div class="log-box">${(latestExecution.logs || []).slice(-6).map((log) => `[${log.time}] ${log.message}`).join("\n")}</div>`
+          : `<div class="empty-state compact"><strong>暂无执行记录</strong><span>点击发布后会显示构建和部署日志。</span></div>`
+      }
     </section>
   `;
 }
@@ -651,7 +680,7 @@ function saveTask(event) {
     servicePort: preview.runtime.servicePort,
     replicas: preview.runtime.replicas,
     healthPath: preview.runtime.healthPath,
-    status: "success",
+    status: "pending",
     lastRun: "草稿",
     alerts: 0,
     clusters: preview.clusters.map((cluster) => ({ ...cluster, status: "success" })),
@@ -670,6 +699,28 @@ function renderConfigPreview() {
   const preview = buildPreviewObject();
   configPreview.textContent = JSON.stringify(preview, null, 2);
   configDialog.showModal();
+}
+
+async function refreshRemoteState() {
+  await loadPersistedState();
+  render();
+}
+
+async function runTask(taskId) {
+  if (!requirePermission("task.deploy")) return;
+  const response = await fetch(`/api/tasks/${taskId}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ actor: state.currentUser?.username || "system" }),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    window.alert(result.error || "发布请求失败");
+    return;
+  }
+  hydrateState(result.state);
+  render();
+  window.setTimeout(refreshRemoteState, 1500);
 }
 
 function saveCluster(event) {
@@ -980,14 +1031,10 @@ document.addEventListener("click", (event) => {
     const action = actionButton.dataset.action;
     state.selectedId = taskId;
     if (action === "run") {
-      if (!requirePermission("task.deploy")) return;
-      const task = tasks.find((item) => item.id === taskId);
-      task.lastRun = "刚刚";
-      task.status = task.status === "failed" ? "partial" : task.status;
-      addAudit("发布任务", task.name, "已触发");
+      runTask(taskId);
+      return;
     }
     render();
-    persistState();
   }
 
   const removeButton = event.target.closest("[data-remove-cluster]");

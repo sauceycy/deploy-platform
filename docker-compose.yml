@@ -8,6 +8,34 @@ services:
     ports:
       - "8080:80"
     environment:
+      DATABASE_URL: postgresql://deploy:deploy-password@postgres:5432/deploy_platform
       DEPLOY_PLATFORM_DB: /data/deploy-platform.sqlite3
+      DATA_DIR: /data
+      HOST_DATA_DIR: ${HOST_DATA_DIR:-${PWD}/data}
+      REGISTRY_URL: ${REGISTRY_URL:-}
+      IMAGE_NAMESPACE: ${IMAGE_NAMESPACE:-deploy-platform}
+      REGISTRY_USERNAME: ${REGISTRY_USERNAME:-}
+      REGISTRY_PASSWORD: ${REGISTRY_PASSWORD:-}
+      AGENT_SHARED_TOKEN: ${AGENT_SHARED_TOKEN:-dev-agent-token}
     volumes:
       - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: deploy-platform-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: deploy_platform
+      POSTGRES_USER: deploy
+      POSTGRES_PASSWORD: deploy-password
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deploy -d deploy_platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
