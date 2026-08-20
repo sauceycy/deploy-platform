@@ -107,6 +107,8 @@ const taskForm = document.getElementById("taskForm");
 const clusterEditor = document.getElementById("clusterEditor");
 const configDialog = document.getElementById("configDialog");
 const configPreview = document.getElementById("configPreview");
+const userDialog = document.getElementById("userDialog");
+const editUserForm = document.getElementById("editUserForm");
 
 function hasPermission(permission) {
   if (!state.currentUser) return false;
@@ -159,6 +161,12 @@ function channelLabel(type) {
     email: "邮件",
     webhook: "Webhook",
   }[type];
+}
+
+function roleOptions(selectedRole) {
+  return Object.entries(roles)
+    .map(([key, role]) => `<option value="${key}" ${key === selectedRole ? "selected" : ""}>${role.label}</option>`)
+    .join("");
 }
 
 function filteredTasks() {
@@ -402,16 +410,25 @@ function renderUserView() {
           <strong>${user.name}</strong>
           <span>${user.username}</span>
         </div>
-        <span class="role-chip">${roles[user.role].label}</span>
+        <div class="row-actions">
+          <span class="role-chip">${roles[user.role].label}</span>
+          <button class="ghost-button" type="button" data-user-action="edit" data-username="${user.username}" ${hasPermission("user.manage") ? "" : "disabled"}>
+            <i data-lucide="square-pen"></i>
+            <span>编辑</span>
+          </button>
+          <button class="ghost-button" type="button" data-user-action="password" data-username="${user.username}" ${hasPermission("user.manage") ? "" : "disabled"}>
+            <i data-lucide="key-round"></i>
+            <span>重置密码</span>
+          </button>
+        </div>
       </div>
     `,
     )
     .join("");
 
   const roleSelect = document.getElementById("newUserRole");
-  roleSelect.innerHTML = Object.entries(roles)
-    .map(([key, role]) => `<option value="${key}">${role.label}</option>`)
-    .join("");
+  roleSelect.innerHTML = roleOptions("developer");
+  document.getElementById("editUserRole").innerHTML = roleOptions();
 }
 
 function renderAuditView() {
@@ -670,6 +687,69 @@ function saveUser(event) {
   render();
 }
 
+function openUserDialog(username, mode = "edit") {
+  if (!requirePermission("user.manage")) return;
+  const user = users.find((item) => item.username === username);
+  if (!user) return;
+
+  editUserForm.elements.username.value = user.username;
+  editUserForm.elements.displayUsername.value = user.username;
+  editUserForm.elements.name.value = user.name;
+  editUserForm.elements.role.innerHTML = roleOptions(user.role);
+  editUserForm.elements.password.value = "";
+  userDialog.showModal();
+
+  if (mode === "password") {
+    window.setTimeout(() => editUserForm.elements.password.focus(), 0);
+  } else {
+    window.setTimeout(() => editUserForm.elements.name.focus(), 0);
+  }
+}
+
+function closeUserDialog() {
+  userDialog.close();
+  editUserForm.reset();
+}
+
+function saveEditedUser(event) {
+  event.preventDefault();
+  if (!requirePermission("user.manage")) return;
+
+  const formData = new FormData(editUserForm);
+  const username = formData.get("username");
+  const user = users.find((item) => item.username === username);
+  if (!user) return;
+
+  const nextRole = formData.get("role");
+  const platformAdminCount = users.filter((item) => item.role === "platform_admin").length;
+  if (user.role === "platform_admin" && nextRole !== "platform_admin" && platformAdminCount === 1) {
+    window.alert("至少需要保留一个平台管理员");
+    return;
+  }
+
+  const nextName = formData.get("name");
+  const nextPassword = formData.get("password");
+  const changedRole = user.role !== nextRole;
+  const changedName = user.name !== nextName;
+  const changedPassword = Boolean(nextPassword);
+
+  user.name = nextName;
+  user.role = nextRole;
+  if (changedPassword) user.password = nextPassword;
+
+  if (state.currentUser.username === user.username) {
+    state.currentUser.name = user.name;
+    state.currentUser.role = user.role;
+    window.localStorage.setItem("deploy-platform-user", JSON.stringify(state.currentUser));
+  }
+
+  if (changedName || changedRole) addAudit("编辑用户", username);
+  if (changedPassword) addAudit("重置密码", username);
+
+  closeUserDialog();
+  render();
+}
+
 const viewConfig = {
   tasks: { title: "发布任务", subtitle: "任务、集群、权限与审计" },
   clusters: { title: "集群管理", subtitle: "Agent 接入与部署目标", permission: "cluster.view" },
@@ -776,11 +856,14 @@ document.getElementById("closeCreate").addEventListener("click", closeDrawer);
 backdrop.addEventListener("click", closeDrawer);
 document.getElementById("previewYaml").addEventListener("click", renderConfigPreview);
 document.getElementById("closeConfig").addEventListener("click", () => configDialog.close());
+document.getElementById("closeUserDialog").addEventListener("click", closeUserDialog);
+document.getElementById("cancelUserEdit").addEventListener("click", closeUserDialog);
 taskForm.addEventListener("submit", saveTask);
 document.getElementById("clusterForm").addEventListener("submit", saveCluster);
 document.getElementById("templateForm").addEventListener("submit", saveTemplate);
 document.getElementById("channelForm").addEventListener("submit", saveChannel);
 document.getElementById("userForm").addEventListener("submit", saveUser);
+editUserForm.addEventListener("submit", saveEditedUser);
 
 languageSelect.addEventListener("change", (event) => {
   updateSdkOptions(event.target.value);
@@ -818,6 +901,12 @@ document.addEventListener("change", (event) => {
 });
 
 document.addEventListener("click", (event) => {
+  const userButton = event.target.closest("[data-user-action]");
+  if (userButton) {
+    openUserDialog(userButton.dataset.username, userButton.dataset.userAction);
+    return;
+  }
+
   const actionButton = event.target.closest("[data-action]");
   if (actionButton) {
     const taskId = Number(actionButton.dataset.taskId);

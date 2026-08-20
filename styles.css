@@ -1022,6 +1022,10 @@ svg {
   box-shadow: var(--shadow);
 }
 
+.form-dialog {
+  width: min(460px, 92vw);
+}
+
 .config-dialog::backdrop {
   background: rgba(16, 24, 40, 0.45);
 }
@@ -1037,6 +1041,23 @@ svg {
 .dialog-header h2 {
   margin: 0;
   font-size: 17px;
+}
+
+.dialog-form {
+  display: grid;
+  gap: 13px;
+  padding: 16px;
+}
+
+.dialog-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.dialog-form label span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 pre {

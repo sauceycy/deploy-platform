@@ -460,6 +460,43 @@
       <pre id="configPreview"></pre>
     </dialog>
 
+    <dialog class="config-dialog form-dialog" id="userDialog">
+      <div class="dialog-header">
+        <h2>编辑用户</h2>
+        <button class="icon-button" id="closeUserDialog" type="button" title="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <form class="dialog-form" id="editUserForm">
+        <input type="hidden" name="username" />
+        <label>
+          <span>登录账号</span>
+          <input name="displayUsername" disabled />
+        </label>
+        <label>
+          <span>姓名</span>
+          <input name="name" required />
+        </label>
+        <label>
+          <span>角色</span>
+          <select name="role" id="editUserRole"></select>
+        </label>
+        <label>
+          <span>重置密码</span>
+          <input name="password" type="password" placeholder="留空则不修改密码" />
+        </label>
+        <div class="drawer-actions">
+          <button class="ghost-button" type="button" id="cancelUserEdit">
+            <span>取消</span>
+          </button>
+          <button class="primary-button" type="submit">
+            <i data-lucide="save"></i>
+            <span>保存用户</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
     <script src="./app.js"></script>
   </body>
 </html>
