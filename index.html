@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>应用发布任务平台预览</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">CD</div>
+          <div>
+            <strong>Deploy Console</strong>
+            <span>应用发布任务平台</span>
+          </div>
+        </div>
+
+        <nav class="nav-list" aria-label="主导航">
+          <button class="nav-item active" type="button">
+            <i data-lucide="list-checks"></i>
+            <span>发布任务</span>
+          </button>
+          <button class="nav-item" type="button">
+            <i data-lucide="server-cog"></i>
+            <span>集群管理</span>
+          </button>
+          <button class="nav-item" type="button">
+            <i data-lucide="boxes"></i>
+            <span>构建模板</span>
+          </button>
+          <button class="nav-item" type="button">
+            <i data-lucide="bell-ring"></i>
+            <span>通知渠道</span>
+          </button>
+          <button class="nav-item" type="button">
+            <i data-lucide="shield-check"></i>
+            <span>权限审计</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <span>当前环境</span>
+          <strong>dev / test / prod</strong>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <h1>发布任务</h1>
+            <p>源码仓库到多集群 Kubernetes 服务的配置入口</p>
+          </div>
+          <div class="topbar-actions">
+            <label class="search-box">
+              <i data-lucide="search"></i>
+              <input id="taskSearch" type="search" placeholder="搜索任务、仓库、负责人" />
+            </label>
+            <button class="icon-button" type="button" title="刷新">
+              <i data-lucide="refresh-cw"></i>
+            </button>
+            <button class="primary-button" id="openCreate" type="button">
+              <i data-lucide="plus"></i>
+              <span>创建任务</span>
+            </button>
+          </div>
+        </header>
+
+        <section class="summary-strip" aria-label="任务概览">
+          <div class="metric">
+            <span>任务总数</span>
+            <strong id="metricTotal">0</strong>
+          </div>
+          <div class="metric">
+            <span>部署成功</span>
+            <strong id="metricSuccess">0</strong>
+          </div>
+          <div class="metric">
+            <span>部分成功</span>
+            <strong id="metricPartial">0</strong>
+          </div>
+          <div class="metric">
+            <span>告警中</span>
+            <strong id="metricAlerts">0</strong>
+          </div>
+        </section>
+
+        <section class="content-grid">
+          <div class="table-panel">
+            <div class="panel-header">
+              <div class="segmented" role="tablist" aria-label="任务状态筛选">
+                <button class="segment active" type="button" data-filter="all">全部</button>
+                <button class="segment" type="button" data-filter="success">成功</button>
+                <button class="segment" type="button" data-filter="partial">部分成功</button>
+                <button class="segment" type="button" data-filter="failed">失败</button>
+              </div>
+              <button class="ghost-button" type="button">
+                <i data-lucide="download"></i>
+                <span>导出</span>
+              </button>
+            </div>
+
+            <div class="task-table" role="table" aria-label="任务列表">
+              <div class="task-row table-head" role="row">
+                <span>任务</span>
+                <span>语言 / SDK</span>
+                <span>仓库</span>
+                <span>集群</span>
+                <span>状态</span>
+                <span>操作</span>
+              </div>
+              <div id="taskRows"></div>
+            </div>
+          </div>
+
+          <aside class="detail-panel" id="detailPanel" aria-label="任务详情"></aside>
+        </section>
+      </main>
+    </div>
+
+    <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+    <aside class="drawer" id="createDrawer" aria-label="创建任务" aria-hidden="true">
+      <div class="drawer-header">
+        <div>
+          <h2 id="drawerTitle">创建发布任务</h2>
+          <p>任务配置会作为构建和多集群部署的执行依据</p>
+        </div>
+        <button class="icon-button" id="closeCreate" type="button" title="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+
+      <form class="task-form" id="taskForm">
+        <section class="form-section">
+          <h3>基础信息</h3>
+          <div class="form-grid">
+            <label>
+              <span>任务名称</span>
+              <input name="name" required value="inventory-service" />
+            </label>
+            <label>
+              <span>负责人</span>
+              <input name="owner" required value="platform-team" />
+            </label>
+            <label>
+              <span>部署环境</span>
+              <select name="env">
+                <option>dev</option>
+                <option selected>test</option>
+                <option>staging</option>
+                <option>prod</option>
+              </select>
+            </label>
+            <label>
+              <span>业务标签</span>
+              <input name="tag" value="库存系统" />
+            </label>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <h3>仓库与构建</h3>
+          <div class="form-grid">
+            <label class="wide-field">
+              <span>仓库地址</span>
+              <input name="repo" required value="git@example.com:backend/inventory-service.git" />
+            </label>
+            <label>
+              <span>分支</span>
+              <input name="branch" required value="main" />
+            </label>
+            <label>
+              <span>工作路径</span>
+              <input name="workdir" required value="./inventory-service" />
+            </label>
+            <label>
+              <span>编译语言</span>
+              <select name="language" id="languageSelect">
+                <option value="java" selected>Java</option>
+                <option value="node">Node.js</option>
+                <option value="golang">Golang</option>
+                <option value="python">Python</option>
+              </select>
+            </label>
+            <label>
+              <span>SDK 版本</span>
+              <select name="sdk" id="sdkSelect"></select>
+            </label>
+            <label class="wide-field">
+              <span>编译命令</span>
+              <input name="buildCommand" required value="mvn clean package -DskipTests" />
+            </label>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <h3>运行配置</h3>
+          <div class="form-grid">
+            <label>
+              <span>容器端口</span>
+              <input name="containerPort" type="number" min="1" max="65535" required value="8080" />
+            </label>
+            <label>
+              <span>Service 端口</span>
+              <input name="servicePort" type="number" min="1" max="65535" required value="80" />
+            </label>
+            <label>
+              <span>副本数</span>
+              <input name="replicas" type="number" min="1" max="50" value="2" />
+            </label>
+            <label>
+              <span>健康检查</span>
+              <input name="healthPath" value="/actuator/health" />
+            </label>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <div class="section-title-row">
+            <h3>多集群部署</h3>
+            <button class="mini-button" id="addCluster" type="button">
+              <i data-lucide="plus"></i>
+              <span>添加集群</span>
+            </button>
+          </div>
+          <div class="cluster-editor" id="clusterEditor"></div>
+        </section>
+
+        <section class="form-section">
+          <h3>告警通知</h3>
+          <div class="notify-grid">
+            <label class="check-line">
+              <input type="checkbox" name="notifyBuildFail" checked />
+              <span>构建失败</span>
+            </label>
+            <label class="check-line">
+              <input type="checkbox" name="notifyDeployFail" checked />
+              <span>部署失败</span>
+            </label>
+            <label class="check-line">
+              <input type="checkbox" name="notifyHealthFail" checked />
+              <span>健康检查失败</span>
+            </label>
+            <label class="check-line">
+              <input type="checkbox" name="notifySuccess" />
+              <span>发布成功</span>
+            </label>
+          </div>
+          <div class="form-grid">
+            <label>
+              <span>通知渠道</span>
+              <select name="notifyChannel">
+                <option>企业微信</option>
+                <option>钉钉</option>
+                <option>飞书</option>
+                <option>邮件</option>
+                <option>Webhook</option>
+              </select>
+            </label>
+            <label class="wide-field">
+              <span>通知目标</span>
+              <input name="notifyTarget" value="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." />
+            </label>
+          </div>
+        </section>
+
+        <div class="drawer-actions">
+          <button class="ghost-button" id="previewYaml" type="button">
+            <i data-lucide="file-code-2"></i>
+            <span>预览配置</span>
+          </button>
+          <button class="primary-button" type="submit">
+            <i data-lucide="save"></i>
+            <span>保存任务</span>
+          </button>
+        </div>
+      </form>
+    </aside>
+
+    <dialog class="config-dialog" id="configDialog">
+      <div class="dialog-header">
+        <h2>任务配置预览</h2>
+        <button class="icon-button" id="closeConfig" type="button" title="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <pre id="configPreview"></pre>
+    </dialog>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
