@@ -200,7 +200,7 @@ function renderRows() {
   taskRows.innerHTML = rows
     .map(
       (task) => `
-      <div class="task-row" role="row" data-task-id="${task.id}">
+      <div class="task-row ${task.id === state.selectedId ? "selected" : ""}" role="row" data-task-id="${task.id}">
         <div class="task-main">
           <strong>${task.name}</strong>
           <span>${task.env} · ${task.owner} · ${task.lastRun}</span>
@@ -551,16 +551,16 @@ function setView(view) {
 
   if (view === "tasks") {
     pageTitle.textContent = "发布任务";
-    pageSubtitle.textContent = "源码仓库到多集群 Kubernetes 服务的配置入口";
+    pageSubtitle.textContent = "任务、集群、权限与审计";
   }
   if (view === "access") {
     pageTitle.textContent = "角色权限";
-    pageSubtitle.textContent = "管理用户角色、权限矩阵和操作边界";
+    pageSubtitle.textContent = "用户、角色与操作边界";
     renderAccessView();
   }
   if (view === "audit") {
     pageTitle.textContent = "权限审计";
-    pageSubtitle.textContent = "查看登录、发布、权限变更等关键操作记录";
+    pageSubtitle.textContent = "登录、发布与权限变更";
     renderAuditView();
   }
 }
