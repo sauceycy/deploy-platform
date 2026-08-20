@@ -1,0 +1,9 @@
+services:
+  deploy-platform-web:
+    build:
+      context: .
+    image: deploy-platform-preview:latest
+    container_name: deploy-platform-web
+    restart: unless-stopped
+    ports:
+      - "8080:80"

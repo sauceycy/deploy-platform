@@ -12,7 +12,46 @@
 - 配置告警通知事件与通知渠道
 - 查看任务列表、任务详情和配置预览
 
-## 本地预览
+## Docker 部署
+
+拉取代码：
+
+```bash
+git clone https://github.com/sauceycy/deploy-platform.git
+cd deploy-platform
+```
+
+启动：
+
+```bash
+docker compose up -d --build
+```
+
+访问：
+
+```text
+http://localhost:8080
+```
+
+停止：
+
+```bash
+docker compose down
+```
+
+查看状态：
+
+```bash
+docker compose ps
+```
+
+查看日志：
+
+```bash
+docker compose logs -f deploy-platform-web
+```
+
+## 直接本地预览
 
 直接用浏览器打开：
 
