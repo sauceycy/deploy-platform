@@ -8,7 +8,42 @@
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
   </head>
   <body>
-    <div class="app-shell">
+    <section class="login-screen" id="loginScreen">
+      <div class="login-panel">
+        <div class="brand login-brand">
+          <div class="brand-mark">CD</div>
+          <div>
+            <strong>Deploy Console</strong>
+            <span>应用发布任务平台</span>
+          </div>
+        </div>
+        <form class="login-form" id="loginForm">
+          <h1>登录控制台</h1>
+          <label>
+            <span>账号</span>
+            <input name="username" autocomplete="username" value="admin" required />
+          </label>
+          <label>
+            <span>密码</span>
+            <input name="password" type="password" autocomplete="current-password" value="admin123" required />
+          </label>
+          <p class="login-error" id="loginError" hidden>账号或密码不正确</p>
+          <button class="primary-button" type="submit">
+            <i data-lucide="log-in"></i>
+            <span>登录</span>
+          </button>
+          <div class="demo-accounts">
+            <strong>演示账号</strong>
+            <span>admin / admin123</span>
+            <span>developer / dev123</span>
+            <span>auditor / audit123</span>
+            <span>viewer / view123</span>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <div class="app-shell" id="appShell" hidden>
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-mark">CD</div>
@@ -19,39 +54,43 @@
         </div>
 
         <nav class="nav-list" aria-label="主导航">
-          <button class="nav-item active" type="button">
+          <button class="nav-item active" type="button" data-view="tasks" data-primary="true">
             <i data-lucide="list-checks"></i>
             <span>发布任务</span>
           </button>
-          <button class="nav-item" type="button">
+          <button class="nav-item" type="button" data-view="tasks">
             <i data-lucide="server-cog"></i>
             <span>集群管理</span>
           </button>
-          <button class="nav-item" type="button">
+          <button class="nav-item" type="button" data-view="tasks">
             <i data-lucide="boxes"></i>
             <span>构建模板</span>
           </button>
-          <button class="nav-item" type="button">
+          <button class="nav-item" type="button" data-view="tasks">
             <i data-lucide="bell-ring"></i>
             <span>通知渠道</span>
           </button>
-          <button class="nav-item" type="button">
+          <button class="nav-item" type="button" data-view="access" data-permission-required="rbac.view">
             <i data-lucide="shield-check"></i>
+            <span>角色权限</span>
+          </button>
+          <button class="nav-item" type="button" data-view="audit" data-permission-required="audit.view">
+            <i data-lucide="file-clock"></i>
             <span>权限审计</span>
           </button>
         </nav>
 
         <div class="sidebar-footer">
-          <span>当前环境</span>
-          <strong>dev / test / prod</strong>
+          <span id="currentUserRole">当前角色</span>
+          <strong id="currentUserName">未登录</strong>
         </div>
       </aside>
 
       <main class="main">
         <header class="topbar">
           <div>
-            <h1>发布任务</h1>
-            <p>源码仓库到多集群 Kubernetes 服务的配置入口</p>
+            <h1 id="pageTitle">发布任务</h1>
+            <p id="pageSubtitle">源码仓库到多集群 Kubernetes 服务的配置入口</p>
           </div>
           <div class="topbar-actions">
             <label class="search-box">
@@ -61,61 +100,104 @@
             <button class="icon-button" type="button" title="刷新">
               <i data-lucide="refresh-cw"></i>
             </button>
-            <button class="primary-button" id="openCreate" type="button">
+            <button class="primary-button" id="openCreate" type="button" data-permission-required="task.create">
               <i data-lucide="plus"></i>
               <span>创建任务</span>
+            </button>
+            <button class="icon-button" id="logoutButton" type="button" title="退出登录">
+              <i data-lucide="log-out"></i>
             </button>
           </div>
         </header>
 
-        <section class="summary-strip" aria-label="任务概览">
-          <div class="metric">
-            <span>任务总数</span>
-            <strong id="metricTotal">0</strong>
-          </div>
-          <div class="metric">
-            <span>部署成功</span>
-            <strong id="metricSuccess">0</strong>
-          </div>
-          <div class="metric">
-            <span>部分成功</span>
-            <strong id="metricPartial">0</strong>
-          </div>
-          <div class="metric">
-            <span>告警中</span>
-            <strong id="metricAlerts">0</strong>
+        <section id="taskView">
+          <section class="summary-strip" aria-label="任务概览">
+            <div class="metric">
+              <span>任务总数</span>
+              <strong id="metricTotal">0</strong>
+            </div>
+            <div class="metric">
+              <span>部署成功</span>
+              <strong id="metricSuccess">0</strong>
+            </div>
+            <div class="metric">
+              <span>部分成功</span>
+              <strong id="metricPartial">0</strong>
+            </div>
+            <div class="metric">
+              <span>告警中</span>
+              <strong id="metricAlerts">0</strong>
+            </div>
+          </section>
+
+          <section class="content-grid">
+            <div class="table-panel">
+              <div class="panel-header">
+                <div class="segmented" role="tablist" aria-label="任务状态筛选">
+                  <button class="segment active" type="button" data-filter="all">全部</button>
+                  <button class="segment" type="button" data-filter="success">成功</button>
+                  <button class="segment" type="button" data-filter="partial">部分成功</button>
+                  <button class="segment" type="button" data-filter="failed">失败</button>
+                </div>
+                <button class="ghost-button" type="button" data-permission-required="task.export">
+                  <i data-lucide="download"></i>
+                  <span>导出</span>
+                </button>
+              </div>
+
+              <div class="task-table" role="table" aria-label="任务列表">
+                <div class="task-row table-head" role="row">
+                  <span>任务</span>
+                  <span>语言 / SDK</span>
+                  <span>仓库</span>
+                  <span>集群</span>
+                  <span>状态</span>
+                  <span>操作</span>
+                </div>
+                <div id="taskRows"></div>
+              </div>
+            </div>
+
+            <aside class="detail-panel" id="detailPanel" aria-label="任务详情"></aside>
+          </section>
+        </section>
+
+        <section class="management-view" id="accessView" hidden>
+          <div class="management-grid">
+            <section class="management-panel">
+              <div class="panel-title">
+                <h2>角色权限矩阵</h2>
+                <span>勾选项由平台管理员维护</span>
+              </div>
+              <div id="accessBody"></div>
+            </section>
+            <section class="management-panel">
+              <div class="panel-title">
+                <h2>用户角色</h2>
+                <span>真实版本接入后端用户目录</span>
+              </div>
+              <div id="userBody"></div>
+            </section>
           </div>
         </section>
 
-        <section class="content-grid">
-          <div class="table-panel">
-            <div class="panel-header">
-              <div class="segmented" role="tablist" aria-label="任务状态筛选">
-                <button class="segment active" type="button" data-filter="all">全部</button>
-                <button class="segment" type="button" data-filter="success">成功</button>
-                <button class="segment" type="button" data-filter="partial">部分成功</button>
-                <button class="segment" type="button" data-filter="failed">失败</button>
-              </div>
-              <button class="ghost-button" type="button">
-                <i data-lucide="download"></i>
-                <span>导出</span>
-              </button>
+        <section class="management-view" id="auditView" hidden>
+          <section class="management-panel">
+            <div class="panel-title">
+              <h2>审计记录</h2>
+              <span>登录、发布、权限变更都应落库保存</span>
             </div>
-
-            <div class="task-table" role="table" aria-label="任务列表">
-              <div class="task-row table-head" role="row">
-                <span>任务</span>
-                <span>语言 / SDK</span>
-                <span>仓库</span>
-                <span>集群</span>
-                <span>状态</span>
-                <span>操作</span>
+            <div class="audit-table">
+              <div class="audit-row table-head">
+                <span>时间</span>
+                <span>操作人</span>
+                <span>动作</span>
+                <span>对象</span>
+                <span>结果</span>
               </div>
-              <div id="taskRows"></div>
+              <div id="auditBody"></div>
             </div>
-          </div>
-
-          <aside class="detail-panel" id="detailPanel" aria-label="任务详情"></aside>
+          </section>
         </section>
       </main>
     </div>
@@ -261,7 +343,7 @@
             </label>
             <label class="wide-field">
               <span>通知目标</span>
-              <input name="notifyTarget" value="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." />
+              <input name="notifyTarget" value="机器人：deploy-alerts" />
             </label>
           </div>
         </section>

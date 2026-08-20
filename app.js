@@ -12,6 +12,42 @@ const buildCommands = {
   python: "pip install -r requirements.txt",
 };
 
+const users = [
+  { username: "admin", password: "admin123", name: "平台管理员", role: "platform_admin" },
+  { username: "developer", password: "dev123", name: "开发人员", role: "developer" },
+  { username: "auditor", password: "audit123", name: "审计人员", role: "auditor" },
+  { username: "viewer", password: "view123", name: "只读用户", role: "viewer" },
+];
+
+const roles = {
+  platform_admin: {
+    label: "平台管理员",
+    permissions: ["task.view", "task.create", "task.deploy", "task.export", "rbac.view", "rbac.manage", "audit.view"],
+  },
+  developer: {
+    label: "开发人员",
+    permissions: ["task.view", "task.create", "task.deploy"],
+  },
+  auditor: {
+    label: "审计人员",
+    permissions: ["task.view", "rbac.view", "audit.view"],
+  },
+  viewer: {
+    label: "只读用户",
+    permissions: ["task.view"],
+  },
+};
+
+const permissionCatalog = [
+  { key: "task.view", label: "查看任务" },
+  { key: "task.create", label: "创建任务" },
+  { key: "task.deploy", label: "执行发布" },
+  { key: "task.export", label: "导出配置" },
+  { key: "rbac.view", label: "查看权限" },
+  { key: "rbac.manage", label: "管理角色" },
+  { key: "audit.view", label: "查看审计" },
+];
+
 const tasks = [
   {
     id: 1,
@@ -19,7 +55,7 @@ const tasks = [
     owner: "backend-team",
     env: "prod",
     tag: "订单系统",
-    repo: "git@example.com:backend/order-service.git",
+    repo: "ssh://git.example.internal/backend/order-service.git",
     branch: "release/2026.08",
     workdir: "./order-service",
     language: "java",
@@ -33,12 +69,12 @@ const tasks = [
     lastRun: "2026-08-20 12:18",
     alerts: 0,
     clusters: [
-      { name: "shanghai-prod", namespace: "order", replicas: 3, ingress: "order.example.com", status: "success" },
-      { name: "beijing-prod", namespace: "order", replicas: 3, ingress: "order-bj.example.com", status: "success" },
+      { name: "shanghai-prod", namespace: "order", replicas: 3, ingress: "order.example.internal", status: "success" },
+      { name: "beijing-prod", namespace: "order", replicas: 3, ingress: "order-bj.example.internal", status: "success" },
     ],
     notify: {
       channel: "企业微信",
-      target: "订单发布群",
+      target: "机器人：deploy-alerts",
       events: ["构建失败", "部署失败", "健康检查失败"],
     },
   },
@@ -48,7 +84,7 @@ const tasks = [
     owner: "pay-team",
     env: "prod",
     tag: "支付网关",
-    repo: "git@example.com:payment/gateway.git",
+    repo: "ssh://git.example.internal/payment/gateway.git",
     branch: "main",
     workdir: ".",
     language: "golang",
@@ -62,84 +98,47 @@ const tasks = [
     lastRun: "2026-08-20 11:56",
     alerts: 1,
     clusters: [
-      { name: "shanghai-prod", namespace: "payment", replicas: 4, ingress: "pay.example.com", status: "success" },
-      { name: "singapore-prod", namespace: "payment", replicas: 2, ingress: "pay-sg.example.com", status: "failed" },
+      { name: "shanghai-prod", namespace: "payment", replicas: 4, ingress: "pay.example.internal", status: "success" },
+      { name: "singapore-prod", namespace: "payment", replicas: 2, ingress: "pay-sg.example.internal", status: "failed" },
     ],
     notify: {
       channel: "飞书",
-      target: "支付 SRE 群",
+      target: "群组：payment-sre",
       events: ["部署失败", "健康检查失败", "发布成功"],
     },
   },
-  {
-    id: 3,
-    name: "admin-console",
-    owner: "frontend-team",
-    env: "test",
-    tag: "运营后台",
-    repo: "git@example.com:web/admin-console.git",
-    branch: "develop",
-    workdir: ".",
-    language: "node",
-    sdk: "node22",
-    buildCommand: "pnpm install --frozen-lockfile && pnpm build",
-    containerPort: 3000,
-    servicePort: 80,
-    replicas: 2,
-    healthPath: "/",
-    status: "success",
-    lastRun: "2026-08-20 10:42",
-    alerts: 0,
-    clusters: [
-      { name: "test-01", namespace: "console", replicas: 2, ingress: "admin-test.example.com", status: "success" },
-    ],
-    notify: {
-      channel: "钉钉",
-      target: "前端发布群",
-      events: ["构建失败", "部署失败"],
-    },
-  },
-  {
-    id: 4,
-    name: "risk-worker",
-    owner: "risk-team",
-    env: "dev",
-    tag: "风控任务",
-    repo: "git@example.com:risk/risk-worker.git",
-    branch: "feature/model-sync",
-    workdir: "./worker",
-    language: "python",
-    sdk: "python3.11",
-    buildCommand: "pip install -r requirements.txt",
-    containerPort: 8088,
-    servicePort: 8088,
-    replicas: 1,
-    healthPath: "/ready",
-    status: "failed",
-    lastRun: "2026-08-20 09:33",
-    alerts: 2,
-    clusters: [
-      { name: "dev-01", namespace: "risk", replicas: 1, ingress: "risk-worker-dev.example.com", status: "failed" },
-    ],
-    notify: {
-      channel: "Webhook",
-      target: "https://hooks.example.com/risk",
-      events: ["构建失败", "部署失败", "健康检查失败"],
-    },
-  },
+];
+
+const auditLogs = [
+  { time: "2026-08-20 12:18", actor: "admin", action: "发布任务", target: "order-service / shanghai-prod", result: "成功" },
+  { time: "2026-08-20 11:56", actor: "developer", action: "发布任务", target: "payment-gateway / singapore-prod", result: "失败" },
+  { time: "2026-08-20 10:40", actor: "admin", action: "更新角色", target: "developer", result: "成功" },
 ];
 
 const clusterDrafts = [
-  { name: "test-01", namespace: "inventory", replicas: 2, ingress: "inventory-test.example.com" },
-  { name: "shanghai-prod", namespace: "inventory", replicas: 3, ingress: "inventory.example.com" },
+  { name: "test-01", namespace: "inventory", replicas: 2, ingress: "inventory-test.example.internal" },
+  { name: "shanghai-prod", namespace: "inventory", replicas: 3, ingress: "inventory.example.internal" },
 ];
 
 const state = {
+  currentUser: null,
   selectedId: tasks[0].id,
   filter: "all",
   search: "",
+  view: "tasks",
 };
 
+const loginScreen = document.getElementById("loginScreen");
+const loginForm = document.getElementById("loginForm");
+const loginError = document.getElementById("loginError");
+const appShell = document.getElementById("appShell");
+const pageTitle = document.getElementById("pageTitle");
+const pageSubtitle = document.getElementById("pageSubtitle");
+const currentUserName = document.getElementById("currentUserName");
+const currentUserRole = document.getElementById("currentUserRole");
+const taskView = document.getElementById("taskView");
+const accessView = document.getElementById("accessView");
+const auditView = document.getElementById("auditView");
 const taskRows = document.getElementById("taskRows");
 const detailPanel = document.getElementById("detailPanel");
 const taskSearch = document.getElementById("taskSearch");
@@ -151,6 +150,17 @@ const taskForm = document.getElementById("taskForm");
 const clusterEditor = document.getElementById("clusterEditor");
 const configDialog = document.getElementById("configDialog");
 const configPreview = document.getElementById("configPreview");
+
+function hasPermission(permission) {
+  if (!state.currentUser) return false;
+  return roles[state.currentUser.role].permissions.includes(permission);
+}
+
+function requirePermission(permission) {
+  if (hasPermission(permission)) return true;
+  window.alert("当前角色没有该操作权限");
+  return false;
+}
 
 function statusLabel(status) {
   return {
@@ -214,7 +224,7 @@ function renderRows() {
             <i data-lucide="panel-right-open"></i>
             <span>详情</span>
           </button>
-          <button class="ghost-button" type="button" data-action="run" data-task-id="${task.id}">
+          <button class="ghost-button" type="button" data-action="run" data-task-id="${task.id}" ${hasPermission("task.deploy") ? "" : "disabled"}>
             <i data-lucide="rocket"></i>
             <span>发布</span>
           </button>
@@ -224,7 +234,7 @@ function renderRows() {
     )
     .join("");
   if (rows.length === 0) {
-    taskRows.innerHTML = `<div class="task-row"><span class="muted">没有匹配的任务</span></div>`;
+    taskRows.innerHTML = `<div class="empty-row">没有匹配的任务</div>`;
   }
   lucide.createIcons();
 }
@@ -295,6 +305,68 @@ function renderDetail() {
   `;
 }
 
+function renderAccessView() {
+  const accessBody = document.getElementById("accessBody");
+  accessBody.innerHTML = Object.entries(roles)
+    .map(
+      ([roleKey, role]) => `
+      <div class="role-row">
+        <div>
+          <strong>${role.label}</strong>
+          <span>${roleKey}</span>
+        </div>
+        <div class="permission-list">
+          ${permissionCatalog
+            .map(
+              (permission) => `
+              <label class="permission-item">
+                <input type="checkbox" data-role="${roleKey}" data-permission="${permission.key}" ${role.permissions.includes(permission.key) ? "checked" : ""} ${
+                  hasPermission("rbac.manage") ? "" : "disabled"
+                } />
+                <span>${permission.label}</span>
+              </label>
+            `,
+            )
+            .join("")}
+        </div>
+      </div>
+    `,
+    )
+    .join("");
+
+  const userBody = document.getElementById("userBody");
+  userBody.innerHTML = users
+    .map(
+      (user) => `
+      <div class="user-row">
+        <div>
+          <strong>${user.name}</strong>
+          <span>${user.username}</span>
+        </div>
+        <span class="role-chip">${roles[user.role].label}</span>
+      </div>
+    `,
+    )
+    .join("");
+}
+
+function renderAuditView() {
+  const auditBody = document.getElementById("auditBody");
+  auditBody.innerHTML = auditLogs
+    .map(
+      (log) => `
+      <div class="audit-row">
+        <span>${log.time}</span>
+        <strong>${log.actor}</strong>
+        <span>${log.action}</span>
+        <span>${log.target}</span>
+        <span>${log.result}</span>
+      </div>
+    `,
+    )
+    .join("");
+}
+
 function renderClusters() {
   clusterEditor.innerHTML = clusterDrafts
     .map(
@@ -338,6 +410,7 @@ function updateSdkOptions(language) {
 }
 
 function openDrawer() {
+  if (!requirePermission("task.create")) return;
   backdrop.hidden = false;
   drawer.classList.add("open");
   drawer.setAttribute("aria-hidden", "false");
@@ -413,6 +486,7 @@ function buildPreviewObject() {
 
 function saveTask(event) {
   event.preventDefault();
+  if (!requirePermission("task.create")) return;
   const preview = buildPreviewObject();
   const newTask = {
     id: Date.now(),
@@ -437,23 +511,118 @@ function saveTask(event) {
     notify: preview.notify,
   };
   tasks.unshift(newTask);
+  auditLogs.unshift({
+    time: "刚刚",
+    actor: state.currentUser.username,
+    action: "创建任务",
+    target: newTask.name,
+    result: "成功",
+  });
   state.selectedId = newTask.id;
   render();
   closeDrawer();
 }
 
 function renderConfigPreview() {
+  if (!requirePermission("task.export")) return;
   const preview = buildPreviewObject();
   configPreview.textContent = JSON.stringify(preview, null, 2);
   configDialog.showModal();
 }
 
+function setView(view) {
+  if (view === "access" && !hasPermission("rbac.view")) {
+    window.alert("当前角色没有查看角色权限");
+    view = "tasks";
+  }
+  if (view === "audit" && !hasPermission("audit.view")) {
+    window.alert("当前角色没有查看审计权限");
+    view = "tasks";
+  }
+
+  state.view = view;
+  taskView.hidden = view !== "tasks";
+  accessView.hidden = view !== "access";
+  auditView.hidden = view !== "audit";
+
+  document.querySelectorAll(".nav-item").forEach((item) => {
+    item.classList.toggle("active", item.dataset.view === view && (view !== "tasks" || item.dataset.primary === "true"));
+  });
+
+  if (view === "tasks") {
+    pageTitle.textContent = "发布任务";
+    pageSubtitle.textContent = "源码仓库到多集群 Kubernetes 服务的配置入口";
+  }
+  if (view === "access") {
+    pageTitle.textContent = "角色权限";
+    pageSubtitle.textContent = "管理用户角色、权限矩阵和操作边界";
+    renderAccessView();
+  }
+  if (view === "audit") {
+    pageTitle.textContent = "权限审计";
+    pageSubtitle.textContent = "查看登录、发布、权限变更等关键操作记录";
+    renderAuditView();
+  }
+}
+
+function renderAuth() {
+  const isAuthed = Boolean(state.currentUser);
+  loginScreen.hidden = isAuthed;
+  appShell.hidden = !isAuthed;
+  if (!isAuthed) return;
+
+  currentUserName.textContent = state.currentUser.name;
+  currentUserRole.textContent = roles[state.currentUser.role].label;
+  document.querySelectorAll("[data-permission-required]").forEach((element) => {
+    const permission = element.dataset.permissionRequired;
+    element.disabled = !hasPermission(permission);
+  });
+  document.querySelectorAll(".nav-item").forEach((item) => {
+    const permission = item.dataset.permissionRequired;
+    item.hidden = permission ? !hasPermission(permission) : false;
+  });
+}
+
 function render() {
+  renderAuth();
+  if (!state.currentUser) {
+    lucide.createIcons();
+    return;
+  }
   renderMetrics();
   renderRows();
   renderDetail();
+  if (state.view === "access") renderAccessView();
+  if (state.view === "audit") renderAuditView();
+  lucide.createIcons();
 }
 
+function login(event) {
+  event.preventDefault();
+  const formData = new FormData(loginForm);
+  const username = formData.get("username");
+  const password = formData.get("password");
+  const user = users.find((item) => item.username === username && item.password === password);
+  if (!user) {
+    loginError.hidden = false;
+    return;
+  }
+  state.currentUser = { username: user.username, name: user.name, role: user.role };
+  window.localStorage.setItem("deploy-platform-user", JSON.stringify(state.currentUser));
+  loginError.hidden = true;
+  setView("tasks");
+  render();
+}
+
+function logout() {
+  window.localStorage.removeItem("deploy-platform-user");
+  state.currentUser = null;
+  closeDrawer();
+  renderAuth();
+}
+
+loginForm.addEventListener("submit", login);
+document.getElementById("logoutButton").addEventListener("click", logout);
 document.getElementById("openCreate").addEventListener("click", openDrawer);
 document.getElementById("closeCreate").addEventListener("click", closeDrawer);
 backdrop.addEventListener("click", closeDrawer);
@@ -479,6 +648,29 @@ document.querySelectorAll(".segment").forEach((button) => {
   });
 });
 
+document.querySelectorAll(".nav-item").forEach((button) => {
+  button.addEventListener("click", () => setView(button.dataset.view));
+});
+
+document.addEventListener("change", (event) => {
+  const input = event.target.closest("[data-role][data-permission]");
+  if (!input || !hasPermission("rbac.manage")) return;
+  const role = roles[input.dataset.role];
+  if (input.checked) {
+    role.permissions = Array.from(new Set([...role.permissions, input.dataset.permission]));
+  } else {
+    role.permissions = role.permissions.filter((permission) => permission !== input.dataset.permission);
+  }
+  auditLogs.unshift({
+    time: "刚刚",
+    actor: state.currentUser.username,
+    action: "更新角色",
+    target: `${role.label} / ${input.dataset.permission}`,
+    result: "成功",
+  });
+  render();
+});
+
 document.addEventListener("click", (event) => {
   const actionButton = event.target.closest("[data-action]");
   if (actionButton) {
@@ -486,9 +678,17 @@ document.addEventListener("click", (event) => {
     const action = actionButton.dataset.action;
     state.selectedId = taskId;
     if (action === "run") {
+      if (!requirePermission("task.deploy")) return;
       const task = tasks.find((item) => item.id === taskId);
       task.lastRun = "刚刚";
       task.status = task.status === "failed" ? "partial" : task.status;
+      auditLogs.unshift({
+        time: "刚刚",
+        actor: state.currentUser.username,
+        action: "发布任务",
+        target: task.name,
+        result: "已触发",
+      });
     }
     render();
   }
@@ -507,12 +707,19 @@ document.getElementById("addCluster").addEventListener("click", () => {
     name: "dev-01",
     namespace: "default",
     replicas: 1,
-    ingress: "service-dev.example.com",
+    ingress: "service-dev.example.internal",
   });
   renderClusters();
 });
 
+const savedUser = window.localStorage.getItem("deploy-platform-user");
+if (savedUser) {
+  const parsedUser = JSON.parse(savedUser);
+  if (users.some((user) => user.username === parsedUser.username)) {
+    state.currentUser = parsedUser;
+  }
+}
+
 updateSdkOptions(languageSelect.value);
 renderClusters();
 render();
-lucide.createIcons();
