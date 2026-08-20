@@ -232,6 +232,18 @@ def run_command(args, cwd=None, input_text=None):
     return process.returncode, process.stdout
 
 
+def list_repository_branches(repo):
+    code, output = run_command(["git", "ls-remote", "--heads", repo])
+    if code != 0:
+        raise RuntimeError(output.strip() or "读取仓库分支失败")
+    branches = []
+    for line in output.splitlines():
+        if "refs/heads/" not in line:
+            continue
+        branches.append(line.split("refs/heads/", 1)[1].strip())
+    return sorted(set(branches))
+
+
 def generate_dockerfile(task, app_dir):
     existing = app_dir / "Dockerfile"
     if existing.exists():
@@ -421,7 +433,10 @@ def build_and_dispatch(execution_id):
             shutil.rmtree(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
 
-        clone_cmd = ["git", "clone", "--depth", "1", "--branch", task.get("branch") or "main", task["repo"], str(src_dir)]
+        branch = execution.get("branch")
+        if not branch:
+            raise RuntimeError("未选择发布分支")
+        clone_cmd = ["git", "clone", "--depth", "1", "--branch", branch, task["repo"], str(src_dir)]
         code, output = run_command(clone_cmd)
         append_log(execution_id, output)
         if code != 0:
@@ -484,16 +499,19 @@ def build_and_dispatch(execution_id):
         send_notification(task, "BUILD_FAILED", str(exc))
 
 
-def create_execution(task_id, actor):
+def create_execution(task_id, actor, branch):
     def update(state):
         task = find_by_id(state["tasks"], task_id)
         if not task:
             raise ValueError("任务不存在")
+        if not branch:
+            raise ValueError("请选择发布分支")
         execution_id = uuid.uuid4().hex[:12]
         execution = {
             "id": execution_id,
             "taskId": task["id"],
             "taskName": task["name"],
+            "branch": branch,
             "actor": actor or "system",
             "status": "queued",
             "image": "",
@@ -505,7 +523,8 @@ def create_execution(task_id, actor):
         state["executions"].insert(0, execution)
         task["status"] = "queued"
         task["lastRun"] = now_text()
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "触发发布", "target": task["name"], "result": "已入队"})
+        task["lastBranch"] = branch
+        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "触发发布", "target": f"{task['name']} / {branch}", "result": "已入队"})
         return execution
 
     execution, state = mutate_state(update)
@@ -600,11 +619,20 @@ class Handler(SimpleHTTPRequestHandler):
         if match:
             body = self.read_json_body()
             try:
-                execution, state = create_execution(match.group(1), body.get("actor"))
+                execution, state = create_execution(match.group(1), body.get("actor"), body.get("branch"))
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
             self.send_json({"execution": execution, "state": state})
+            return
+        if parsed.path == "/api/repositories/branches":
+            body = self.read_json_body()
+            try:
+                branches = list_repository_branches(body.get("repo") or "")
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"branches": branches})
             return
         match = re.match(r"^/api/agent/tasks/([^/]+)/result$", parsed.path)
         if match:

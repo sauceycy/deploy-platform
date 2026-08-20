@@ -113,6 +113,11 @@ const configDialog = document.getElementById("configDialog");
 const configPreview = document.getElementById("configPreview");
 const userDialog = document.getElementById("userDialog");
 const editUserForm = document.getElementById("editUserForm");
+const branchDialog = document.getElementById("branchDialog");
+const branchForm = document.getElementById("branchForm");
+const branchSelect = document.getElementById("branchSelect");
+const branchStatus = document.getElementById("branchStatus");
+const confirmBranchDeploy = document.getElementById("confirmBranchDeploy");
 
 function hasPermission(permission) {
   if (!state.currentUser) return false;
@@ -279,7 +284,7 @@ function renderRows() {
         </div>
         <div class="repo-cell">
           <strong>${task.repo}</strong>
-          <span>${task.branch} · ${task.workdir}</span>
+          <span>${task.workdir} · ${task.lastBranch ? `最近发布 ${task.lastBranch}` : "发布时选择分支"}</span>
         </div>
         <div>
           <strong>${task.clusters.length} 个集群</strong>
@@ -330,7 +335,7 @@ function renderDetail() {
       <h3>构建配置</h3>
       <div class="kv-grid">
         <span>仓库</span><strong>${task.repo}</strong>
-        <span>分支</span><strong>${task.branch}</strong>
+        <span>最近分支</span><strong>${task.lastBranch || "未发布"}</strong>
         <span>工作路径</span><strong>${task.workdir}</strong>
         <span>语言</span><strong>${languageLabel(task.language)}</strong>
         <span>SDK</span><strong>${task.sdk}</strong>
@@ -382,6 +387,7 @@ function renderDetail() {
         latestExecution
           ? `<div class="kv-grid">
               <span>执行 ID</span><strong>${latestExecution.id}</strong>
+              <span>分支</span><strong>${latestExecution.branch || "未记录"}</strong>
               <span>状态</span><strong>${statusLabel(latestExecution.status)}</strong>
               <span>镜像</span><strong>${latestExecution.image || "未生成"}</strong>
             </div>
@@ -637,7 +643,6 @@ function buildPreviewObject() {
     },
     repository: {
       url: formValue("repo"),
-      branch: formValue("branch"),
       workdir: formValue("workdir"),
     },
     build: {
@@ -671,7 +676,8 @@ function saveTask(event) {
     env: preview.task.env,
     tag: preview.task.tag,
     repo: preview.repository.url,
-    branch: preview.repository.branch,
+    branch: "",
+    lastBranch: "",
     workdir: preview.repository.workdir,
     language: preview.build.language,
     sdk: preview.build.sdk,
@@ -706,12 +712,51 @@ async function refreshRemoteState() {
   render();
 }
 
-async function runTask(taskId) {
+async function openBranchDialog(taskId) {
+  if (!requirePermission("task.deploy")) return;
+  const task = tasks.find((item) => String(item.id) === String(taskId));
+  if (!task) return;
+
+  branchForm.elements.taskId.value = task.id;
+  branchForm.elements.taskName.value = task.name;
+  branchSelect.innerHTML = "";
+  branchSelect.disabled = true;
+  confirmBranchDeploy.disabled = true;
+  branchStatus.textContent = "正在读取仓库分支...";
+  branchDialog.showModal();
+
+  try {
+    const response = await fetch("/api/repositories/branches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repo: task.repo }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "读取仓库分支失败");
+    if (!result.branches.length) throw new Error("仓库没有可发布分支");
+    branchSelect.innerHTML = result.branches.map((branch) => `<option value="${branch}">${branch}</option>`).join("");
+    if (task.lastBranch && result.branches.includes(task.lastBranch)) {
+      branchSelect.value = task.lastBranch;
+    }
+    branchSelect.disabled = false;
+    confirmBranchDeploy.disabled = false;
+    branchStatus.textContent = `已读取 ${result.branches.length} 个分支`;
+  } catch (error) {
+    branchStatus.textContent = error.message;
+  }
+}
+
+function closeBranchDialog() {
+  branchDialog.close();
+  branchForm.reset();
+}
+
+async function runTask(taskId, branch) {
   if (!requirePermission("task.deploy")) return;
   const response = await fetch(`/api/tasks/${taskId}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ actor: state.currentUser?.username || "system" }),
+    body: JSON.stringify({ actor: state.currentUser?.username || "system", branch }),
   });
   const result = await response.json();
   if (!response.ok) {
@@ -720,6 +765,7 @@ async function runTask(taskId) {
   }
   hydrateState(result.state);
   render();
+  closeBranchDialog();
   window.setTimeout(refreshRemoteState, 1500);
 }
 
@@ -975,12 +1021,18 @@ document.getElementById("previewYaml").addEventListener("click", renderConfigPre
 document.getElementById("closeConfig").addEventListener("click", () => configDialog.close());
 document.getElementById("closeUserDialog").addEventListener("click", closeUserDialog);
 document.getElementById("cancelUserEdit").addEventListener("click", closeUserDialog);
+document.getElementById("closeBranchDialog").addEventListener("click", closeBranchDialog);
+document.getElementById("cancelBranchSelect").addEventListener("click", closeBranchDialog);
 taskForm.addEventListener("submit", saveTask);
 document.getElementById("clusterForm").addEventListener("submit", saveCluster);
 document.getElementById("templateForm").addEventListener("submit", saveTemplate);
 document.getElementById("channelForm").addEventListener("submit", saveChannel);
 document.getElementById("userForm").addEventListener("submit", saveUser);
 editUserForm.addEventListener("submit", saveEditedUser);
+branchForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  runTask(branchForm.elements.taskId.value, branchForm.elements.branch.value);
+});
 
 languageSelect.addEventListener("change", (event) => {
   updateSdkOptions(event.target.value);
@@ -1031,7 +1083,7 @@ document.addEventListener("click", (event) => {
     const action = actionButton.dataset.action;
     state.selectedId = taskId;
     if (action === "run") {
-      runTask(taskId);
+      openBranchDialog(taskId);
       return;
     }
     render();

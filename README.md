@@ -123,9 +123,9 @@ kubectl rollout status deployment/<app>
 
 1. 添加集群
 2. 创建发布任务
-3. 填写仓库、分支、工作路径、语言、SDK、编译命令
+3. 填写仓库、工作路径、语言、SDK、编译命令
 4. 绑定部署集群
-5. 点击发布
+5. 点击发布，平台实时读取仓库分支并弹窗选择发布分支
 6. 平台 Worker 拉代码、执行编译、构建镜像、推送镜像
 7. Agent 创建 Deployment、Service 和可选 Ingress
 8. 任务详情中查看执行日志

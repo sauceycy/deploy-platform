@@ -1088,6 +1088,12 @@ svg {
   font-weight: 700;
 }
 
+.form-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 pre {
   max-height: 62vh;
   margin: 0;

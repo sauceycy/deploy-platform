@@ -339,10 +339,6 @@
               <input name="repo" required placeholder="git@example.com:group/project.git" />
             </label>
             <label>
-              <span>分支</span>
-              <input name="branch" required placeholder="main" />
-            </label>
-            <label>
               <span>工作路径</span>
               <input name="workdir" required placeholder="." />
             </label>
@@ -492,6 +488,36 @@
           <button class="primary-button" type="submit">
             <i data-lucide="save"></i>
             <span>保存用户</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="config-dialog form-dialog" id="branchDialog">
+      <div class="dialog-header">
+        <h2>选择发布分支</h2>
+        <button class="icon-button" id="closeBranchDialog" type="button" title="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <form class="dialog-form" id="branchForm">
+        <input type="hidden" name="taskId" />
+        <label>
+          <span>任务</span>
+          <input name="taskName" disabled />
+        </label>
+        <label>
+          <span>分支</span>
+          <select name="branch" id="branchSelect" required></select>
+        </label>
+        <p class="form-hint" id="branchStatus">正在读取仓库分支...</p>
+        <div class="drawer-actions">
+          <button class="ghost-button" type="button" id="cancelBranchSelect">
+            <span>取消</span>
+          </button>
+          <button class="primary-button" type="submit" id="confirmBranchDeploy">
+            <i data-lucide="rocket"></i>
+            <span>发布</span>
           </button>
         </div>
       </form>
