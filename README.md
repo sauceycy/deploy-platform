@@ -8,6 +8,7 @@
 - 编辑发布任务配置
 - 按任务名、仓库、负责人、环境、语言、SDK、工作路径、最近分支关键字搜索任务
 - 勾选多个任务后批量发布
+- 为单个任务创建定时发布计划，到点后自动进入发布队列
 - 登录鉴权
 - 角色权限管理
 - PostgreSQL 持久化
@@ -18,6 +19,7 @@
 - 配置告警通知事件与通知渠道
 - Worker 拉代码、编译、构建镜像、推送镜像
 - Agent 拉取部署任务并创建 Deployment / Service / Ingress
+- 服务端调度线程扫描定时发布计划并触发 Worker
 - 查看任务列表、任务详情、执行日志和配置预览
 
 ## 初始账号
@@ -47,6 +49,12 @@ docker compose up -d --build
 
 ```text
 ./postgres-data
+```
+
+定时发布默认按容器时区执行，Docker Compose 已默认设置：
+
+```text
+TZ=Asia/Shanghai
 ```
 
 如果不配置 `DATABASE_URL`，平台会 fallback 到 SQLite：
@@ -130,10 +138,32 @@ kubectl rollout status deployment/<app>
 4. 绑定部署集群
 5. 后续可在任务列表点击「编辑」调整任务配置
 6. 可通过关键字搜索定位任务，也可勾选多个任务点击「批量发布」
-7. 点击发布或批量发布后，平台实时读取每个仓库分支并弹窗选择发布分支
-8. 平台 Worker 拉代码、执行编译、构建镜像、推送镜像
-9. Agent 创建 Deployment、Service 和可选 Ingress
-10. 任务详情中查看执行日志
+7. 批量发布会一次性展示所选任务，并为每个任务读取仓库分支后提交到后端批量入队
+8. 单个任务可点击「定时」选择分支和执行时间，平台服务端到点后自动触发发布
+9. 平台 Worker 拉代码、执行编译、构建镜像、推送镜像
+10. Agent 创建 Deployment、Service 和可选 Ingress
+11. 任务详情中查看执行日志和待执行定时发布
+
+## 发布接口
+
+单任务发布：
+
+```text
+POST /api/tasks/{taskId}/run
+```
+
+批量发布：
+
+```text
+POST /api/tasks/batch-run
+```
+
+定时发布：
+
+```text
+POST /api/tasks/{taskId}/schedule
+POST /api/schedules/{scheduleId}/cancel
+```
 
 停止：
 

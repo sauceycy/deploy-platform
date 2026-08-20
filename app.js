@@ -74,6 +74,7 @@ const auditLogs = [];
 const executions = [];
 const agentTasks = [];
 const agentHeartbeats = [];
+const schedules = [];
 const clusterDrafts = [];
 const APP_STATE_KEY = "deploy-platform-state";
 
@@ -120,6 +121,16 @@ const branchForm = document.getElementById("branchForm");
 const branchSelect = document.getElementById("branchSelect");
 const branchStatus = document.getElementById("branchStatus");
 const confirmBranchDeploy = document.getElementById("confirmBranchDeploy");
+const batchDialog = document.getElementById("batchDialog");
+const batchForm = document.getElementById("batchForm");
+const batchTaskList = document.getElementById("batchTaskList");
+const batchStatus = document.getElementById("batchStatus");
+const confirmBatchDeploy = document.getElementById("confirmBatchDeploy");
+const scheduleDialog = document.getElementById("scheduleDialog");
+const scheduleForm = document.getElementById("scheduleForm");
+const scheduleBranchSelect = document.getElementById("scheduleBranchSelect");
+const scheduleStatus = document.getElementById("scheduleStatus");
+const confirmScheduleDeploy = document.getElementById("confirmScheduleDeploy");
 const drawerTitle = document.getElementById("drawerTitle");
 const selectAllTasks = document.getElementById("selectAllTasks");
 const batchDeploy = document.getElementById("batchDeploy");
@@ -162,6 +173,7 @@ function exportState() {
     executions,
     agentTasks,
     agentHeartbeats,
+    schedules,
   };
 }
 
@@ -180,6 +192,7 @@ function replaceRoles(nextRoles) {
 
 function hydrateState(nextState) {
   if (!nextState || typeof nextState !== "object") return;
+  const previousSelectedId = state.selectedId;
   replaceRoles(nextState.roles);
   replaceArray(users, nextState.users);
   replaceArray(tasks, nextState.tasks);
@@ -190,7 +203,8 @@ function hydrateState(nextState) {
   replaceArray(executions, nextState.executions);
   replaceArray(agentTasks, nextState.agentTasks);
   replaceArray(agentHeartbeats, nextState.agentHeartbeats);
-  state.selectedId = tasks[0]?.id || null;
+  replaceArray(schedules, nextState.schedules);
+  state.selectedId = tasks.some((task) => String(task.id) === String(previousSelectedId)) ? previousSelectedId : tasks[0]?.id || null;
 }
 
 async function loadPersistedState() {
@@ -228,6 +242,24 @@ function statusLabel(status) {
   }[status] || status;
 }
 
+function scheduleStatusLabel(status) {
+  return {
+    pending: "待执行",
+    triggered: "已触发",
+    cancelled: "已取消",
+    failed: "失败",
+  }[status] || status || "未设置";
+}
+
+function activeScheduleForTask(taskId) {
+  return schedules.find((schedule) => String(schedule.taskId) === String(taskId) && schedule.status === "pending");
+}
+
+function localDateTimeValue(date = new Date(Date.now() + 10 * 60 * 1000)) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function languageLabel(language) {
   return {
     java: "Java",
@@ -256,10 +288,11 @@ function roleOptions(selectedRole) {
 function filteredTasks() {
   const query = state.search.trim().toLowerCase();
   return tasks.filter((task) => {
+    const schedule = activeScheduleForTask(task.id);
     const statusMatch = state.filter === "all" || task.status === state.filter;
     const searchMatch =
       !query ||
-      [task.name, task.repo, task.owner, task.tag, task.env, task.language, task.sdk, task.workdir, task.lastBranch || ""].some((value) =>
+      [task.name, task.repo, task.owner, task.tag, task.env, task.language, task.sdk, task.workdir, task.lastBranch || "", schedule?.branch || "", schedule?.scheduledAt || ""].some((value) =>
         String(value || "").toLowerCase().includes(query),
       );
     return statusMatch && searchMatch;
@@ -326,6 +359,10 @@ function renderRows() {
             <i data-lucide="rocket"></i>
             <span>发布</span>
           </button>
+          <button class="ghost-button" type="button" data-action="schedule" data-task-id="${task.id}" ${hasPermission("task.deploy") ? "" : "disabled"}>
+            <i data-lucide="clock"></i>
+            <span>定时</span>
+          </button>
         </div>
       </div>
     `,
@@ -351,6 +388,7 @@ function renderDetail() {
     return;
   }
   const latestExecution = executions.find((execution) => String(execution.taskId) === String(task.id));
+  const activeSchedule = activeScheduleForTask(task.id);
 
   detailPanel.innerHTML = `
     <div class="detail-title">
@@ -409,6 +447,24 @@ function renderDetail() {
         <span>目标</span><strong>${task.notify.target || "未设置"}</strong>
         <span>事件</span><strong>${task.notify.events.join("、") || "未设置"}</strong>
       </div>
+    </section>
+
+    <section class="detail-section">
+      <h3>定时发布</h3>
+      ${
+        activeSchedule
+          ? `<div class="cluster-item">
+              <div>
+                <strong>${activeSchedule.scheduledAt}</strong>
+                <span>${activeSchedule.branch} · ${scheduleStatusLabel(activeSchedule.status)} · ${activeSchedule.actor || "system"}</span>
+              </div>
+              <button class="ghost-button" type="button" data-schedule-cancel="${activeSchedule.id}" ${hasPermission("task.deploy") ? "" : "disabled"}>
+                <i data-lucide="calendar-x"></i>
+                <span>取消</span>
+              </button>
+            </div>`
+          : `<div class="empty-state compact"><strong>暂无待执行定时发布</strong><span>点击任务行的定时按钮后会在这里显示计划。</span></div>`
+      }
     </section>
 
     <section class="detail-section">
@@ -838,10 +894,40 @@ async function openBranchDialog(taskId) {
   }
 }
 
+async function loadBranchesIntoSelect(task, selectElement) {
+  selectElement.innerHTML = "";
+  selectElement.disabled = true;
+  const response = await fetch("/api/repositories/branches", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo: task.repo }),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || "读取仓库分支失败");
+  if (!result.branches.length) throw new Error("仓库没有可发布分支");
+  selectElement.innerHTML = result.branches.map((branch) => `<option value="${branch}">${branch}</option>`).join("");
+  if (task.lastBranch && result.branches.includes(task.lastBranch)) {
+    selectElement.value = task.lastBranch;
+  }
+  selectElement.disabled = false;
+  return result.branches;
+}
+
 function closeBranchDialog(clearQueue = true) {
   if (clearQueue) state.batchQueue = [];
   if (branchDialog.open) branchDialog.close();
   branchForm.reset();
+}
+
+function closeBatchDialog() {
+  if (batchDialog.open) batchDialog.close();
+  batchForm.reset();
+  batchTaskList.innerHTML = "";
+}
+
+function closeScheduleDialog() {
+  if (scheduleDialog.open) scheduleDialog.close();
+  scheduleForm.reset();
 }
 
 async function runTask(taskId, branch) {
@@ -875,8 +961,128 @@ function startBatchDeploy() {
     window.alert("请先选择要发布的任务");
     return;
   }
-  state.batchQueue = taskIds;
-  openBranchDialog(state.batchQueue.shift());
+  openBatchDialog(taskIds);
+}
+
+async function openBatchDialog(taskIds) {
+  const selectedTasks = taskIds.map((id) => tasks.find((task) => String(task.id) === String(id))).filter(Boolean);
+  batchTaskList.innerHTML = selectedTasks
+    .map(
+      (task) => `
+        <div class="batch-row" data-batch-task="${task.id}">
+          <div>
+            <strong>${task.name}</strong>
+            <span>${task.repo}</span>
+          </div>
+          <select data-batch-branch="${task.id}" disabled>
+            <option>读取分支中...</option>
+          </select>
+        </div>
+      `,
+    )
+    .join("");
+  batchStatus.textContent = "正在读取仓库分支...";
+  confirmBatchDeploy.disabled = true;
+  batchDialog.showModal();
+  let failed = 0;
+  await Promise.all(
+    selectedTasks.map(async (task) => {
+      const select = batchTaskList.querySelector(`[data-batch-branch="${task.id}"]`);
+      try {
+        await loadBranchesIntoSelect(task, select);
+      } catch (error) {
+        failed += 1;
+        select.innerHTML = `<option>${error.message}</option>`;
+      }
+    }),
+  );
+  const okCount = selectedTasks.length - failed;
+  batchStatus.textContent = failed ? `已读取 ${okCount} 个任务分支，${failed} 个失败` : `已读取 ${okCount} 个任务分支`;
+  confirmBatchDeploy.disabled = failed > 0 || okCount === 0;
+}
+
+async function submitBatchDeploy(event) {
+  event.preventDefault();
+  if (!requirePermission("task.deploy")) return;
+  const items = Array.from(batchTaskList.querySelectorAll("[data-batch-branch]")).map((select) => ({
+    taskId: select.dataset.batchBranch,
+    branch: select.value,
+  }));
+  const response = await fetch("/api/tasks/batch-run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ actor: state.currentUser?.username || "system", items }),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    window.alert(result.error || "批量发布请求失败");
+    return;
+  }
+  hydrateState(result.state);
+  items.forEach((item) => state.selectedTaskIds.delete(String(item.taskId)));
+  render();
+  closeBatchDialog();
+  window.setTimeout(refreshRemoteState, 1500);
+}
+
+async function openScheduleDialog(taskId) {
+  if (!requirePermission("task.deploy")) return;
+  const task = tasks.find((item) => String(item.id) === String(taskId));
+  if (!task) return;
+  scheduleForm.elements.taskId.value = task.id;
+  scheduleForm.elements.taskName.value = task.name;
+  scheduleForm.elements.scheduledAt.value = localDateTimeValue();
+  scheduleBranchSelect.innerHTML = "";
+  scheduleBranchSelect.disabled = true;
+  confirmScheduleDeploy.disabled = true;
+  scheduleStatus.textContent = "正在读取仓库分支...";
+  scheduleDialog.showModal();
+  try {
+    const branches = await loadBranchesIntoSelect(task, scheduleBranchSelect);
+    scheduleStatus.textContent = `已读取 ${branches.length} 个分支`;
+    confirmScheduleDeploy.disabled = false;
+  } catch (error) {
+    scheduleStatus.textContent = error.message;
+  }
+}
+
+async function saveSchedule(event) {
+  event.preventDefault();
+  if (!requirePermission("task.deploy")) return;
+  const taskId = scheduleForm.elements.taskId.value;
+  const response = await fetch(`/api/tasks/${taskId}/schedule`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      actor: state.currentUser?.username || "system",
+      branch: scheduleForm.elements.branch.value,
+      scheduledAt: scheduleForm.elements.scheduledAt.value,
+    }),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    window.alert(result.error || "保存定时发布失败");
+    return;
+  }
+  hydrateState(result.state);
+  render();
+  closeScheduleDialog();
+}
+
+async function cancelSchedule(scheduleId) {
+  if (!requirePermission("task.deploy")) return;
+  const response = await fetch(`/api/schedules/${scheduleId}/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ actor: state.currentUser?.username || "system" }),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    window.alert(result.error || "取消定时发布失败");
+    return;
+  }
+  hydrateState(result.state);
+  render();
 }
 
 function saveCluster(event) {
@@ -1133,12 +1339,18 @@ document.getElementById("closeUserDialog").addEventListener("click", closeUserDi
 document.getElementById("cancelUserEdit").addEventListener("click", closeUserDialog);
 document.getElementById("closeBranchDialog").addEventListener("click", closeBranchDialog);
 document.getElementById("cancelBranchSelect").addEventListener("click", closeBranchDialog);
+document.getElementById("closeBatchDialog").addEventListener("click", closeBatchDialog);
+document.getElementById("cancelBatchDeploy").addEventListener("click", closeBatchDialog);
+document.getElementById("closeScheduleDialog").addEventListener("click", closeScheduleDialog);
+document.getElementById("cancelScheduleSelect").addEventListener("click", closeScheduleDialog);
 taskForm.addEventListener("submit", saveTask);
 document.getElementById("clusterForm").addEventListener("submit", saveCluster);
 document.getElementById("templateForm").addEventListener("submit", saveTemplate);
 document.getElementById("channelForm").addEventListener("submit", saveChannel);
 document.getElementById("userForm").addEventListener("submit", saveUser);
 editUserForm.addEventListener("submit", saveEditedUser);
+batchForm.addEventListener("submit", submitBatchDeploy);
+scheduleForm.addEventListener("submit", saveSchedule);
 branchForm.addEventListener("submit", (event) => {
   event.preventDefault();
   runTask(branchForm.elements.taskId.value, branchForm.elements.branch.value);
@@ -1213,6 +1425,12 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  const scheduleCancelButton = event.target.closest("[data-schedule-cancel]");
+  if (scheduleCancelButton) {
+    cancelSchedule(scheduleCancelButton.dataset.scheduleCancel);
+    return;
+  }
+
   const actionButton = event.target.closest("[data-action]");
   if (actionButton) {
     const taskId = actionButton.dataset.taskId;
@@ -1225,6 +1443,10 @@ document.addEventListener("click", (event) => {
     }
     if (action === "run") {
       openBranchDialog(taskId);
+      return;
+    }
+    if (action === "schedule") {
+      openScheduleDialog(taskId);
       return;
     }
     render();

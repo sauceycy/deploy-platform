@@ -76,6 +76,7 @@ DEFAULT_STATE = {
     "executions": [],
     "agentTasks": [],
     "agentHeartbeats": [],
+    "schedules": [],
 }
 
 STATE_LOCK = threading.RLock()
@@ -83,6 +84,15 @@ STATE_LOCK = threading.RLock()
 
 def now_text():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_schedule_time(value):
+    if not value:
+        raise ValueError("请选择定时发布时间")
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
 
 
 def merge_defaults(state):
@@ -499,6 +509,38 @@ def build_and_dispatch(execution_id):
         send_notification(task, "BUILD_FAILED", str(exc))
 
 
+def create_execution_record(state, task, actor, branch, action="触发发布"):
+    execution_id = uuid.uuid4().hex[:12]
+    execution = {
+        "id": execution_id,
+        "taskId": task["id"],
+        "taskName": task["name"],
+        "branch": branch,
+        "actor": actor or "system",
+        "status": "queued",
+        "image": "",
+        "logs": [{"time": now_text(), "message": "执行已进入队列"}],
+        "clusterResults": {},
+        "createdAt": now_text(),
+        "updatedAt": now_text(),
+    }
+    state["executions"].insert(0, execution)
+    task["status"] = "queued"
+    task["lastRun"] = now_text()
+    task["lastBranch"] = branch
+    state["auditLogs"].insert(
+        0,
+        {
+            "time": now_text(),
+            "actor": actor or "system",
+            "action": action,
+            "target": f"{task['name']} / {branch}",
+            "result": "已入队",
+        },
+    )
+    return execution
+
+
 def create_execution(task_id, actor, branch):
     def update(state):
         task = find_by_id(state["tasks"], task_id)
@@ -506,30 +548,142 @@ def create_execution(task_id, actor, branch):
             raise ValueError("任务不存在")
         if not branch:
             raise ValueError("请选择发布分支")
-        execution_id = uuid.uuid4().hex[:12]
-        execution = {
-            "id": execution_id,
-            "taskId": task["id"],
-            "taskName": task["name"],
-            "branch": branch,
-            "actor": actor or "system",
-            "status": "queued",
-            "image": "",
-            "logs": [{"time": now_text(), "message": "执行已进入队列"}],
-            "clusterResults": {},
-            "createdAt": now_text(),
-            "updatedAt": now_text(),
-        }
-        state["executions"].insert(0, execution)
-        task["status"] = "queued"
-        task["lastRun"] = now_text()
-        task["lastBranch"] = branch
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "触发发布", "target": f"{task['name']} / {branch}", "result": "已入队"})
-        return execution
+        return create_execution_record(state, task, actor, branch)
 
     execution, state = mutate_state(update)
     threading.Thread(target=build_and_dispatch, args=(execution["id"],), daemon=True).start()
     return execution, state
+
+
+def create_batch_executions(items, actor):
+    if not isinstance(items, list) or not items:
+        raise ValueError("请选择要批量发布的任务")
+
+    def update(state):
+        executions = []
+        for item in items:
+            task = find_by_id(state["tasks"], item.get("taskId"))
+            if not task:
+                raise ValueError(f"任务不存在: {item.get('taskId')}")
+            branch = item.get("branch")
+            if not branch:
+                raise ValueError(f"{task['name']} 未选择发布分支")
+            executions.append(create_execution_record(state, task, actor, branch, "批量发布"))
+        return executions
+
+    executions, state = mutate_state(update)
+    for execution in executions:
+        threading.Thread(target=build_and_dispatch, args=(execution["id"],), daemon=True).start()
+    return executions, state
+
+
+def schedule_execution(task_id, actor, branch, scheduled_at):
+    run_at = parse_schedule_time(scheduled_at)
+    if run_at <= datetime.now():
+        raise ValueError("定时发布时间必须晚于当前时间")
+
+    def update(state):
+        task = find_by_id(state["tasks"], task_id)
+        if not task:
+            raise ValueError("任务不存在")
+        if not branch:
+            raise ValueError("请选择发布分支")
+        for item in state.setdefault("schedules", []):
+            if str(item.get("taskId")) == str(task["id"]) and item.get("status") == "pending":
+                item["status"] = "cancelled"
+                item["enabled"] = False
+                item["updatedAt"] = now_text()
+        schedule_id = uuid.uuid4().hex[:12]
+        schedule = {
+            "id": schedule_id,
+            "taskId": task["id"],
+            "taskName": task["name"],
+            "branch": branch,
+            "actor": actor or "system",
+            "scheduledAt": scheduled_at,
+            "status": "pending",
+            "enabled": True,
+            "createdAt": now_text(),
+            "updatedAt": now_text(),
+        }
+        state.setdefault("schedules", []).insert(0, schedule)
+        task["schedule"] = {
+            "id": schedule_id,
+            "branch": branch,
+            "scheduledAt": scheduled_at,
+            "status": "pending",
+        }
+        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "创建定时发布", "target": f"{task['name']} / {branch}", "result": scheduled_at})
+        return schedule
+
+    schedule, state = mutate_state(update)
+    return schedule, state
+
+
+def cancel_schedule(schedule_id, actor):
+    def update(state):
+        schedule = find_by_id(state.setdefault("schedules", []), schedule_id)
+        if not schedule:
+            raise ValueError("定时发布不存在")
+        if schedule.get("status") != "pending":
+            raise ValueError("只能取消待执行的定时发布")
+        schedule["status"] = "cancelled"
+        schedule["enabled"] = False
+        schedule["updatedAt"] = now_text()
+        task = find_by_id(state["tasks"], schedule["taskId"])
+        if task and task.get("schedule", {}).get("id") == schedule_id:
+            task["schedule"]["status"] = "cancelled"
+        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "取消定时发布", "target": schedule.get("taskName"), "result": "成功"})
+        return schedule
+
+    schedule, state = mutate_state(update)
+    return schedule, state
+
+
+def trigger_due_schedules():
+    due_execution_ids = []
+
+    def update(state):
+        now = datetime.now()
+        for schedule in state.setdefault("schedules", []):
+            if schedule.get("status") != "pending" or not schedule.get("enabled", True):
+                continue
+            try:
+                if parse_schedule_time(schedule.get("scheduledAt")) > now:
+                    continue
+                task = find_by_id(state["tasks"], schedule["taskId"])
+                if not task:
+                    schedule["status"] = "failed"
+                    schedule["error"] = "任务不存在"
+                    schedule["updatedAt"] = now_text()
+                    continue
+                execution = create_execution_record(state, task, schedule.get("actor") or "scheduler", schedule.get("branch"), "定时发布")
+                schedule["status"] = "triggered"
+                schedule["executionId"] = execution["id"]
+                schedule["triggeredAt"] = now_text()
+                schedule["updatedAt"] = now_text()
+                if task.get("schedule", {}).get("id") == schedule["id"]:
+                    task["schedule"]["status"] = "triggered"
+                    task["schedule"]["executionId"] = execution["id"]
+                due_execution_ids.append(execution["id"])
+            except Exception as exc:
+                schedule["status"] = "failed"
+                schedule["error"] = str(exc)
+                schedule["updatedAt"] = now_text()
+        return None
+
+    mutate_state(update)
+    for execution_id in due_execution_ids:
+        threading.Thread(target=build_and_dispatch, args=(execution_id,), daemon=True).start()
+
+
+def scheduler_loop():
+    while True:
+        try:
+            trigger_due_schedules()
+        except Exception as exc:
+            print(f"schedule loop error: {exc}", flush=True)
+        time.sleep(15)
 
 
 def mark_agent_task_running(agent_task):
@@ -615,6 +769,15 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/tasks/batch-run":
+            body = self.read_json_body()
+            try:
+                executions, state = create_batch_executions(body.get("items"), body.get("actor"))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"executions": executions, "state": state})
+            return
         match = re.match(r"^/api/tasks/([^/]+)/run$", parsed.path)
         if match:
             body = self.read_json_body()
@@ -624,6 +787,26 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, status=400)
                 return
             self.send_json({"execution": execution, "state": state})
+            return
+        match = re.match(r"^/api/tasks/([^/]+)/schedule$", parsed.path)
+        if match:
+            body = self.read_json_body()
+            try:
+                schedule, state = schedule_execution(match.group(1), body.get("actor"), body.get("branch"), body.get("scheduledAt"))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"schedule": schedule, "state": state})
+            return
+        match = re.match(r"^/api/schedules/([^/]+)/cancel$", parsed.path)
+        if match:
+            body = self.read_json_body()
+            try:
+                schedule, state = cancel_schedule(match.group(1), body.get("actor"))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"schedule": schedule, "state": state})
             return
         if parsed.path == "/api/repositories/branches":
             body = self.read_json_body()
@@ -677,6 +860,7 @@ class Handler(SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     read_state()
+    threading.Thread(target=scheduler_loop, daemon=True).start()
     port = int(os.environ.get("PORT", "80"))
     db_kind = "postgres" if use_postgres() else f"sqlite={DB_PATH}"
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)

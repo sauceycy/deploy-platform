@@ -499,6 +499,28 @@
       </form>
     </dialog>
 
+    <dialog class="config-dialog form-dialog wide-dialog" id="batchDialog">
+      <div class="dialog-header">
+        <h2>批量发布</h2>
+        <button class="icon-button" id="closeBatchDialog" type="button" title="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <form class="dialog-form" id="batchForm">
+        <div class="batch-list" id="batchTaskList"></div>
+        <p class="form-hint" id="batchStatus">请选择每个任务的发布分支</p>
+        <div class="drawer-actions">
+          <button class="ghost-button" type="button" id="cancelBatchDeploy">
+            <span>取消</span>
+          </button>
+          <button class="primary-button" type="submit" id="confirmBatchDeploy">
+            <i data-lucide="rocket"></i>
+            <span>批量发布</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog class="config-dialog form-dialog" id="branchDialog">
       <div class="dialog-header">
         <h2>选择发布分支</h2>
@@ -524,6 +546,40 @@
           <button class="primary-button" type="submit" id="confirmBranchDeploy">
             <i data-lucide="rocket"></i>
             <span>发布</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="config-dialog form-dialog" id="scheduleDialog">
+      <div class="dialog-header">
+        <h2>定时发布</h2>
+        <button class="icon-button" id="closeScheduleDialog" type="button" title="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <form class="dialog-form" id="scheduleForm">
+        <input type="hidden" name="taskId" />
+        <label>
+          <span>任务</span>
+          <input name="taskName" disabled />
+        </label>
+        <label>
+          <span>分支</span>
+          <select name="branch" id="scheduleBranchSelect" required></select>
+        </label>
+        <label>
+          <span>执行时间</span>
+          <input name="scheduledAt" type="datetime-local" required />
+        </label>
+        <p class="form-hint" id="scheduleStatus">正在读取仓库分支...</p>
+        <div class="drawer-actions">
+          <button class="ghost-button" type="button" id="cancelScheduleSelect">
+            <span>取消</span>
+          </button>
+          <button class="primary-button" type="submit" id="confirmScheduleDeploy">
+            <i data-lucide="clock"></i>
+            <span>保存定时发布</span>
           </button>
         </div>
       </form>

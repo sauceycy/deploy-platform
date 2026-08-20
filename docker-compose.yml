@@ -12,6 +12,7 @@ services:
       DEPLOY_PLATFORM_DB: /data/deploy-platform.sqlite3
       DATA_DIR: /data
       HOST_DATA_DIR: ${HOST_DATA_DIR:-${PWD}/data}
+      TZ: ${TZ:-Asia/Shanghai}
       REGISTRY_URL: ${REGISTRY_URL:-}
       IMAGE_NAMESPACE: ${IMAGE_NAMESPACE:-deploy-platform}
       REGISTRY_USERNAME: ${REGISTRY_USERNAME:-}
