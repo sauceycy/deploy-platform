@@ -12,29 +12,38 @@ const buildCommands = {
   python: "pip install -r requirements.txt",
 };
 
-const users = [
-  { username: "admin", password: "admin123", name: "平台管理员", role: "platform_admin" },
-  { username: "developer", password: "dev123", name: "开发人员", role: "developer" },
-  { username: "auditor", password: "audit123", name: "审计人员", role: "auditor" },
-  { username: "viewer", password: "view123", name: "只读用户", role: "viewer" },
-];
-
 const roles = {
   platform_admin: {
     label: "平台管理员",
-    permissions: ["task.view", "task.create", "task.deploy", "task.export", "rbac.view", "rbac.manage", "audit.view"],
+    permissions: [
+      "task.view",
+      "task.create",
+      "task.deploy",
+      "task.export",
+      "cluster.view",
+      "cluster.manage",
+      "template.view",
+      "template.manage",
+      "channel.view",
+      "channel.manage",
+      "user.view",
+      "user.manage",
+      "rbac.view",
+      "rbac.manage",
+      "audit.view",
+    ],
   },
   developer: {
     label: "开发人员",
-    permissions: ["task.view", "task.create", "task.deploy"],
+    permissions: ["task.view", "task.create", "task.deploy", "cluster.view", "template.view", "channel.view"],
   },
   auditor: {
     label: "审计人员",
-    permissions: ["task.view", "rbac.view", "audit.view"],
+    permissions: ["task.view", "cluster.view", "template.view", "channel.view", "user.view", "rbac.view", "audit.view"],
   },
   viewer: {
     label: "只读用户",
-    permissions: ["task.view"],
+    permissions: ["task.view", "cluster.view", "template.view", "channel.view"],
   },
 };
 
@@ -43,86 +52,30 @@ const permissionCatalog = [
   { key: "task.create", label: "创建任务" },
   { key: "task.deploy", label: "执行发布" },
   { key: "task.export", label: "导出配置" },
+  { key: "cluster.view", label: "查看集群" },
+  { key: "cluster.manage", label: "管理集群" },
+  { key: "template.view", label: "查看模板" },
+  { key: "template.manage", label: "管理模板" },
+  { key: "channel.view", label: "查看通知" },
+  { key: "channel.manage", label: "管理通知" },
+  { key: "user.view", label: "查看用户" },
+  { key: "user.manage", label: "管理用户" },
   { key: "rbac.view", label: "查看权限" },
   { key: "rbac.manage", label: "管理角色" },
   { key: "audit.view", label: "查看审计" },
 ];
 
-const tasks = [
-  {
-    id: 1,
-    name: "order-service",
-    owner: "backend-team",
-    env: "prod",
-    tag: "订单系统",
-    repo: "ssh://git.example.internal/backend/order-service.git",
-    branch: "release/2026.08",
-    workdir: "./order-service",
-    language: "java",
-    sdk: "jdk17",
-    buildCommand: "mvn -pl order-service -am package -DskipTests",
-    containerPort: 8080,
-    servicePort: 80,
-    replicas: 3,
-    healthPath: "/actuator/health",
-    status: "success",
-    lastRun: "2026-08-20 12:18",
-    alerts: 0,
-    clusters: [
-      { name: "shanghai-prod", namespace: "order", replicas: 3, ingress: "order.example.internal", status: "success" },
-      { name: "beijing-prod", namespace: "order", replicas: 3, ingress: "order-bj.example.internal", status: "success" },
-    ],
-    notify: {
-      channel: "企业微信",
-      target: "机器人：deploy-alerts",
-      events: ["构建失败", "部署失败", "健康检查失败"],
-    },
-  },
-  {
-    id: 2,
-    name: "payment-gateway",
-    owner: "pay-team",
-    env: "prod",
-    tag: "支付网关",
-    repo: "ssh://git.example.internal/payment/gateway.git",
-    branch: "main",
-    workdir: ".",
-    language: "golang",
-    sdk: "go1.22",
-    buildCommand: "go build -o gateway ./cmd/gateway",
-    containerPort: 9000,
-    servicePort: 80,
-    replicas: 4,
-    healthPath: "/healthz",
-    status: "partial",
-    lastRun: "2026-08-20 11:56",
-    alerts: 1,
-    clusters: [
-      { name: "shanghai-prod", namespace: "payment", replicas: 4, ingress: "pay.example.internal", status: "success" },
-      { name: "singapore-prod", namespace: "payment", replicas: 2, ingress: "pay-sg.example.internal", status: "failed" },
-    ],
-    notify: {
-      channel: "飞书",
-      target: "群组：payment-sre",
-      events: ["部署失败", "健康检查失败", "发布成功"],
-    },
-  },
-];
-
-const auditLogs = [
-  { time: "2026-08-20 12:18", actor: "admin", action: "发布任务", target: "order-service / shanghai-prod", result: "成功" },
-  { time: "2026-08-20 11:56", actor: "developer", action: "发布任务", target: "payment-gateway / singapore-prod", result: "失败" },
-  { time: "2026-08-20 10:40", actor: "admin", action: "更新角色", target: "developer", result: "成功" },
-];
-
-const clusterDrafts = [
-  { name: "test-01", namespace: "inventory", replicas: 2, ingress: "inventory-test.example.internal" },
-  { name: "shanghai-prod", namespace: "inventory", replicas: 3, ingress: "inventory.example.internal" },
-];
+const users = [{ username: "admin", password: "admin123", name: "平台管理员", role: "platform_admin" }];
+const tasks = [];
+const clusters = [];
+const buildTemplates = [];
+const notifyChannels = [];
+const auditLogs = [];
+const clusterDrafts = [];
 
 const state = {
   currentUser: null,
-  selectedId: tasks[0].id,
+  selectedId: null,
   filter: "all",
   search: "",
   view: "tasks",
@@ -137,6 +90,10 @@ const pageSubtitle = document.getElementById("pageSubtitle");
 const currentUserName = document.getElementById("currentUserName");
 const currentUserRole = document.getElementById("currentUserRole");
 const taskView = document.getElementById("taskView");
+const clusterView = document.getElementById("clusterView");
+const templateView = document.getElementById("templateView");
+const channelView = document.getElementById("channelView");
+const userView = document.getElementById("userView");
 const accessView = document.getElementById("accessView");
 const auditView = document.getElementById("auditView");
 const taskRows = document.getElementById("taskRows");
@@ -162,6 +119,21 @@ function requirePermission(permission) {
   return false;
 }
 
+function nowText() {
+  return new Date().toLocaleString("zh-CN", { hour12: false });
+}
+
+function addAudit(action, target, result = "成功") {
+  if (!state.currentUser) return;
+  auditLogs.unshift({
+    time: nowText(),
+    actor: state.currentUser.username,
+    action,
+    target,
+    result,
+  });
+}
+
 function statusLabel(status) {
   return {
     success: "部署成功",
@@ -177,6 +149,16 @@ function languageLabel(language) {
     golang: "Golang",
     python: "Python",
   }[language];
+}
+
+function channelLabel(type) {
+  return {
+    wecom: "企业微信",
+    dingtalk: "钉钉",
+    feishu: "飞书",
+    email: "邮件",
+    webhook: "Webhook",
+  }[type];
 }
 
 function filteredTasks() {
@@ -197,13 +179,18 @@ function renderMetrics() {
 
 function renderRows() {
   const rows = filteredTasks();
+  if (rows.length === 0) {
+    taskRows.innerHTML = `<div class="empty-row">暂无发布任务</div>`;
+    return;
+  }
+
   taskRows.innerHTML = rows
     .map(
       (task) => `
       <div class="task-row ${task.id === state.selectedId ? "selected" : ""}" role="row" data-task-id="${task.id}">
         <div class="task-main">
           <strong>${task.name}</strong>
-          <span>${task.env} · ${task.owner} · ${task.lastRun}</span>
+          <span>${task.env} · ${task.owner || "未设置负责人"} · ${task.lastRun}</span>
         </div>
         <div>
           <span class="language-chip ${task.language}">${languageLabel(task.language)} / ${task.sdk}</span>
@@ -214,7 +201,7 @@ function renderRows() {
         </div>
         <div>
           <strong>${task.clusters.length} 个集群</strong>
-          <span class="muted">${task.clusters.map((cluster) => cluster.name).join("、")}</span>
+          <span class="muted">${task.clusters.map((cluster) => cluster.name).join("、") || "未绑定"}</span>
         </div>
         <div>
           <span class="status-chip ${task.status}">${statusLabel(task.status)}</span>
@@ -233,22 +220,25 @@ function renderRows() {
     `,
     )
     .join("");
-  if (rows.length === 0) {
-    taskRows.innerHTML = `<div class="empty-row">没有匹配的任务</div>`;
-  }
-  lucide.createIcons();
 }
 
 function renderDetail() {
-  const task = tasks.find((item) => item.id === state.selectedId) || filteredTasks()[0] || tasks[0];
-  if (!task) return;
-  state.selectedId = task.id;
+  const task = tasks.find((item) => item.id === state.selectedId);
+  if (!task) {
+    detailPanel.innerHTML = `
+      <div class="empty-state compact">
+        <strong>暂无任务详情</strong>
+        <span>创建任务后会显示构建、运行、集群和通知配置。</span>
+      </div>
+    `;
+    return;
+  }
 
   detailPanel.innerHTML = `
     <div class="detail-title">
       <div>
         <h2>${task.name}</h2>
-        <p>${task.tag} · ${task.env} · ${task.owner}</p>
+        <p>${task.tag || "未设置标签"} · ${task.env} · ${task.owner || "未设置负责人"}</p>
       </div>
       <span class="status-chip ${task.status}">${statusLabel(task.status)}</span>
     </div>
@@ -271,7 +261,7 @@ function renderDetail() {
         <span>容器端口</span><strong>${task.containerPort}</strong>
         <span>Service</span><strong>${task.servicePort}</strong>
         <span>副本</span><strong>${task.replicas}</strong>
-        <span>健康检查</span><strong>${task.healthPath}</strong>
+        <span>健康检查</span><strong>${task.healthPath || "未设置"}</strong>
       </div>
     </section>
 
@@ -284,7 +274,7 @@ function renderDetail() {
             <div class="cluster-item">
               <div>
                 <strong>${cluster.name}</strong>
-                <span>${cluster.namespace} · ${cluster.replicas} replicas · ${cluster.ingress}</span>
+                <span>${cluster.namespace || "default"} · ${cluster.replicas} replicas · ${cluster.ingress || "未设置 Ingress"}</span>
               </div>
               <span class="status-chip ${cluster.status}">${statusLabel(cluster.status)}</span>
             </div>
@@ -298,8 +288,8 @@ function renderDetail() {
       <h3>告警通知</h3>
       <div class="kv-grid">
         <span>渠道</span><strong>${task.notify.channel}</strong>
-        <span>目标</span><strong>${task.notify.target}</strong>
-        <span>事件</span><strong>${task.notify.events.join("、")}</strong>
+        <span>目标</span><strong>${task.notify.target || "未设置"}</strong>
+        <span>事件</span><strong>${task.notify.events.join("、") || "未设置"}</strong>
       </div>
     </section>
   `;
@@ -333,12 +323,81 @@ function renderAccessView() {
     `,
     )
     .join("");
+}
 
+function emptyState(text) {
+  return `<div class="empty-state"><strong>${text}</strong></div>`;
+}
+
+function renderClusterView() {
+  const body = document.getElementById("clusterBody");
+  if (clusters.length === 0) {
+    body.innerHTML = emptyState("暂无集群");
+    return;
+  }
+  body.innerHTML = clusters
+    .map(
+      (cluster) => `
+      <div class="simple-row">
+        <div>
+          <strong>${cluster.name}</strong>
+          <span>${cluster.region || "未设置地域"} · ${cluster.env} · ${cluster.namespace || "default"}</span>
+        </div>
+        <span class="status-chip success">Agent 待安装</span>
+      </div>
+    `,
+    )
+    .join("");
+}
+
+function renderTemplateView() {
+  const body = document.getElementById("templateBody");
+  if (buildTemplates.length === 0) {
+    body.innerHTML = emptyState("暂无构建模板");
+    return;
+  }
+  body.innerHTML = buildTemplates
+    .map(
+      (template) => `
+      <div class="simple-row">
+        <div>
+          <strong>${template.name}</strong>
+          <span>${languageLabel(template.language)} · ${template.sdk} · ${template.command}</span>
+        </div>
+        <span class="language-chip ${template.language}">${languageLabel(template.language)}</span>
+      </div>
+    `,
+    )
+    .join("");
+}
+
+function renderChannelView() {
+  const body = document.getElementById("channelBody");
+  if (notifyChannels.length === 0) {
+    body.innerHTML = emptyState("暂无通知渠道");
+    return;
+  }
+  body.innerHTML = notifyChannels
+    .map(
+      (channel) => `
+      <div class="simple-row">
+        <div>
+          <strong>${channel.name}</strong>
+          <span>${channelLabel(channel.type)} · ${channel.target} · ${channel.secret ? "已配置密钥" : "未配置密钥"}</span>
+        </div>
+        <span class="role-chip">${channelLabel(channel.type)}</span>
+      </div>
+    `,
+    )
+    .join("");
+}
+
+function renderUserView() {
   const userBody = document.getElementById("userBody");
   userBody.innerHTML = users
     .map(
       (user) => `
-      <div class="user-row">
+      <div class="simple-row">
         <div>
           <strong>${user.name}</strong>
           <span>${user.username}</span>
@@ -348,10 +407,19 @@ function renderAccessView() {
     `,
     )
     .join("");
+
+  const roleSelect = document.getElementById("newUserRole");
+  roleSelect.innerHTML = Object.entries(roles)
+    .map(([key, role]) => `<option value="${key}">${role.label}</option>`)
+    .join("");
 }
 
 function renderAuditView() {
   const auditBody = document.getElementById("auditBody");
+  if (auditLogs.length === 0) {
+    auditBody.innerHTML = emptyState("暂无审计记录");
+    return;
+  }
   auditBody.innerHTML = auditLogs
     .map(
       (log) => `
@@ -368,6 +436,11 @@ function renderAuditView() {
 }
 
 function renderClusters() {
+  if (clusterDrafts.length === 0) {
+    clusterEditor.innerHTML = `<div class="empty-state compact"><strong>未选择部署集群</strong><span>请先在集群管理中添加集群，再回到任务中绑定部署目标。</span></div>`;
+    return;
+  }
+
   clusterEditor.innerHTML = clusterDrafts
     .map(
       (cluster, index) => `
@@ -375,22 +448,20 @@ function renderClusters() {
         <label>
           <span>集群</span>
           <select data-field="name">
-            ${["dev-01", "test-01", "shanghai-prod", "beijing-prod", "singapore-prod"]
-              .map((name) => `<option ${name === cluster.name ? "selected" : ""}>${name}</option>`)
-              .join("")}
+            ${clusters.map((item) => `<option ${item.name === cluster.name ? "selected" : ""}>${item.name}</option>`).join("")}
           </select>
         </label>
         <label>
           <span>Namespace</span>
-          <input data-field="namespace" value="${cluster.namespace}" />
+          <input data-field="namespace" value="${cluster.namespace || ""}" />
         </label>
         <label>
           <span>副本</span>
-          <input data-field="replicas" type="number" min="1" value="${cluster.replicas}" />
+          <input data-field="replicas" type="number" min="1" value="${cluster.replicas || 1}" />
         </label>
         <label>
           <span>Ingress</span>
-          <input data-field="ingress" value="${cluster.ingress}" />
+          <input data-field="ingress" value="${cluster.ingress || ""}" />
         </label>
         <button class="icon-button" type="button" title="移除集群" data-remove-cluster="${index}">
           <i data-lucide="trash-2"></i>
@@ -399,14 +470,13 @@ function renderClusters() {
     `,
     )
     .join("");
-  lucide.createIcons();
 }
 
 function updateSdkOptions(language) {
   const options = sdkOptions[language] || [];
   sdkSelect.innerHTML = options.map((sdk, index) => `<option ${index === 0 ? "selected" : ""}>${sdk}</option>`).join("");
   const commandInput = taskForm.elements.buildCommand;
-  commandInput.value = buildCommands[language] || commandInput.value;
+  if (!commandInput.value) commandInput.value = buildCommands[language] || "";
 }
 
 function openDrawer() {
@@ -472,7 +542,7 @@ function buildPreviewObject() {
     runtime: {
       containerPort: Number(formValue("containerPort")),
       servicePort: Number(formValue("servicePort")),
-      replicas: Number(formValue("replicas")),
+      replicas: Number(formValue("replicas") || 1),
       healthPath: formValue("healthPath"),
     },
     clusters: clusterDrafts,
@@ -511,14 +581,8 @@ function saveTask(event) {
     notify: preview.notify,
   };
   tasks.unshift(newTask);
-  auditLogs.unshift({
-    time: "刚刚",
-    actor: state.currentUser.username,
-    action: "创建任务",
-    target: newTask.name,
-    result: "成功",
-  });
   state.selectedId = newTask.id;
+  addAudit("创建任务", newTask.name);
   render();
   closeDrawer();
 }
@@ -530,39 +594,119 @@ function renderConfigPreview() {
   configDialog.showModal();
 }
 
-function setView(view) {
-  if (view === "access" && !hasPermission("rbac.view")) {
-    window.alert("当前角色没有查看角色权限");
-    view = "tasks";
+function saveCluster(event) {
+  event.preventDefault();
+  if (!requirePermission("cluster.manage")) return;
+  const form = event.currentTarget;
+  const formData = new FormData(form);
+  const cluster = {
+    id: Date.now(),
+    name: formData.get("name"),
+    region: formData.get("region"),
+    env: formData.get("env"),
+    namespace: formData.get("namespace"),
+  };
+  clusters.unshift(cluster);
+  addAudit("添加集群", cluster.name);
+  form.reset();
+  render();
+}
+
+function saveTemplate(event) {
+  event.preventDefault();
+  if (!requirePermission("template.manage")) return;
+  const form = event.currentTarget;
+  const formData = new FormData(form);
+  const template = {
+    id: Date.now(),
+    name: formData.get("name"),
+    language: formData.get("language"),
+    sdk: formData.get("sdk"),
+    command: formData.get("command"),
+  };
+  buildTemplates.unshift(template);
+  addAudit("添加构建模板", template.name);
+  form.reset();
+  render();
+}
+
+function saveChannel(event) {
+  event.preventDefault();
+  if (!requirePermission("channel.manage")) return;
+  const form = event.currentTarget;
+  const formData = new FormData(form);
+  const channel = {
+    id: Date.now(),
+    name: formData.get("name"),
+    type: formData.get("type"),
+    target: formData.get("target"),
+    secret: formData.get("secret"),
+  };
+  notifyChannels.unshift(channel);
+  addAudit("添加通知渠道", channel.name);
+  form.reset();
+  render();
+}
+
+function saveUser(event) {
+  event.preventDefault();
+  if (!requirePermission("user.manage")) return;
+  const form = event.currentTarget;
+  const formData = new FormData(form);
+  const username = formData.get("username");
+  if (users.some((user) => user.username === username)) {
+    window.alert("账号已存在");
+    return;
   }
-  if (view === "audit" && !hasPermission("audit.view")) {
-    window.alert("当前角色没有查看审计权限");
+  const user = {
+    username,
+    name: formData.get("name"),
+    password: formData.get("password"),
+    role: formData.get("role"),
+  };
+  users.push(user);
+  addAudit("添加用户", username);
+  form.reset();
+  render();
+}
+
+const viewConfig = {
+  tasks: { title: "发布任务", subtitle: "任务、集群、权限与审计" },
+  clusters: { title: "集群管理", subtitle: "Agent 接入与部署目标", permission: "cluster.view" },
+  templates: { title: "构建模板", subtitle: "语言、SDK 与默认构建命令", permission: "template.view" },
+  channels: { title: "通知渠道", subtitle: "告警机器人、邮件与 Webhook", permission: "channel.view" },
+  users: { title: "用户管理", subtitle: "账号、姓名与角色绑定", permission: "user.view" },
+  access: { title: "角色权限", subtitle: "用户、角色与操作边界", permission: "rbac.view" },
+  audit: { title: "权限审计", subtitle: "登录、发布与权限变更", permission: "audit.view" },
+};
+
+function setView(view) {
+  const config = viewConfig[view] || viewConfig.tasks;
+  if (config.permission && !hasPermission(config.permission)) {
+    window.alert("当前角色没有访问该页面权限");
     view = "tasks";
   }
 
   state.view = view;
   taskView.hidden = view !== "tasks";
+  clusterView.hidden = view !== "clusters";
+  templateView.hidden = view !== "templates";
+  channelView.hidden = view !== "channels";
+  userView.hidden = view !== "users";
   accessView.hidden = view !== "access";
   auditView.hidden = view !== "audit";
 
-  document.querySelectorAll(".nav-item").forEach((item) => {
-    item.classList.toggle("active", item.dataset.view === view && (view !== "tasks" || item.dataset.primary === "true"));
-  });
+  const nextConfig = viewConfig[view];
+  pageTitle.textContent = nextConfig.title;
+  pageSubtitle.textContent = nextConfig.subtitle;
+  taskSearch.hidden = view !== "tasks";
+  document.querySelector(".search-box").hidden = view !== "tasks";
+  document.getElementById("openCreate").hidden = view !== "tasks";
 
-  if (view === "tasks") {
-    pageTitle.textContent = "发布任务";
-    pageSubtitle.textContent = "任务、集群、权限与审计";
-  }
-  if (view === "access") {
-    pageTitle.textContent = "角色权限";
-    pageSubtitle.textContent = "用户、角色与操作边界";
-    renderAccessView();
-  }
-  if (view === "audit") {
-    pageTitle.textContent = "权限审计";
-    pageSubtitle.textContent = "登录、发布与权限变更";
-    renderAuditView();
-  }
+  document.querySelectorAll(".nav-item").forEach((item) => {
+    item.classList.toggle("active", item.dataset.view === view);
+  });
+  render();
 }
 
 function renderAuth() {
@@ -592,8 +736,13 @@ function render() {
   renderMetrics();
   renderRows();
   renderDetail();
-  if (state.view === "access") renderAccessView();
-  if (state.view === "audit") renderAuditView();
+  renderClusterView();
+  renderTemplateView();
+  renderChannelView();
+  renderUserView();
+  renderAccessView();
+  renderAuditView();
+  renderClusters();
   lucide.createIcons();
 }
 
@@ -611,7 +760,6 @@ function login(event) {
   window.localStorage.setItem("deploy-platform-user", JSON.stringify(state.currentUser));
   loginError.hidden = true;
   setView("tasks");
-  render();
 }
 
 function logout() {
@@ -629,6 +777,10 @@ backdrop.addEventListener("click", closeDrawer);
 document.getElementById("previewYaml").addEventListener("click", renderConfigPreview);
 document.getElementById("closeConfig").addEventListener("click", () => configDialog.close());
 taskForm.addEventListener("submit", saveTask);
+document.getElementById("clusterForm").addEventListener("submit", saveCluster);
+document.getElementById("templateForm").addEventListener("submit", saveTemplate);
+document.getElementById("channelForm").addEventListener("submit", saveChannel);
+document.getElementById("userForm").addEventListener("submit", saveUser);
 
 languageSelect.addEventListener("change", (event) => {
   updateSdkOptions(event.target.value);
@@ -661,13 +813,7 @@ document.addEventListener("change", (event) => {
   } else {
     role.permissions = role.permissions.filter((permission) => permission !== input.dataset.permission);
   }
-  auditLogs.unshift({
-    time: "刚刚",
-    actor: state.currentUser.username,
-    action: "更新角色",
-    target: `${role.label} / ${input.dataset.permission}`,
-    result: "成功",
-  });
+  addAudit("更新角色", `${role.label} / ${input.dataset.permission}`);
   render();
 });
 
@@ -682,19 +828,13 @@ document.addEventListener("click", (event) => {
       const task = tasks.find((item) => item.id === taskId);
       task.lastRun = "刚刚";
       task.status = task.status === "failed" ? "partial" : task.status;
-      auditLogs.unshift({
-        time: "刚刚",
-        actor: state.currentUser.username,
-        action: "发布任务",
-        target: task.name,
-        result: "已触发",
-      });
+      addAudit("发布任务", task.name, "已触发");
     }
     render();
   }
 
   const removeButton = event.target.closest("[data-remove-cluster]");
-  if (removeButton && clusterDrafts.length > 1) {
+  if (removeButton && clusterDrafts.length > 0) {
     collectClusterDrafts();
     clusterDrafts.splice(Number(removeButton.dataset.removeCluster), 1);
     renderClusters();
@@ -702,12 +842,17 @@ document.addEventListener("click", (event) => {
 });
 
 document.getElementById("addCluster").addEventListener("click", () => {
+  if (clusters.length === 0) {
+    window.alert("请先在集群管理中添加集群");
+    return;
+  }
   collectClusterDrafts();
+  const firstCluster = clusters[0];
   clusterDrafts.push({
-    name: "dev-01",
-    namespace: "default",
+    name: firstCluster.name,
+    namespace: firstCluster.namespace || "default",
     replicas: 1,
-    ingress: "service-dev.example.internal",
+    ingress: "",
   });
   renderClusters();
 });
@@ -721,5 +866,5 @@ if (savedUser) {
 }
 
 updateSdkOptions(languageSelect.value);
-renderClusters();
+setView("tasks");
 render();

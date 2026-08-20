@@ -33,11 +33,8 @@
             <span>登录</span>
           </button>
           <div class="demo-accounts">
-            <strong>演示账号</strong>
+            <strong>初始账号</strong>
             <span>admin / admin123</span>
-            <span>developer / dev123</span>
-            <span>auditor / audit123</span>
-            <span>viewer / view123</span>
           </div>
         </form>
       </div>
@@ -58,17 +55,21 @@
             <i data-lucide="list-checks"></i>
             <span>发布任务</span>
           </button>
-          <button class="nav-item" type="button" data-view="tasks">
+          <button class="nav-item" type="button" data-view="clusters" data-permission-required="cluster.view">
             <i data-lucide="server-cog"></i>
             <span>集群管理</span>
           </button>
-          <button class="nav-item" type="button" data-view="tasks">
+          <button class="nav-item" type="button" data-view="templates" data-permission-required="template.view">
             <i data-lucide="boxes"></i>
             <span>构建模板</span>
           </button>
-          <button class="nav-item" type="button" data-view="tasks">
+          <button class="nav-item" type="button" data-view="channels" data-permission-required="channel.view">
             <i data-lucide="bell-ring"></i>
             <span>通知渠道</span>
+          </button>
+          <button class="nav-item" type="button" data-view="users" data-permission-required="user.view">
+            <i data-lucide="users"></i>
+            <span>用户管理</span>
           </button>
           <button class="nav-item" type="button" data-view="access" data-permission-required="rbac.view">
             <i data-lucide="shield-check"></i>
@@ -163,22 +164,110 @@
         </section>
 
         <section class="management-view" id="accessView" hidden>
-          <div class="management-grid">
-            <section class="management-panel">
-              <div class="panel-title">
-                <h2>角色权限矩阵</h2>
-                <span>角色与操作边界</span>
+          <section class="management-panel">
+            <div class="panel-title">
+              <h2>角色权限矩阵</h2>
+              <span>角色与操作边界</span>
+            </div>
+            <div id="accessBody"></div>
+          </section>
+        </section>
+
+        <section class="management-view" id="clusterView" hidden>
+          <section class="management-panel">
+            <div class="panel-title split-title">
+              <div>
+                <h2>集群列表</h2>
+                <span>Agent 接入与部署目标</span>
               </div>
-              <div id="accessBody"></div>
-            </section>
-            <section class="management-panel">
-              <div class="panel-title">
-                <h2>用户角色</h2>
-                <span>用户与角色绑定</span>
-              </div>
-              <div id="userBody"></div>
-            </section>
-          </div>
+            </div>
+            <form class="inline-form" id="clusterForm">
+              <input name="name" placeholder="集群名称，例如 shanghai-prod" required />
+              <input name="region" placeholder="地域，例如 上海" />
+              <select name="env">
+                <option value="dev">dev</option>
+                <option value="test">test</option>
+                <option value="prod">prod</option>
+              </select>
+              <input name="namespace" placeholder="默认 namespace" />
+              <button class="primary-button" type="submit" data-permission-required="cluster.manage">
+                <i data-lucide="plus"></i>
+                <span>添加集群</span>
+              </button>
+            </form>
+            <div class="simple-table" id="clusterBody"></div>
+          </section>
+        </section>
+
+        <section class="management-view" id="templateView" hidden>
+          <section class="management-panel">
+            <div class="panel-title">
+              <h2>构建模板</h2>
+              <span>语言、SDK 与默认构建命令</span>
+            </div>
+            <form class="inline-form" id="templateForm">
+              <input name="name" placeholder="模板名称，例如 Java 17 Maven" required />
+              <select name="language">
+                <option value="java">Java</option>
+                <option value="node">Node.js</option>
+                <option value="golang">Golang</option>
+                <option value="python">Python</option>
+              </select>
+              <input name="sdk" placeholder="SDK，例如 jdk17" required />
+              <input name="command" placeholder="默认构建命令" required />
+              <button class="primary-button" type="submit" data-permission-required="template.manage">
+                <i data-lucide="plus"></i>
+                <span>添加模板</span>
+              </button>
+            </form>
+            <div class="simple-table" id="templateBody"></div>
+          </section>
+        </section>
+
+        <section class="management-view" id="channelView" hidden>
+          <section class="management-panel">
+            <div class="panel-title">
+              <h2>通知渠道</h2>
+              <span>告警机器人、邮件或 Webhook</span>
+            </div>
+            <form class="inline-form" id="channelForm">
+              <input name="name" placeholder="渠道名称，例如 deploy-alerts" required />
+              <select name="type">
+                <option value="wecom">企业微信</option>
+                <option value="dingtalk">钉钉</option>
+                <option value="feishu">飞书</option>
+                <option value="email">邮件</option>
+                <option value="webhook">Webhook</option>
+              </select>
+              <input name="target" placeholder="通知目标" required />
+              <input name="secret" type="password" placeholder="Token / Secret" />
+              <button class="primary-button" type="submit" data-permission-required="channel.manage">
+                <i data-lucide="plus"></i>
+                <span>添加渠道</span>
+              </button>
+            </form>
+            <div class="simple-table" id="channelBody"></div>
+          </section>
+        </section>
+
+        <section class="management-view" id="userView" hidden>
+          <section class="management-panel">
+            <div class="panel-title">
+              <h2>用户管理</h2>
+              <span>账号、姓名与角色绑定</span>
+            </div>
+            <form class="inline-form" id="userForm">
+              <input name="username" placeholder="登录账号" required />
+              <input name="name" placeholder="姓名" required />
+              <input name="password" type="password" placeholder="初始密码" required />
+              <select name="role" id="newUserRole"></select>
+              <button class="primary-button" type="submit" data-permission-required="user.manage">
+                <i data-lucide="user-plus"></i>
+                <span>添加用户</span>
+              </button>
+            </form>
+            <div class="simple-table" id="userBody"></div>
+          </section>
         </section>
 
         <section class="management-view" id="auditView" hidden>
@@ -220,11 +309,11 @@
           <div class="form-grid">
             <label>
               <span>任务名称</span>
-              <input name="name" required value="inventory-service" />
+              <input name="name" required placeholder="例如 inventory-service" />
             </label>
             <label>
               <span>负责人</span>
-              <input name="owner" required value="platform-team" />
+              <input name="owner" required placeholder="负责人或团队" />
             </label>
             <label>
               <span>部署环境</span>
@@ -237,7 +326,7 @@
             </label>
             <label>
               <span>业务标签</span>
-              <input name="tag" value="库存系统" />
+              <input name="tag" placeholder="业务标签" />
             </label>
           </div>
         </section>
@@ -247,15 +336,15 @@
           <div class="form-grid">
             <label class="wide-field">
               <span>仓库地址</span>
-              <input name="repo" required value="git@example.com:backend/inventory-service.git" />
+              <input name="repo" required placeholder="git@example.com:group/project.git" />
             </label>
             <label>
               <span>分支</span>
-              <input name="branch" required value="main" />
+              <input name="branch" required placeholder="main" />
             </label>
             <label>
               <span>工作路径</span>
-              <input name="workdir" required value="./inventory-service" />
+              <input name="workdir" required placeholder="." />
             </label>
             <label>
               <span>编译语言</span>
@@ -272,7 +361,7 @@
             </label>
             <label class="wide-field">
               <span>编译命令</span>
-              <input name="buildCommand" required value="mvn clean package -DskipTests" />
+              <input name="buildCommand" required placeholder="mvn clean package -DskipTests" />
             </label>
           </div>
         </section>
@@ -282,19 +371,19 @@
           <div class="form-grid">
             <label>
               <span>容器端口</span>
-              <input name="containerPort" type="number" min="1" max="65535" required value="8080" />
+              <input name="containerPort" type="number" min="1" max="65535" required placeholder="8080" />
             </label>
             <label>
               <span>Service 端口</span>
-              <input name="servicePort" type="number" min="1" max="65535" required value="80" />
+              <input name="servicePort" type="number" min="1" max="65535" required placeholder="80" />
             </label>
             <label>
               <span>副本数</span>
-              <input name="replicas" type="number" min="1" max="50" value="2" />
+              <input name="replicas" type="number" min="1" max="50" placeholder="2" />
             </label>
             <label>
               <span>健康检查</span>
-              <input name="healthPath" value="/actuator/health" />
+              <input name="healthPath" placeholder="/actuator/health" />
             </label>
           </div>
         </section>
@@ -343,7 +432,7 @@
             </label>
             <label class="wide-field">
               <span>通知目标</span>
-              <input name="notifyTarget" value="机器人：deploy-alerts" />
+              <input name="notifyTarget" placeholder="选择或填写通知目标" />
             </label>
           </div>
         </section>

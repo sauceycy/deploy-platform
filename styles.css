@@ -735,6 +735,74 @@ svg {
   font-size: 12px;
 }
 
+.split-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.inline-form {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(120px, 0.7fr) minmax(110px, 0.5fr) minmax(140px, 0.7fr) auto;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.simple-table {
+  min-height: 120px;
+}
+
+.simple-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 58px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.simple-row:last-child {
+  border-bottom: 0;
+}
+
+.simple-row strong,
+.simple-row span {
+  display: block;
+}
+
+.simple-row div > span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.empty-state {
+  display: grid;
+  gap: 5px;
+  padding: 28px 16px;
+  color: var(--muted);
+}
+
+.empty-state strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.empty-state span {
+  font-size: 12px;
+}
+
+.empty-state.compact {
+  padding: 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
 .role-row {
   display: grid;
   grid-template-columns: 158px minmax(0, 1fr);
@@ -1055,7 +1123,8 @@ pre {
   }
 
   .form-grid,
-  .notify-grid {
+  .notify-grid,
+  .inline-form {
     grid-template-columns: 1fr;
   }
 
