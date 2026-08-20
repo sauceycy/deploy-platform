@@ -37,6 +37,12 @@ cd deploy-platform
 docker compose up -d --build
 ```
 
+配置数据会保存到：
+
+```text
+./data/deploy-platform.sqlite3
+```
+
 访问：
 
 ```text
@@ -59,6 +65,20 @@ docker compose ps
 
 ```bash
 docker compose logs -f deploy-platform-web
+```
+
+备份配置数据库：
+
+```bash
+cp data/deploy-platform.sqlite3 deploy-platform.sqlite3.bak
+```
+
+重置配置数据：
+
+```bash
+docker compose down
+rm -rf data
+docker compose up -d --build
 ```
 
 ## 直接本地预览

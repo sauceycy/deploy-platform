@@ -72,6 +72,7 @@ const buildTemplates = [];
 const notifyChannels = [];
 const auditLogs = [];
 const clusterDrafts = [];
+const APP_STATE_KEY = "deploy-platform-state";
 
 const state = {
   currentUser: null,
@@ -134,6 +135,65 @@ function addAudit(action, target, result = "成功") {
     target,
     result,
   });
+}
+
+function exportState() {
+  return {
+    roles,
+    users,
+    tasks,
+    clusters,
+    buildTemplates,
+    notifyChannels,
+    auditLogs,
+  };
+}
+
+function replaceArray(target, nextValue) {
+  if (!Array.isArray(nextValue)) return;
+  target.splice(0, target.length, ...nextValue);
+}
+
+function replaceRoles(nextRoles) {
+  if (!nextRoles || typeof nextRoles !== "object") return;
+  Object.keys(roles).forEach((key) => delete roles[key]);
+  Object.entries(nextRoles).forEach(([key, role]) => {
+    roles[key] = role;
+  });
+}
+
+function hydrateState(nextState) {
+  if (!nextState || typeof nextState !== "object") return;
+  replaceRoles(nextState.roles);
+  replaceArray(users, nextState.users);
+  replaceArray(tasks, nextState.tasks);
+  replaceArray(clusters, nextState.clusters);
+  replaceArray(buildTemplates, nextState.buildTemplates);
+  replaceArray(notifyChannels, nextState.notifyChannels);
+  replaceArray(auditLogs, nextState.auditLogs);
+  state.selectedId = tasks[0]?.id || null;
+}
+
+async function loadPersistedState() {
+  try {
+    const response = await fetch("/api/state", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    hydrateState(await response.json());
+    return;
+  } catch (error) {
+    const localState = window.localStorage.getItem(APP_STATE_KEY);
+    if (localState) hydrateState(JSON.parse(localState));
+  }
+}
+
+function persistState() {
+  const payload = exportState();
+  window.localStorage.setItem(APP_STATE_KEY, JSON.stringify(payload));
+  fetch("/api/state", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).catch(() => {});
 }
 
 function statusLabel(status) {
@@ -601,6 +661,7 @@ function saveTask(event) {
   state.selectedId = newTask.id;
   addAudit("创建任务", newTask.name);
   render();
+  persistState();
   closeDrawer();
 }
 
@@ -627,6 +688,7 @@ function saveCluster(event) {
   addAudit("添加集群", cluster.name);
   form.reset();
   render();
+  persistState();
 }
 
 function saveTemplate(event) {
@@ -645,6 +707,7 @@ function saveTemplate(event) {
   addAudit("添加构建模板", template.name);
   form.reset();
   render();
+  persistState();
 }
 
 function saveChannel(event) {
@@ -663,6 +726,7 @@ function saveChannel(event) {
   addAudit("添加通知渠道", channel.name);
   form.reset();
   render();
+  persistState();
 }
 
 function saveUser(event) {
@@ -685,6 +749,7 @@ function saveUser(event) {
   addAudit("添加用户", username);
   form.reset();
   render();
+  persistState();
 }
 
 function openUserDialog(username, mode = "edit") {
@@ -748,6 +813,7 @@ function saveEditedUser(event) {
 
   closeUserDialog();
   render();
+  persistState();
 }
 
 const viewConfig = {
@@ -898,6 +964,7 @@ document.addEventListener("change", (event) => {
   }
   addAudit("更新角色", `${role.label} / ${input.dataset.permission}`);
   render();
+  persistState();
 });
 
 document.addEventListener("click", (event) => {
@@ -920,6 +987,7 @@ document.addEventListener("click", (event) => {
       addAudit("发布任务", task.name, "已触发");
     }
     render();
+    persistState();
   }
 
   const removeButton = event.target.closest("[data-remove-cluster]");
@@ -946,14 +1014,21 @@ document.getElementById("addCluster").addEventListener("click", () => {
   renderClusters();
 });
 
-const savedUser = window.localStorage.getItem("deploy-platform-user");
-if (savedUser) {
-  const parsedUser = JSON.parse(savedUser);
-  if (users.some((user) => user.username === parsedUser.username)) {
-    state.currentUser = parsedUser;
+async function init() {
+  await loadPersistedState();
+  const savedUser = window.localStorage.getItem("deploy-platform-user");
+  if (savedUser) {
+    const parsedUser = JSON.parse(savedUser);
+    const user = users.find((item) => item.username === parsedUser.username);
+    if (user) {
+      state.currentUser = { username: user.username, name: user.name, role: user.role };
+    } else {
+      window.localStorage.removeItem("deploy-platform-user");
+    }
   }
+  updateSdkOptions(languageSelect.value);
+  setView("tasks");
+  render();
 }
 
-updateSdkOptions(languageSelect.value);
-setView("tasks");
-render();
+init();
