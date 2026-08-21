@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 
 try:
@@ -258,10 +258,21 @@ def authenticated_repo_url(repo, secret):
     if not repo.startswith("https://"):
         return repo
     token = secret.get("secret") or ""
-    username = secret.get("username") or "oauth2"
+    username = secret.get("username") or "x-access-token"
     if not token or "@" in repo.split("://", 1)[1].split("/", 1)[0]:
         return repo
-    return repo.replace("https://", f"https://{username}:{token}@", 1)
+    return repo.replace("https://", f"https://{quote(username, safe='')}:{quote(token, safe='')}@", 1)
+
+
+def redact_secret_text(text, secret=None):
+    if not text:
+        return text
+    redacted = text
+    if secret:
+        for value in [secret.get("secret"), quote(secret.get("secret") or "", safe=""), secret.get("username"), quote(secret.get("username") or "", safe="")]:
+            if value:
+                redacted = redacted.replace(value, "***")
+    return re.sub(r"https://[^\s/:]+:[^\s@]+@", "https://***:***@", redacted)
 
 
 def clone_environment(work_dir, secret):
@@ -295,7 +306,7 @@ def list_repository_branches(repo, secret_id=None):
     code, output = run_command(["git", "ls-remote", "--heads", repo_url], env=env)
     shutil.rmtree(work_dir, ignore_errors=True)
     if code != 0:
-        raise RuntimeError(output.strip() or "读取仓库分支失败")
+        raise RuntimeError(redact_secret_text(output.strip(), secret) or "读取仓库分支失败")
     branches = []
     for line in output.splitlines():
         if "refs/heads/" not in line:
@@ -501,7 +512,7 @@ def build_and_dispatch(execution_id):
         clone_env = clone_environment(work_dir, git_secret)
         clone_cmd = ["git", "clone", "--depth", "1", "--branch", branch, clone_repo, str(src_dir)]
         code, output = run_command(clone_cmd, env=clone_env)
-        append_log(execution_id, output)
+        append_log(execution_id, redact_secret_text(output, git_secret))
         if code != 0:
             raise RuntimeError("代码拉取失败")
 
