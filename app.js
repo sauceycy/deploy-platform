@@ -689,6 +689,12 @@ function renderDetail() {
         <span>语言</span><strong>${languageLabel(task.language)}</strong>
         <span>SDK</span><strong>${task.sdk}</strong>
         <span>命令</span><strong>${task.buildCommand}</strong>
+        ${
+          task.language === "java"
+            ? `<span>Maven 私库</span><strong>${task.mavenRepoUrl || "未设置"}</strong>
+               <span>覆盖仓库</span><strong>${task.mavenMirrorOf || "maven-public"}</strong>`
+            : ""
+        }
       </div>
     </section>
 
@@ -1006,6 +1012,9 @@ function updateSdkOptions(language, force = false) {
   sdkSelect.innerHTML = options.map((sdk, index) => `<option ${index === 0 ? "selected" : ""}>${sdk}</option>`).join("");
   const commandInput = taskForm.elements.buildCommand;
   if (force || !commandInput.value) commandInput.value = buildCommands[language] || "";
+  document.querySelectorAll(".java-build-field").forEach((field) => {
+    field.hidden = language !== "java";
+  });
 }
 
 function resetTaskForm() {
@@ -1013,6 +1022,8 @@ function resetTaskForm() {
   taskForm.elements.taskId.value = "";
   taskForm.elements.env.value = "test";
   taskForm.elements.language.value = "java";
+  taskForm.elements.mavenRepoUrl.value = "";
+  taskForm.elements.mavenMirrorOf.value = "maven-public";
   renderGitCredentialOptions("");
   clusterDrafts.splice(0, clusterDrafts.length);
   updateSdkOptions("java", true);
@@ -1046,6 +1057,8 @@ function openTaskEditor(taskId) {
   updateSdkOptions(task.language || "java", true);
   taskForm.elements.sdk.value = task.sdk || sdkOptions[task.language || "java"]?.[0] || "";
   taskForm.elements.buildCommand.value = task.buildCommand || "";
+  taskForm.elements.mavenRepoUrl.value = task.mavenRepoUrl || "";
+  taskForm.elements.mavenMirrorOf.value = task.mavenMirrorOf || "maven-public";
   taskForm.elements.containerPort.value = task.containerPort || "";
   taskForm.elements.servicePort.value = task.servicePort || "";
   taskForm.elements.replicas.value = task.replicas || "";
@@ -1115,6 +1128,8 @@ function buildPreviewObject() {
       language: formValue("language"),
       sdk: formValue("sdk"),
       command: formValue("buildCommand"),
+      mavenRepoUrl: formValue("mavenRepoUrl"),
+      mavenMirrorOf: formValue("mavenMirrorOf") || "maven-public",
     },
     runtime: {
       containerPort: Number(formValue("containerPort")),
@@ -1147,6 +1162,8 @@ function saveTask(event) {
     language: preview.build.language,
     sdk: preview.build.sdk,
     buildCommand: preview.build.command,
+    mavenRepoUrl: preview.build.mavenRepoUrl,
+    mavenMirrorOf: preview.build.mavenMirrorOf,
     containerPort: preview.runtime.containerPort,
     servicePort: preview.runtime.servicePort,
     replicas: preview.runtime.replicas,

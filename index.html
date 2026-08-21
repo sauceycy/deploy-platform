@@ -441,6 +441,14 @@
               <span>编译命令</span>
               <input name="buildCommand" required placeholder="mvn clean package -DskipTests" />
             </label>
+            <label class="wide-field java-build-field">
+              <span>Maven 私库地址</span>
+              <input name="mavenRepoUrl" placeholder="https://nexus.example.com/repository/maven-public/" />
+            </label>
+            <label class="java-build-field">
+              <span>覆盖仓库 ID</span>
+              <input name="mavenMirrorOf" placeholder="maven-public" />
+            </label>
           </div>
         </section>
 

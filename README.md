@@ -205,6 +205,14 @@ Git 凭据：选择 Git HTTPS Token
 
 Java 任务编译时会使用 Maven + Temurin JDK 构建镜像，例如 `jdk17` 会使用 `maven:3-eclipse-temurin-17` 执行 `mvn clean package -DskipTests`；最终运行镜像仍使用 Temurin JRE。
 
+如果业务 POM 里引用了内网 Maven 仓库，可以在任务的「Maven 私库地址」填写公网 Nexus 地址，例如：
+
+```text
+https://nexus.example.com/repository/maven-public/
+```
+
+「覆盖仓库 ID」默认是 `maven-public`。构建时平台会临时生成 `/workspace/.deploy/maven-settings.xml`，并自动把以 `mvn` 或 `./mvnw` 开头的编译命令改为使用 `-s /workspace/.deploy/maven-settings.xml`。如果编译命令不是以 `mvn` 或 `./mvnw` 开头，请手动在命令中加入这个 `-s` 参数。
+
 ## 发布接口
 
 单任务发布：

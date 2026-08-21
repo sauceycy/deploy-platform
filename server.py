@@ -12,6 +12,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
+from xml.sax.saxutils import escape as xml_escape
 
 try:
     import psycopg
@@ -247,6 +248,51 @@ def runtime_base(task):
     if task.get("language") == "python" and sdk.startswith("python"):
         return f"python:{sdk.replace('python', '')}-slim"
     return "alpine:3.20"
+
+
+def redact_url_credentials(value):
+    return re.sub(r"://[^/@]+@", "://***@", str(value or ""))
+
+
+def write_maven_settings(task, src_dir):
+    repo_url = str(task.get("mavenRepoUrl") or "").strip()
+    if task.get("language") != "java" or not repo_url:
+        return None
+    if not re.match(r"^https?://", repo_url, flags=re.IGNORECASE):
+        raise RuntimeError("Maven 私库地址必须以 http:// 或 https:// 开头")
+
+    mirror_of = str(task.get("mavenMirrorOf") or "maven-public").strip() or "maven-public"
+    settings_dir = src_dir / ".deploy"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    settings_file = settings_dir / "maven-settings.xml"
+    settings_file.write_text(
+        f"""<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+  <mirrors>
+    <mirror>
+      <id>deploy-platform-private-repo</id>
+      <name>Deploy Platform Private Maven Repository</name>
+      <url>{xml_escape(repo_url)}</url>
+      <mirrorOf>{xml_escape(mirror_of)}</mirrorOf>
+    </mirror>
+  </mirrors>
+</settings>
+""",
+        encoding="utf-8",
+    )
+    return "/workspace/.deploy/maven-settings.xml"
+
+
+def apply_maven_settings_to_command(command, settings_path):
+    if not settings_path or re.search(r"(^|\s)(-s|--settings)(\s|=)", command):
+        return command, True
+    match = re.match(r"^(\s*)((?:\./)?mvnw|mvn)(\s|$)", command)
+    if not match:
+        return command, False
+    prefix, binary = match.group(1), match.group(2)
+    rest = command[match.end(2) :]
+    return f"{prefix}{binary} -s {settings_path}{rest}", True
 
 
 def image_name(task, execution_id):
@@ -554,6 +600,16 @@ def build_and_dispatch(execution_id):
         command = task.get("buildCommand") or ""
         if command:
             set_execution_status(execution_id, "building", f"使用 {task.get('sdk')} 执行编译命令", stage="执行编译", progress=35)
+            maven_settings_path = write_maven_settings(task, src_dir)
+            if maven_settings_path:
+                original_command = command
+                command, injected = apply_maven_settings_to_command(command, maven_settings_path)
+                append_log(
+                    execution_id,
+                    f"已启用 Maven 私库 {redact_url_credentials(task.get('mavenRepoUrl'))}，覆盖仓库: {task.get('mavenMirrorOf') or 'maven-public'}",
+                )
+                if not injected and original_command == command:
+                    append_log(execution_id, f"编译命令未以 mvn/mvnw 开头，请手动追加参数: -s {maven_settings_path}")
             docker_src_dir = HOST_WORKSPACE_DIR / execution_id / "src"
             docker_cmd = [
                 "docker",
