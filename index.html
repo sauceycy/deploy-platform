@@ -67,6 +67,10 @@
             <i data-lucide="bell-ring"></i>
             <span>通知渠道</span>
           </button>
+          <button class="nav-item" type="button" data-view="secrets" data-permission-required="secret.view">
+            <i data-lucide="key-round"></i>
+            <span>秘钥管理</span>
+          </button>
           <button class="nav-item" type="button" data-view="users" data-permission-required="user.view">
             <i data-lucide="users"></i>
             <span>用户管理</span>
@@ -263,6 +267,64 @@
           </section>
         </section>
 
+        <section class="management-view" id="secretView" hidden>
+          <section class="management-grid">
+            <div class="management-panel">
+              <div class="panel-title">
+                <h2>秘钥列表</h2>
+                <span>Git 凭据、镜像仓库账号、Agent Token 记录</span>
+              </div>
+              <div class="secret-token-note">
+                <strong>Agent Token 实际配置位置</strong>
+                <span>平台服务端在 docker-compose.yml 的 AGENT_SHARED_TOKEN，集群 Agent 在 k8s-agent.yaml 的 AGENT_TOKEN，两边必须一致。这里可以记录 token 名称和用途，但运行时仍以环境变量为准。</span>
+              </div>
+              <div class="simple-table" id="secretBody"></div>
+            </div>
+            <aside class="management-panel">
+              <div class="panel-title">
+                <h2>添加秘钥</h2>
+                <span>私密值会持久化到平台数据库</span>
+              </div>
+              <form class="side-form" id="secretForm">
+                <label>
+                  <span>名称</span>
+                  <input name="name" placeholder="例如 github-token" required />
+                </label>
+                <label>
+                  <span>类型</span>
+                  <select name="type" id="secretType">
+                    <option value="git_https_token">Git HTTPS Token</option>
+                    <option value="git_ssh_key">Git SSH 私钥</option>
+                    <option value="registry">镜像仓库账号</option>
+                    <option value="agent_token">Agent Token 记录</option>
+                    <option value="webhook">Webhook Secret</option>
+                  </select>
+                </label>
+                <label>
+                  <span>地址 / 用途</span>
+                  <input name="target" placeholder="github.com / harbor.example.com / Trade_test_k8s" />
+                </label>
+                <label>
+                  <span>用户名</span>
+                  <input name="username" placeholder="HTTPS Token 可填 oauth2 或用户名" />
+                </label>
+                <label>
+                  <span>秘钥内容</span>
+                  <textarea name="secret" rows="7" placeholder="Token、私钥或密码" required></textarea>
+                </label>
+                <label>
+                  <span>known_hosts</span>
+                  <textarea name="knownHosts" rows="4" placeholder="SSH 私钥可选，建议填 ssh-keyscan github.com 的输出"></textarea>
+                </label>
+                <button class="primary-button" type="submit" data-permission-required="secret.manage">
+                  <i data-lucide="key-round"></i>
+                  <span>保存秘钥</span>
+                </button>
+              </form>
+            </aside>
+          </section>
+        </section>
+
         <section class="management-view" id="userView" hidden>
           <section class="management-panel">
             <div class="panel-title">
@@ -355,6 +417,12 @@
             <label>
               <span>工作路径</span>
               <input name="workdir" required placeholder="." />
+            </label>
+            <label>
+              <span>Git 凭据</span>
+              <select name="gitCredentialId" id="gitCredentialSelect">
+                <option value="">不使用凭据</option>
+              </select>
             </label>
             <label>
               <span>编译语言</span>

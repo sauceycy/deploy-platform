@@ -47,6 +47,8 @@ DEFAULT_STATE = {
                 "template.manage",
                 "channel.view",
                 "channel.manage",
+                "secret.view",
+                "secret.manage",
                 "user.view",
                 "user.manage",
                 "rbac.view",
@@ -56,7 +58,7 @@ DEFAULT_STATE = {
         },
         "developer": {
             "label": "开发人员",
-            "permissions": ["task.view", "task.create", "task.deploy", "cluster.view", "template.view", "channel.view"],
+            "permissions": ["task.view", "task.create", "task.deploy", "cluster.view", "template.view", "channel.view", "secret.view"],
         },
         "auditor": {
             "label": "审计人员",
@@ -72,6 +74,7 @@ DEFAULT_STATE = {
     "clusters": [],
     "buildTemplates": [],
     "notifyChannels": [],
+    "secrets": [],
     "auditLogs": [],
     "executions": [],
     "agentTasks": [],
@@ -229,7 +232,7 @@ def image_name(task, execution_id):
     return f"{REGISTRY_URL}/{repo}" if REGISTRY_URL else repo
 
 
-def run_command(args, cwd=None, input_text=None):
+def run_command(args, cwd=None, input_text=None, env=None):
     process = subprocess.run(
         args,
         cwd=cwd,
@@ -238,12 +241,59 @@ def run_command(args, cwd=None, input_text=None):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
+        env=env,
     )
     return process.returncode, process.stdout
 
 
-def list_repository_branches(repo):
-    code, output = run_command(["git", "ls-remote", "--heads", repo])
+def secret_by_id(state, secret_id):
+    if not secret_id:
+        return None
+    return find_by_id(state.get("secrets", []), secret_id)
+
+
+def authenticated_repo_url(repo, secret):
+    if not secret or secret.get("type") != "git_https_token":
+        return repo
+    if not repo.startswith("https://"):
+        return repo
+    token = secret.get("secret") or ""
+    username = secret.get("username") or "oauth2"
+    if not token or "@" in repo.split("://", 1)[1].split("/", 1)[0]:
+        return repo
+    return repo.replace("https://", f"https://{username}:{token}@", 1)
+
+
+def clone_environment(work_dir, secret):
+    env = os.environ.copy()
+    if not secret or secret.get("type") != "git_ssh_key":
+        return env
+    ssh_dir = work_dir / ".ssh"
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    key_path = ssh_dir / "id_deploy"
+    key_path.write_text(secret.get("secret") or "", encoding="utf-8")
+    key_path.chmod(0o600)
+    known_hosts = (secret.get("knownHosts") or "").strip()
+    known_hosts_path = ssh_dir / "known_hosts"
+    if known_hosts:
+        known_hosts_path.write_text(f"{known_hosts}\n", encoding="utf-8")
+        host_check = "yes"
+    else:
+        host_check = "accept-new"
+    env["GIT_SSH_COMMAND"] = f"ssh -i {key_path} -o StrictHostKeyChecking={host_check} -o UserKnownHostsFile={known_hosts_path}"
+    return env
+
+
+def list_repository_branches(repo, secret_id=None):
+    state = read_state()
+    secret = secret_by_id(state, secret_id)
+    work_dir = WORKSPACE_DIR / f"branch-check-{uuid.uuid4().hex[:8]}"
+    work_dir.parent.mkdir(parents=True, exist_ok=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    repo_url = authenticated_repo_url(repo, secret)
+    env = clone_environment(work_dir, secret)
+    code, output = run_command(["git", "ls-remote", "--heads", repo_url], env=env)
+    shutil.rmtree(work_dir, ignore_errors=True)
     if code != 0:
         raise RuntimeError(output.strip() or "读取仓库分支失败")
     branches = []
@@ -446,8 +496,11 @@ def build_and_dispatch(execution_id):
         branch = execution.get("branch")
         if not branch:
             raise RuntimeError("未选择发布分支")
-        clone_cmd = ["git", "clone", "--depth", "1", "--branch", branch, task["repo"], str(src_dir)]
-        code, output = run_command(clone_cmd)
+        git_secret = secret_by_id(state, task.get("gitCredentialId"))
+        clone_repo = authenticated_repo_url(task["repo"], git_secret)
+        clone_env = clone_environment(work_dir, git_secret)
+        clone_cmd = ["git", "clone", "--depth", "1", "--branch", branch, clone_repo, str(src_dir)]
+        code, output = run_command(clone_cmd, env=clone_env)
         append_log(execution_id, output)
         if code != 0:
             raise RuntimeError("代码拉取失败")
@@ -811,7 +864,7 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/repositories/branches":
             body = self.read_json_body()
             try:
-                branches = list_repository_branches(body.get("repo") or "")
+                branches = list_repository_branches(body.get("repo") or "", body.get("gitCredentialId"))
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return

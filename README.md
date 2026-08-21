@@ -18,6 +18,7 @@
 - 配置多集群部署目标
 - 集群管理支持查看 Agent 心跳、编辑集群和维护节点信息
 - 配置告警通知事件与通知渠道
+- 配置 Git HTTPS Token、Git SSH 私钥等秘钥，并在任务中选择 Git 凭据
 - Worker 拉代码、编译、构建镜像、推送镜像
 - Agent 拉取部署任务并创建 Deployment / Service / Ingress
 - 服务端调度线程扫描定时发布计划并触发 Worker
@@ -145,6 +146,38 @@ dev-agent-token
 ```
 
 如果你修改了平台的 `AGENT_SHARED_TOKEN`，需要同步修改每个集群 Agent 的 `AGENT_TOKEN`，然后重启 Agent Deployment。
+
+## 秘钥管理
+
+进入「秘钥管理」可以新增并持久化以下类型：
+
+- Git HTTPS Token
+- Git SSH 私钥
+- 镜像仓库账号
+- Agent Token 记录
+- Webhook Secret
+
+私有 Git 仓库建议这样配置：
+
+1. 在「秘钥管理」添加 `Git HTTPS Token` 或 `Git SSH 私钥`
+2. 编辑发布任务
+3. 在「仓库与构建」里的 `Git 凭据` 下拉框选择刚才创建的秘钥
+4. 发布时平台会用该凭据读取分支并拉取代码
+
+如果使用 SSH 私钥，`known_hosts` 建议填：
+
+```bash
+ssh-keyscan github.com
+```
+
+GitHub HTTPS Token 示例：
+
+```text
+仓库地址：https://github.com/org/repo.git
+Git 凭据：选择 Git HTTPS Token
+用户名：可填 oauth2 或 GitHub 用户名
+秘钥内容：GitHub Personal Access Token
+```
 
 ## 发布流程
 

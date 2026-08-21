@@ -26,6 +26,8 @@ const roles = {
       "template.manage",
       "channel.view",
       "channel.manage",
+      "secret.view",
+      "secret.manage",
       "user.view",
       "user.manage",
       "rbac.view",
@@ -35,7 +37,7 @@ const roles = {
   },
   developer: {
     label: "开发人员",
-    permissions: ["task.view", "task.create", "task.deploy", "cluster.view", "template.view", "channel.view"],
+    permissions: ["task.view", "task.create", "task.deploy", "cluster.view", "template.view", "channel.view", "secret.view"],
   },
   auditor: {
     label: "审计人员",
@@ -58,6 +60,8 @@ const permissionCatalog = [
   { key: "template.manage", label: "管理模板" },
   { key: "channel.view", label: "查看通知" },
   { key: "channel.manage", label: "管理通知" },
+  { key: "secret.view", label: "查看秘钥" },
+  { key: "secret.manage", label: "管理秘钥" },
   { key: "user.view", label: "查看用户" },
   { key: "user.manage", label: "管理用户" },
   { key: "rbac.view", label: "查看权限" },
@@ -70,6 +74,7 @@ const tasks = [];
 const clusters = [];
 const buildTemplates = [];
 const notifyChannels = [];
+const secrets = [];
 const auditLogs = [];
 const executions = [];
 const agentTasks = [];
@@ -101,6 +106,7 @@ const taskView = document.getElementById("taskView");
 const clusterView = document.getElementById("clusterView");
 const templateView = document.getElementById("templateView");
 const channelView = document.getElementById("channelView");
+const secretView = document.getElementById("secretView");
 const userView = document.getElementById("userView");
 const accessView = document.getElementById("accessView");
 const auditView = document.getElementById("auditView");
@@ -112,11 +118,13 @@ const backdrop = document.getElementById("drawerBackdrop");
 const languageSelect = document.getElementById("languageSelect");
 const sdkSelect = document.getElementById("sdkSelect");
 const taskForm = document.getElementById("taskForm");
+const gitCredentialSelect = document.getElementById("gitCredentialSelect");
 const clusterEditor = document.getElementById("clusterEditor");
 const configDialog = document.getElementById("configDialog");
 const configPreview = document.getElementById("configPreview");
 const userDialog = document.getElementById("userDialog");
 const editUserForm = document.getElementById("editUserForm");
+const secretForm = document.getElementById("secretForm");
 const clusterDialog = document.getElementById("clusterDialog");
 const editClusterForm = document.getElementById("editClusterForm");
 const clusterNodeEditor = document.getElementById("clusterNodeEditor");
@@ -173,6 +181,7 @@ function exportState() {
     clusters,
     buildTemplates,
     notifyChannels,
+    secrets,
     auditLogs,
     executions,
     agentTasks,
@@ -192,6 +201,8 @@ function replaceRoles(nextRoles) {
   Object.entries(nextRoles).forEach(([key, role]) => {
     roles[key] = role;
   });
+  roles.platform_admin.permissions = Array.from(new Set([...(roles.platform_admin.permissions || []), "secret.view", "secret.manage"]));
+  if (roles.developer) roles.developer.permissions = Array.from(new Set([...(roles.developer.permissions || []), "secret.view"]));
 }
 
 function hydrateState(nextState) {
@@ -203,6 +214,7 @@ function hydrateState(nextState) {
   replaceArray(clusters, nextState.clusters);
   replaceArray(buildTemplates, nextState.buildTemplates);
   replaceArray(notifyChannels, nextState.notifyChannels);
+  replaceArray(secrets, nextState.secrets);
   replaceArray(auditLogs, nextState.auditLogs);
   replaceArray(executions, nextState.executions);
   replaceArray(agentTasks, nextState.agentTasks);
@@ -281,6 +293,29 @@ function channelLabel(type) {
     email: "邮件",
     webhook: "Webhook",
   }[type];
+}
+
+function secretTypeLabel(type) {
+  return {
+    git_https_token: "Git HTTPS Token",
+    git_ssh_key: "Git SSH 私钥",
+    registry: "镜像仓库账号",
+    agent_token: "Agent Token 记录",
+    webhook: "Webhook Secret",
+  }[type] || type;
+}
+
+function gitCredentialOptions(selectedId = "") {
+  const gitSecrets = secrets.filter((item) => ["git_https_token", "git_ssh_key"].includes(item.type));
+  return [
+    `<option value="">不使用凭据</option>`,
+    ...gitSecrets.map((item) => `<option value="${item.id}" ${String(item.id) === String(selectedId) ? "selected" : ""}>${item.name} / ${secretTypeLabel(item.type)}</option>`),
+  ].join("");
+}
+
+function secretName(secretId) {
+  const secret = secrets.find((item) => String(item.id) === String(secretId));
+  return secret ? `${secret.name} / ${secretTypeLabel(secret.type)}` : "未使用";
 }
 
 function roleOptions(selectedRole) {
@@ -409,6 +444,7 @@ function renderDetail() {
         <span>仓库</span><strong>${task.repo}</strong>
         <span>最近分支</span><strong>${task.lastBranch || "未发布"}</strong>
         <span>工作路径</span><strong>${task.workdir}</strong>
+        <span>Git 凭据</span><strong>${secretName(task.gitCredentialId)}</strong>
         <span>语言</span><strong>${languageLabel(task.language)}</strong>
         <span>SDK</span><strong>${task.sdk}</strong>
         <span>命令</span><strong>${task.buildCommand}</strong>
@@ -621,6 +657,34 @@ function renderChannelView() {
     .join("");
 }
 
+function renderSecretView() {
+  const body = document.getElementById("secretBody");
+  if (secrets.length === 0) {
+    body.innerHTML = emptyState("暂无秘钥");
+    return;
+  }
+  body.innerHTML = secrets
+    .map(
+      (secret) => `
+      <div class="simple-row">
+        <div>
+          <strong>${secret.name}</strong>
+          <span>${secretTypeLabel(secret.type)} · ${secret.target || "未设置地址"} · ${secret.username || "未设置用户名"} · ${secret.secret ? "已保存秘钥" : "未保存秘钥"}</span>
+        </div>
+        <button class="ghost-button" type="button" data-secret-delete="${secret.id}" ${hasPermission("secret.manage") ? "" : "disabled"}>
+          <i data-lucide="trash-2"></i>
+          <span>删除</span>
+        </button>
+      </div>
+    `,
+    )
+    .join("");
+}
+
+function renderGitCredentialOptions(selectedId = taskForm.elements.gitCredentialId?.value || "") {
+  gitCredentialSelect.innerHTML = gitCredentialOptions(selectedId);
+}
+
 function renderUserView() {
   const userBody = document.getElementById("userBody");
   userBody.innerHTML = users
@@ -722,6 +786,7 @@ function resetTaskForm() {
   taskForm.elements.taskId.value = "";
   taskForm.elements.env.value = "test";
   taskForm.elements.language.value = "java";
+  renderGitCredentialOptions("");
   clusterDrafts.splice(0, clusterDrafts.length);
   updateSdkOptions("java", true);
   renderClusters();
@@ -748,6 +813,8 @@ function openTaskEditor(taskId) {
   taskForm.elements.tag.value = task.tag || "";
   taskForm.elements.repo.value = task.repo || "";
   taskForm.elements.workdir.value = task.workdir || ".";
+  renderGitCredentialOptions(task.gitCredentialId || "");
+  taskForm.elements.gitCredentialId.value = task.gitCredentialId || "";
   taskForm.elements.language.value = task.language || "java";
   updateSdkOptions(task.language || "java", true);
   taskForm.elements.sdk.value = task.sdk || sdkOptions[task.language || "java"]?.[0] || "";
@@ -815,6 +882,7 @@ function buildPreviewObject() {
     repository: {
       url: formValue("repo"),
       workdir: formValue("workdir"),
+      gitCredentialId: formValue("gitCredentialId"),
     },
     build: {
       language: formValue("language"),
@@ -848,6 +916,7 @@ function saveTask(event) {
     tag: preview.task.tag,
     repo: preview.repository.url,
     workdir: preview.repository.workdir,
+    gitCredentialId: preview.repository.gitCredentialId,
     language: preview.build.language,
     sdk: preview.build.sdk,
     buildCommand: preview.build.command,
@@ -917,7 +986,7 @@ async function openBranchDialog(taskId) {
     const response = await fetch("/api/repositories/branches", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo: task.repo }),
+      body: JSON.stringify({ repo: task.repo, gitCredentialId: task.gitCredentialId || "" }),
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "读取仓库分支失败");
@@ -940,7 +1009,7 @@ async function loadBranchesIntoSelect(task, selectElement) {
   const response = await fetch("/api/repositories/branches", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ repo: task.repo }),
+    body: JSON.stringify({ repo: task.repo, gitCredentialId: task.gitCredentialId || "" }),
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "读取仓库分支失败");
@@ -1265,6 +1334,44 @@ function saveChannel(event) {
   persistState();
 }
 
+function saveSecret(event) {
+  event.preventDefault();
+  if (!requirePermission("secret.manage")) return;
+  const form = event.currentTarget;
+  const formData = new FormData(form);
+  const secret = {
+    id: Date.now(),
+    name: formData.get("name"),
+    type: formData.get("type"),
+    target: formData.get("target"),
+    username: formData.get("username"),
+    secret: formData.get("secret"),
+    knownHosts: formData.get("knownHosts"),
+    createdAt: nowText(),
+  };
+  secrets.unshift(secret);
+  addAudit("添加秘钥", `${secret.name} / ${secretTypeLabel(secret.type)}`);
+  form.reset();
+  render();
+  persistState();
+}
+
+function deleteSecret(secretId) {
+  if (!requirePermission("secret.manage")) return;
+  const secret = secrets.find((item) => String(item.id) === String(secretId));
+  if (!secret) return;
+  const usedByTask = tasks.find((task) => String(task.gitCredentialId) === String(secretId));
+  if (usedByTask) {
+    window.alert(`任务 ${usedByTask.name} 正在使用该秘钥，请先编辑任务取消绑定`);
+    return;
+  }
+  const index = secrets.findIndex((item) => String(item.id) === String(secretId));
+  secrets.splice(index, 1);
+  addAudit("删除秘钥", `${secret.name} / ${secretTypeLabel(secret.type)}`);
+  render();
+  persistState();
+}
+
 function saveUser(event) {
   event.preventDefault();
   if (!requirePermission("user.manage")) return;
@@ -1357,6 +1464,7 @@ const viewConfig = {
   clusters: { title: "集群管理", subtitle: "Agent 接入与部署目标", permission: "cluster.view" },
   templates: { title: "构建模板", subtitle: "语言、SDK 与默认构建命令", permission: "template.view" },
   channels: { title: "通知渠道", subtitle: "告警机器人、邮件与 Webhook", permission: "channel.view" },
+  secrets: { title: "秘钥管理", subtitle: "Git 凭据、镜像仓库与 Agent Token", permission: "secret.view" },
   users: { title: "用户管理", subtitle: "账号、姓名与角色绑定", permission: "user.view" },
   access: { title: "角色权限", subtitle: "用户、角色与操作边界", permission: "rbac.view" },
   audit: { title: "权限审计", subtitle: "登录、发布与权限变更", permission: "audit.view" },
@@ -1374,6 +1482,7 @@ function setView(view) {
   clusterView.hidden = view !== "clusters";
   templateView.hidden = view !== "templates";
   channelView.hidden = view !== "channels";
+  secretView.hidden = view !== "secrets";
   userView.hidden = view !== "users";
   accessView.hidden = view !== "access";
   auditView.hidden = view !== "audit";
@@ -1421,10 +1530,12 @@ function render() {
   renderClusterView();
   renderTemplateView();
   renderChannelView();
+  renderSecretView();
   renderUserView();
   renderAccessView();
   renderAuditView();
   renderClusters();
+  renderGitCredentialOptions();
   lucide.createIcons();
 }
 
@@ -1472,6 +1583,7 @@ taskForm.addEventListener("submit", saveTask);
 document.getElementById("clusterForm").addEventListener("submit", saveCluster);
 document.getElementById("templateForm").addEventListener("submit", saveTemplate);
 document.getElementById("channelForm").addEventListener("submit", saveChannel);
+secretForm.addEventListener("submit", saveSecret);
 document.getElementById("userForm").addEventListener("submit", saveUser);
 editUserForm.addEventListener("submit", saveEditedUser);
 editClusterForm.addEventListener("submit", saveEditedCluster);
@@ -1556,6 +1668,12 @@ document.addEventListener("click", (event) => {
     if (clusterButton.dataset.clusterAction === "edit") {
       openClusterDialog(clusterButton.dataset.clusterId);
     }
+    return;
+  }
+
+  const secretDeleteButton = event.target.closest("[data-secret-delete]");
+  if (secretDeleteButton) {
+    deleteSecret(secretDeleteButton.dataset.secretDelete);
     return;
   }
 
