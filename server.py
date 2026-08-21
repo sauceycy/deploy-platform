@@ -58,6 +58,8 @@ DEFAULT_STATE = {
                 "secret.manage",
                 "user.view",
                 "user.manage",
+                "org.view",
+                "org.manage",
                 "rbac.view",
                 "rbac.manage",
                 "audit.view",
@@ -69,14 +71,15 @@ DEFAULT_STATE = {
         },
         "auditor": {
             "label": "审计人员",
-            "permissions": ["task.view", "cluster.view", "template.view", "channel.view", "user.view", "rbac.view", "audit.view"],
+            "permissions": ["task.view", "cluster.view", "template.view", "channel.view", "user.view", "org.view", "rbac.view", "audit.view"],
         },
         "viewer": {
             "label": "只读用户",
             "permissions": ["task.view", "cluster.view", "template.view", "channel.view"],
         },
     },
-    "users": [{"username": "admin", "password": "admin123", "name": "平台管理员", "role": "platform_admin"}],
+    "organizations": [{"id": "default", "name": "default", "description": "默认用户组", "permissions": [], "globalAccess": False}],
+    "users": [{"username": "admin", "password": "admin123", "name": "平台管理员", "role": "platform_admin", "globalAccess": True, "organizationIds": ["default"]}],
     "tasks": [],
     "clusters": [],
     "buildTemplates": [],
@@ -120,11 +123,42 @@ def merge_defaults(state):
     for key, value in DEFAULT_STATE.items():
         if key not in state:
             state[key] = value.copy() if isinstance(value, dict) else list(value)
+    normalize_group_state(state)
     return state
 
 
 def default_user_passwords():
     return {user.get("username"): user.get("password") for user in DEFAULT_STATE.get("users", [])}
+
+
+def safe_group_id(value):
+    value = re.sub(r"[^a-z0-9_-]+", "-", str(value or "default").strip().lower()).strip("-")
+    return value or "default"
+
+
+def normalize_group_state(state):
+    groups = state.setdefault("organizations", [])
+    if not isinstance(groups, list):
+        state["organizations"] = groups = []
+    if not groups:
+        groups.append({"id": "default", "name": "default", "description": "默认用户组", "permissions": [], "globalAccess": False})
+    for group in groups:
+        group["id"] = group.get("id") or safe_group_id(group.get("name"))
+        if str(group.get("id")) == "default":
+            group["name"] = "default"
+        group["name"] = group.get("name") or group["id"]
+        if not isinstance(group.get("permissions"), list):
+            group["permissions"] = []
+        group["globalAccess"] = False if str(group.get("id")) == "default" else bool(group.get("globalAccess"))
+    if not any(str(group.get("id")) == "default" for group in groups):
+        groups.insert(0, {"id": "default", "name": "default", "description": "默认用户组", "permissions": [], "globalAccess": False})
+    for user in state.setdefault("users", []):
+        if not isinstance(user.get("organizationIds"), list) or not user.get("organizationIds"):
+            user["organizationIds"] = ["default"]
+        user["globalAccess"] = bool(user.get("globalAccess") or user.get("role") == "platform_admin")
+    for key in ("tasks", "clusters", "secrets"):
+        for item in state.setdefault(key, []):
+            item["organizationId"] = item.get("organizationId") or "default"
 
 
 def use_postgres():
@@ -253,6 +287,195 @@ def set_execution_status(execution_id, status, message=None, image=None, stage=N
 def find_by_id(items, item_id):
     item_id = str(item_id)
     return next((item for item in items if str(item.get("id")) == item_id), None)
+
+
+def find_user(state, username):
+    return next((user for user in state.get("users", []) if user.get("username") == (username or "system")), None)
+
+
+def user_groups(state, user):
+    ids = [str(item) for item in (user or {}).get("organizationIds", ["default"])]
+    return [group for group in state.get("organizations", []) if str(group.get("id")) in ids]
+
+
+def user_has_global_access(state, user):
+    return bool((user or {}).get("globalAccess") or (user or {}).get("role") == "platform_admin" or any(group.get("globalAccess") for group in user_groups(state, user)))
+
+
+def user_org_ids(user):
+    ids = (user or {}).get("organizationIds")
+    return [str(item) for item in ids] if isinstance(ids, list) and ids else ["default"]
+
+
+def asset_org_id(asset):
+    return str((asset or {}).get("organizationId") or "default")
+
+
+def user_can_access_asset(state, user, asset):
+    return user_has_global_access(state, user) or asset_org_id(asset) in user_org_ids(user)
+
+
+def user_permissions(state, user):
+    role = state.get("roles", {}).get((user or {}).get("role"), {})
+    permissions = list(role.get("permissions") or [])
+    for group in user_groups(state, user):
+        permissions.extend(group.get("permissions") or [])
+    return set(permissions)
+
+
+def user_has_permission(state, user, permission):
+    return permission in user_permissions(state, user)
+
+
+def user_can_access_org(state, user, org_id):
+    return user_has_global_access(state, user) or str(org_id or "default") in user_org_ids(user)
+
+
+def user_can_access_user(state, actor_user, target_user):
+    if user_has_global_access(state, actor_user):
+        return True
+    actor_groups = set(user_org_ids(actor_user))
+    target_groups = set(user_org_ids(target_user))
+    return bool(actor_groups.intersection(target_groups))
+
+
+def require_actor_asset_access(state, actor, permission, asset, action):
+    user = find_user(state, actor)
+    if not user:
+        raise ValueError("操作用户不存在")
+    if not user_has_permission(state, user, permission):
+        raise ValueError(f"当前用户没有{action}权限")
+    if not user_can_access_asset(state, user, asset):
+        raise ValueError(f"当前用户组无权{action}该资产")
+    return user
+
+
+def canonical_json(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def validate_asset_state_changes(current_state, next_state, actor):
+    if not actor or actor == "system":
+        return
+    actor_user = find_user(current_state, actor)
+    if not actor_user:
+        raise ValueError("操作用户不存在")
+
+    asset_permissions = {
+        "tasks": "task.create",
+        "clusters": "cluster.manage",
+        "secrets": "secret.manage",
+    }
+    for key, permission in asset_permissions.items():
+        current_items = {str(item.get("id")): item for item in current_state.get(key, [])}
+        next_items = {str(item.get("id")): item for item in next_state.get(key, [])}
+
+        for item_id, next_item in next_items.items():
+            current_item = current_items.get(item_id)
+            if current_item and canonical_json(current_item) == canonical_json(next_item):
+                continue
+            if not user_has_permission(current_state, actor_user, permission):
+                raise ValueError("当前用户没有保存资产权限")
+            if current_item and not user_can_access_asset(current_state, actor_user, current_item):
+                raise ValueError("当前用户组无权修改该资产")
+            if not user_can_access_asset(current_state, actor_user, next_item):
+                raise ValueError("当前用户组无权保存资产到目标用户组")
+
+        for item_id, current_item in current_items.items():
+            if item_id in next_items:
+                continue
+            if not user_has_permission(current_state, actor_user, permission):
+                raise ValueError("当前用户没有删除资产权限")
+            if not user_can_access_asset(current_state, actor_user, current_item):
+                raise ValueError("当前用户组无权删除该资产")
+
+
+def validate_user_state_changes(current_state, next_state, actor):
+    if not actor or actor == "system":
+        return
+    actor_user = find_user(current_state, actor)
+    if not actor_user:
+        raise ValueError("操作用户不存在")
+
+    current_users = {str(item.get("username")): item for item in current_state.get("users", [])}
+    next_users = {str(item.get("username")): item for item in next_state.get("users", [])}
+
+    for username, next_user in next_users.items():
+        current_user = current_users.get(username)
+        if current_user and canonical_json(current_user) == canonical_json(next_user):
+            continue
+        if not user_has_permission(current_state, actor_user, "user.manage"):
+            raise ValueError("当前用户没有管理用户权限")
+        if current_user and not user_can_access_user(current_state, actor_user, current_user):
+            raise ValueError("当前用户组无权修改该用户")
+        if not user_can_access_user(current_state, actor_user, next_user):
+            raise ValueError("当前用户组无权保存该用户到目标用户组")
+        if not user_has_global_access(current_state, actor_user) and next_user.get("globalAccess"):
+            raise ValueError("当前用户组无权授予全局组权限")
+        if not user_has_global_access(current_state, actor_user):
+            allowed_groups = set(user_org_ids(actor_user))
+            if not set(user_org_ids(next_user)).issubset(allowed_groups):
+                raise ValueError("当前用户组无权分配目标用户组")
+
+    for username, current_user in current_users.items():
+        if username in next_users:
+            continue
+        if not user_has_permission(current_state, actor_user, "user.manage"):
+            raise ValueError("当前用户没有删除用户权限")
+        if not user_can_access_user(current_state, actor_user, current_user):
+            raise ValueError("当前用户组无权删除该用户")
+
+
+def validate_group_state_changes(current_state, next_state, actor):
+    if not actor or actor == "system":
+        return
+    actor_user = find_user(current_state, actor)
+    if not actor_user:
+        raise ValueError("操作用户不存在")
+
+    current_groups = {str(item.get("id")): item for item in current_state.get("organizations", [])}
+    next_groups = {str(item.get("id")): item for item in next_state.get("organizations", [])}
+
+    if "default" not in next_groups:
+        raise ValueError("default 用户组不能删除")
+
+    for group_id, next_group in next_groups.items():
+        current_group = current_groups.get(group_id)
+        if current_group and canonical_json(current_group) == canonical_json(next_group):
+            continue
+        if not user_has_permission(current_state, actor_user, "org.manage"):
+            raise ValueError("当前用户没有管理用户组权限")
+        if not current_group and not user_has_global_access(current_state, actor_user):
+            raise ValueError("只有全局组用户可以创建新用户组")
+        if current_group and not user_can_access_org(current_state, actor_user, group_id):
+            raise ValueError("当前用户组无权修改该用户组")
+        if group_id == "default" and next_group.get("globalAccess"):
+            raise ValueError("default 用户组不能设置为全局组")
+        if current_group and bool(current_group.get("globalAccess")) != bool(next_group.get("globalAccess")) and not user_has_global_access(current_state, actor_user):
+            raise ValueError("只有全局组用户可以修改全局组开关")
+
+    for group_id, current_group in current_groups.items():
+        if group_id in next_groups:
+            continue
+        if group_id == "default":
+            raise ValueError("default 用户组不能删除")
+        if not user_has_permission(current_state, actor_user, "org.manage") or not user_has_global_access(current_state, actor_user):
+            raise ValueError("只有全局组用户可以删除用户组")
+
+
+def validate_state_update(next_state, actor):
+    if not actor or actor == "system":
+        return
+    current_state = read_state()
+    validate_group_state_changes(current_state, next_state, actor)
+    validate_user_state_changes(current_state, next_state, actor)
+    validate_asset_state_changes(current_state, next_state, actor)
+    actor_user = find_user(current_state, actor)
+    if canonical_json(current_state.get("platformSettings", {})) != canonical_json(next_state.get("platformSettings", {})):
+        if not user_has_permission(current_state, actor_user, "secret.manage"):
+            raise ValueError("当前用户没有保存镜像仓库配置权限")
+        if not user_has_global_access(current_state, actor_user):
+            raise ValueError("只有全局组用户可以修改平台镜像仓库配置")
 
 
 def is_active_status(status):
@@ -988,6 +1211,7 @@ def cancel_execution(execution_id, actor):
                 item["updatedAt"] = now_text()
         task = find_by_id(state["tasks"], execution["taskId"])
         if task:
+            require_actor_asset_access(state, actor, "task.deploy", task, "取消发布")
             task["status"] = "cancelled"
             task["stage"] = "已取消"
             task["progress"] = execution["progress"]
@@ -1004,6 +1228,7 @@ def delete_task(task_id, actor):
         task = find_by_id(state["tasks"], task_id)
         if not task:
             raise ValueError("任务不存在")
+        require_actor_asset_access(state, actor, "task.create", task, "删除")
         active_execution = next((item for item in state["executions"] if str(item.get("taskId")) == str(task_id) and is_active_status(item.get("status"))), None)
         if active_execution:
             raise ValueError("任务正在发布中，请先取消发布")
@@ -1041,6 +1266,7 @@ def normalize_task_payload(payload):
         "owner": str(payload.get("owner") or "").strip(),
         "env": str(payload.get("env") or "test").strip(),
         "tag": str(payload.get("tag") or "").strip(),
+        "organizationId": str(payload.get("organizationId") or "default").strip() or "default",
         "repo": str(payload.get("repo") or "").strip(),
         "workdir": str(payload.get("workdir") or ".").strip() or ".",
         "artifactPath": str(payload.get("artifactPath") or "").strip(),
@@ -1074,10 +1300,35 @@ def save_task_config(task_id, payload, actor):
         raise ValueError("编译命令不能为空")
 
     def update(state):
+        actor_user = find_user(state, actor)
+        if not actor_user:
+            raise ValueError("操作用户不存在")
+        if not user_has_permission(state, actor_user, "task.create"):
+            raise ValueError("当前用户没有保存任务权限")
+        if not user_can_access_asset(state, actor_user, task_payload):
+            raise ValueError("当前用户组无权保存该任务")
+        if task_payload.get("gitCredentialId"):
+            secret = find_by_id(state.get("secrets", []), task_payload.get("gitCredentialId"))
+            if not secret:
+                raise ValueError("Git 凭据不存在")
+            if not user_can_access_asset(state, actor_user, secret):
+                raise ValueError("当前用户组无权绑定该 Git 凭据")
+        for target in task_payload.get("clusters", []):
+            cluster = next((item for item in state.get("clusters", []) if item.get("name") == target.get("name")), None)
+            if cluster and not user_can_access_asset(state, actor_user, cluster):
+                raise ValueError(f"当前用户组无权绑定集群 {cluster.get('name')}")
+            pull_secret_id = target.get("imagePullSecretId")
+            if pull_secret_id:
+                secret = find_by_id(state.get("secrets", []), pull_secret_id)
+                if not secret:
+                    raise ValueError("镜像拉取秘钥不存在")
+                if not user_can_access_asset(state, actor_user, secret):
+                    raise ValueError("当前用户组无权绑定该镜像拉取秘钥")
         if task_id:
             task = find_by_id(state["tasks"], task_id)
             if not task:
                 raise ValueError("任务不存在")
+            require_actor_asset_access(state, actor, "task.create", task, "编辑")
             task.update(task_payload)
             state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "编辑任务", "target": task.get("name"), "result": "成功"})
             return task
@@ -1104,6 +1355,7 @@ def create_execution(task_id, actor, branch):
         task = find_by_id(state["tasks"], task_id)
         if not task:
             raise ValueError("任务不存在")
+        require_actor_asset_access(state, actor, "task.deploy", task, "发布")
         if not branch:
             raise ValueError("请选择发布分支")
         return create_execution_record(state, task, actor, branch)
@@ -1123,6 +1375,7 @@ def create_batch_executions(items, actor):
             task = find_by_id(state["tasks"], item.get("taskId"))
             if not task:
                 raise ValueError(f"任务不存在: {item.get('taskId')}")
+            require_actor_asset_access(state, actor, "task.deploy", task, "发布")
             branch = item.get("branch")
             if not branch:
                 raise ValueError(f"{task['name']} 未选择发布分支")
@@ -1144,6 +1397,7 @@ def schedule_execution(task_id, actor, branch, scheduled_at):
         task = find_by_id(state["tasks"], task_id)
         if not task:
             raise ValueError("任务不存在")
+        require_actor_asset_access(state, actor, "task.deploy", task, "定时发布")
         if not branch:
             raise ValueError("请选择发布分支")
         for item in state.setdefault("schedules", []):
@@ -1185,10 +1439,12 @@ def cancel_schedule(schedule_id, actor):
             raise ValueError("定时发布不存在")
         if schedule.get("status") != "pending":
             raise ValueError("只能取消待执行的定时发布")
+        task = find_by_id(state["tasks"], schedule["taskId"])
+        if task:
+            require_actor_asset_access(state, actor, "task.deploy", task, "取消定时发布")
         schedule["status"] = "cancelled"
         schedule["enabled"] = False
         schedule["updatedAt"] = now_text()
-        task = find_by_id(state["tasks"], schedule["taskId"])
         if task and task.get("schedule", {}).get("id") == schedule_id:
             task["schedule"]["status"] = "cancelled"
         state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "取消定时发布", "target": schedule.get("taskName"), "result": "成功"})
@@ -1427,6 +1683,12 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/repositories/branches":
             body = self.read_json_body()
             try:
+                state = read_state()
+                secret_id = body.get("gitCredentialId")
+                if secret_id:
+                    secret = find_by_id(state.get("secrets", []), secret_id)
+                    if secret:
+                        require_actor_asset_access(state, body.get("actor"), "secret.view", secret, "读取")
                 branches = list_repository_branches(body.get("repo") or "", body.get("gitCredentialId"))
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
@@ -1486,7 +1748,15 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_error(404)
             return
         try:
-            state = self.read_json_body()
+            body = self.read_json_body()
+            if isinstance(body, dict) and "state" in body:
+                actor = body.get("actor")
+                state = body.get("state") or {}
+            else:
+                actor = None
+                state = body
+            state = merge_defaults(state)
+            validate_state_update(state, actor)
             write_state(state)
         except Exception as exc:
             self.send_json({"error": str(exc)}, status=400)

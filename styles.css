@@ -1510,6 +1510,10 @@ svg {
   background: var(--surface);
 }
 
+.compact-inline-form {
+  grid-template-columns: minmax(180px, 0.7fr) minmax(240px, 1fr) auto;
+}
+
 .side-form {
   display: grid;
   gap: 12px;
@@ -1787,6 +1791,48 @@ svg {
   width: 14px;
   height: 14px;
   min-height: auto;
+}
+
+.group-row {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.group-row:last-child {
+  border-bottom: 0;
+}
+
+.group-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.group-head strong,
+.group-head span {
+  display: block;
+}
+
+.group-head span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.group-permissions {
+  padding-top: 2px;
+}
+
+.compact-check {
+  min-width: 94px;
+  flex: 0 0 auto;
+}
+
+.compact-permission-list {
+  gap: 6px;
 }
 
 .user-row {

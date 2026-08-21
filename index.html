@@ -75,6 +75,10 @@
             <i data-lucide="users"></i>
             <span>用户管理</span>
           </button>
+          <button class="nav-item" type="button" data-view="orgs" data-permission-required="org.view">
+            <i data-lucide="building-2"></i>
+            <span>用户组管理</span>
+          </button>
           <button class="nav-item" type="button" data-view="access" data-permission-required="rbac.view">
             <i data-lucide="shield-check"></i>
             <span>角色权限</span>
@@ -300,6 +304,26 @@
           </section>
         </section>
 
+        <section class="management-view" id="orgView" hidden>
+          <section class="management-panel">
+            <div class="panel-title split-title">
+              <div>
+                <h2>用户组管理</h2>
+                <span>用户组用于配置权限，并隔离任务、用户、秘钥和集群等资产</span>
+              </div>
+            </div>
+            <form class="inline-form compact-inline-form" id="organizationForm">
+              <input name="name" placeholder="用户组名称，例如 trade-test" required />
+              <input name="description" placeholder="描述，例如 交易测试环境资产组" />
+              <button class="primary-button" type="submit" data-permission-required="org.manage">
+                <i data-lucide="plus"></i>
+                <span>添加用户组</span>
+              </button>
+            </form>
+            <div class="simple-table" id="organizationBody"></div>
+          </section>
+        </section>
+
         <section class="management-view" id="auditView" hidden>
           <section class="management-panel">
             <div class="panel-title">
@@ -354,6 +378,10 @@
                 <option>staging</option>
                 <option>prod</option>
               </select>
+            </label>
+            <label>
+              <span>所属用户组</span>
+              <select name="organizationId" id="taskOrganizationSelect"></select>
             </label>
             <label>
               <span>业务标签</span>
@@ -538,6 +566,10 @@
             </select>
           </label>
           <label>
+            <span>所属用户组</span>
+            <select name="organizationId" id="clusterOrganizationSelect"></select>
+          </label>
+          <label>
             <span>默认 namespace</span>
             <input name="namespace" placeholder="default" />
           </label>
@@ -680,6 +712,10 @@
             </select>
           </label>
           <label>
+            <span>所属用户组</span>
+            <select name="organizationId" id="secretOrganizationSelect"></select>
+          </label>
+          <label>
             <span>地址 / 用途</span>
             <input name="target" placeholder="github.com / harbor.example.com / Trade_test_k8s" />
           </label>
@@ -735,6 +771,19 @@
           <span>角色</span>
           <select name="role" id="newUserRole"></select>
         </label>
+        <label class="check-line">
+          <input type="checkbox" name="globalAccess" />
+          <span>全局组，可管理所有用户组资产</span>
+        </label>
+        <section class="dialog-section">
+          <div class="section-title-row">
+            <div>
+              <h3>所属用户组</h3>
+              <span>非全局用户只能访问已加入用户组内的资产</span>
+            </div>
+          </div>
+          <div class="permission-list compact-permission-list" id="newUserOrgList"></div>
+        </section>
         <div class="drawer-actions">
           <button class="ghost-button" type="button" data-dialog-close="userCreateDialog">
             <span>取消</span>
@@ -768,6 +817,19 @@
           <span>角色</span>
           <select name="role" id="editUserRole"></select>
         </label>
+        <label class="check-line">
+          <input type="checkbox" name="globalAccess" />
+          <span>全局组，可管理所有用户组资产</span>
+        </label>
+        <section class="dialog-section">
+          <div class="section-title-row">
+            <div>
+              <h3>所属用户组</h3>
+              <span>非全局用户只能访问已加入用户组内的资产</span>
+            </div>
+          </div>
+          <div class="permission-list compact-permission-list" id="editUserOrgList"></div>
+        </section>
         <label>
           <span>重置密码</span>
           <input name="password" type="password" placeholder="留空则不修改密码" />
@@ -806,6 +868,10 @@
             <option value="agent_token">Agent Token 记录</option>
             <option value="webhook">Webhook Secret</option>
           </select>
+        </label>
+        <label>
+          <span>所属用户组</span>
+          <select name="organizationId" id="editSecretOrganizationSelect"></select>
         </label>
         <label>
           <span>地址 / 用途</span>
@@ -860,6 +926,10 @@
               <option value="test">test</option>
               <option value="prod">prod</option>
             </select>
+          </label>
+          <label>
+            <span>所属用户组</span>
+            <select name="organizationId" id="editClusterOrganizationSelect"></select>
           </label>
           <label>
             <span>默认 namespace</span>

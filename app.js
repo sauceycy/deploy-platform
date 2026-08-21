@@ -30,6 +30,8 @@ const roles = {
       "secret.manage",
       "user.view",
       "user.manage",
+      "org.view",
+      "org.manage",
       "rbac.view",
       "rbac.manage",
       "audit.view",
@@ -41,7 +43,7 @@ const roles = {
   },
   auditor: {
     label: "审计人员",
-    permissions: ["task.view", "cluster.view", "template.view", "channel.view", "user.view", "rbac.view", "audit.view"],
+    permissions: ["task.view", "cluster.view", "template.view", "channel.view", "user.view", "org.view", "rbac.view", "audit.view"],
   },
   viewer: {
     label: "只读用户",
@@ -64,12 +66,15 @@ const permissionCatalog = [
   { key: "secret.manage", label: "管理秘钥" },
   { key: "user.view", label: "查看用户" },
   { key: "user.manage", label: "管理用户" },
+  { key: "org.view", label: "查看用户组" },
+  { key: "org.manage", label: "管理用户组" },
   { key: "rbac.view", label: "查看权限" },
   { key: "rbac.manage", label: "管理角色" },
   { key: "audit.view", label: "查看审计" },
 ];
 
-const users = [{ username: "admin", password: "admin123", name: "平台管理员", role: "platform_admin" }];
+const organizations = [{ id: "default", name: "default", description: "默认用户组", permissions: [], globalAccess: false }];
+const users = [{ username: "admin", password: "admin123", name: "平台管理员", role: "platform_admin", globalAccess: true, organizationIds: ["default"] }];
 const tasks = [];
 const clusters = [];
 const buildTemplates = [];
@@ -114,6 +119,7 @@ const templateView = document.getElementById("templateView");
 const channelView = document.getElementById("channelView");
 const secretView = document.getElementById("secretView");
 const userView = document.getElementById("userView");
+const orgView = document.getElementById("orgView");
 const accessView = document.getElementById("accessView");
 const auditView = document.getElementById("auditView");
 const taskDetailView = document.getElementById("taskDetailView");
@@ -126,6 +132,11 @@ const backdrop = document.getElementById("drawerBackdrop");
 const languageSelect = document.getElementById("languageSelect");
 const sdkSelect = document.getElementById("sdkSelect");
 const taskForm = document.getElementById("taskForm");
+const taskOrganizationSelect = document.getElementById("taskOrganizationSelect");
+const clusterOrganizationSelect = document.getElementById("clusterOrganizationSelect");
+const secretOrganizationSelect = document.getElementById("secretOrganizationSelect");
+const newUserOrgList = document.getElementById("newUserOrgList");
+const editUserOrgList = document.getElementById("editUserOrgList");
 const gitCredentialSelect = document.getElementById("gitCredentialSelect");
 const clusterEditor = document.getElementById("clusterEditor");
 const configDialog = document.getElementById("configDialog");
@@ -147,6 +158,10 @@ const secretCreateDialog = document.getElementById("secretCreateDialog");
 const userCreateDialog = document.getElementById("userCreateDialog");
 const clusterDialog = document.getElementById("clusterDialog");
 const editClusterForm = document.getElementById("editClusterForm");
+const organizationForm = document.getElementById("organizationForm");
+const organizationBody = document.getElementById("organizationBody");
+const editClusterOrganizationSelect = document.getElementById("editClusterOrganizationSelect");
+const editSecretOrganizationSelect = document.getElementById("editSecretOrganizationSelect");
 const clusterNodeEditor = document.getElementById("clusterNodeEditor");
 const branchDialog = document.getElementById("branchDialog");
 const branchForm = document.getElementById("branchForm");
@@ -169,13 +184,80 @@ const batchDeploy = document.getElementById("batchDeploy");
 
 function hasPermission(permission) {
   if (!state.currentUser) return false;
-  return roles[state.currentUser.role].permissions.includes(permission);
+  const rolePermissions = roles[state.currentUser.role]?.permissions || [];
+  const groupPermissions = currentUserGroups().flatMap((group) => group.permissions || []);
+  return rolePermissions.includes(permission) || groupPermissions.includes(permission);
 }
 
 function requirePermission(permission) {
   if (hasPermission(permission)) return true;
   window.alert("当前角色没有该操作权限");
   return false;
+}
+
+function currentUserRecord() {
+  return users.find((user) => user.username === state.currentUser?.username);
+}
+
+function hasGlobalAccess() {
+  const user = currentUserRecord();
+  return Boolean(user?.globalAccess || user?.role === "platform_admin" || currentUserGroups().some((group) => group.globalAccess));
+}
+
+function currentUserOrgIds() {
+  const user = currentUserRecord();
+  return Array.isArray(user?.organizationIds) && user.organizationIds.length ? user.organizationIds.map(String) : ["default"];
+}
+
+function userOrgIds(user) {
+  return Array.isArray(user?.organizationIds) && user.organizationIds.length ? user.organizationIds.map(String) : ["default"];
+}
+
+function currentUserGroups() {
+  const ids = currentUserOrgIds();
+  return organizations.filter((group) => ids.includes(String(group.id)));
+}
+
+function assetOrgId(asset) {
+  return String(asset?.organizationId || "default");
+}
+
+function canAccessOrg(orgId) {
+  return hasGlobalAccess() || currentUserOrgIds().includes(String(orgId || "default"));
+}
+
+function canAccessAsset(asset) {
+  return canAccessOrg(assetOrgId(asset));
+}
+
+function canOperateAsset(permission, asset) {
+  return hasPermission(permission) && canAccessAsset(asset);
+}
+
+function canAccessUser(user) {
+  if (!user) return false;
+  if (hasGlobalAccess()) return true;
+  return userOrgIds(user).some((id) => currentUserOrgIds().includes(String(id)));
+}
+
+function canAssignUserAccess(globalAccess, groupIds) {
+  if (hasGlobalAccess()) return true;
+  if (globalAccess) return false;
+  return (groupIds || []).every((id) => canAccessOrg(id));
+}
+
+function visibleOrganizations() {
+  return hasGlobalAccess() ? organizations : organizations.filter((org) => currentUserOrgIds().includes(String(org.id)));
+}
+
+function organizationName(orgId) {
+  return organizations.find((org) => String(org.id) === String(orgId || "default"))?.name || "default";
+}
+
+function organizationOptions(selectedId = "default") {
+  const items = visibleOrganizations();
+  const selected = String(selectedId || items[0]?.id || "default");
+  return items.map((org) => `<option value="${org.id}" ${String(org.id) === selected ? "selected" : ""}>${org.name}</option>`).join("");
 }
 
 function nowText() {
@@ -208,6 +290,7 @@ function exportState() {
     agentHeartbeats,
     schedules,
     platformSettings,
+    organizations,
   };
 }
 
@@ -226,10 +309,41 @@ function replaceRoles(nextRoles) {
   if (roles.developer) roles.developer.permissions = Array.from(new Set([...(roles.developer.permissions || []), "secret.view"]));
 }
 
+function normalizeOrganizations() {
+  if (!organizations.length) organizations.push({ id: "default", name: "default", description: "默认用户组", permissions: [], globalAccess: false });
+  organizations.forEach((group) => {
+    if (!group.id) group.id = safeGroupId(group.name || "default");
+    if (String(group.id) === "default") group.name = "default";
+    if (!Array.isArray(group.permissions)) group.permissions = [];
+    group.globalAccess = String(group.id) === "default" ? false : Boolean(group.globalAccess);
+  });
+  if (!organizations.some((group) => String(group.id) === "default")) organizations.unshift({ id: "default", name: "default", description: "默认用户组", permissions: [], globalAccess: false });
+  users.forEach((user) => {
+    if (!Array.isArray(user.organizationIds) || user.organizationIds.length === 0) user.organizationIds = ["default"];
+    user.globalAccess = Boolean(user.globalAccess || user.role === "platform_admin");
+  });
+  [tasks, clusters, secrets].forEach((items) => {
+    items.forEach((item) => {
+      if (!item.organizationId) item.organizationId = "default";
+    });
+  });
+}
+
+function safeGroupId(value) {
+  return (
+    String(value || "default")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "default"
+  );
+}
+
 function hydrateState(nextState) {
   if (!nextState || typeof nextState !== "object") return;
   const previousSelectedId = state.selectedId;
   replaceRoles(nextState.roles);
+  replaceArray(organizations, nextState.organizations);
   replaceArray(users, nextState.users);
   replaceArray(tasks, nextState.tasks);
   replaceArray(clusters, nextState.clusters);
@@ -242,7 +356,9 @@ function hydrateState(nextState) {
   replaceArray(agentHeartbeats, nextState.agentHeartbeats);
   replaceArray(schedules, nextState.schedules);
   Object.assign(platformSettings, { registrySecretId: "", imageNamespace: "deploy-platform" }, nextState.platformSettings || {});
-  state.selectedId = tasks.some((task) => String(task.id) === String(previousSelectedId)) ? previousSelectedId : tasks[0]?.id || null;
+  normalizeOrganizations();
+  const accessibleTasks = tasks.filter(canAccessAsset);
+  state.selectedId = accessibleTasks.some((task) => String(task.id) === String(previousSelectedId)) ? previousSelectedId : accessibleTasks[0]?.id || null;
 }
 
 async function loadPersistedState() {
@@ -302,8 +418,16 @@ function persistState() {
   fetch("/api/state", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  }).catch(() => {});
+    body: JSON.stringify({ actor: state.currentUser?.username || "system", state: payload }),
+  })
+    .then(async (response) => {
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || "配置保存失败");
+    })
+    .catch((error) => {
+      window.alert(error.message);
+      refreshRemoteState();
+    });
 }
 
 function cacheStateSnapshot(nextState = exportState()) {
@@ -643,7 +767,7 @@ function syncSecretNamePlaceholder() {
 }
 
 function gitCredentialOptions(selectedId = "") {
-  const gitSecrets = secrets.filter((item) => ["git_https_token", "git_ssh_key"].includes(item.type));
+  const gitSecrets = secrets.filter((item) => ["git_https_token", "git_ssh_key"].includes(item.type) && (canAccessAsset(item) || String(item.id) === String(selectedId)));
   return [
     `<option value="">不使用凭据</option>`,
     ...gitSecrets.map((item) => `<option value="${item.id}" ${String(item.id) === String(selectedId) ? "selected" : ""}>${item.name} / ${secretTypeLabel(item.type)}</option>`),
@@ -651,7 +775,7 @@ function gitCredentialOptions(selectedId = "") {
 }
 
 function imagePullSecretOptions(selectedId = "", emptyLabel = "不使用拉取秘钥") {
-  const registrySecrets = secrets.filter((item) => item.type === "registry");
+  const registrySecrets = secrets.filter((item) => item.type === "registry" && (canAccessAsset(item) || String(item.id) === String(selectedId)));
   return [
     `<option value="">${emptyLabel}</option>`,
     ...registrySecrets.map((item) => `<option value="${item.id}" ${String(item.id) === String(selectedId) ? "selected" : ""}>${item.name} / ${item.target || "镜像仓库"}</option>`),
@@ -672,6 +796,7 @@ function roleOptions(selectedRole) {
 function filteredTasks() {
   const query = state.search.trim().toLowerCase();
   return tasks.filter((task) => {
+    if (!canAccessAsset(task)) return false;
     const schedule = activeScheduleForTask(task.id);
     const statusMatch = state.filter === "all" || task.status === state.filter;
     const searchMatch =
@@ -684,10 +809,11 @@ function filteredTasks() {
 }
 
 function renderMetrics() {
-  document.getElementById("metricTotal").textContent = tasks.length;
-  document.getElementById("metricSuccess").textContent = tasks.filter((task) => task.status === "success").length;
-  document.getElementById("metricPartial").textContent = tasks.filter((task) => task.status === "partial").length;
-  document.getElementById("metricAlerts").textContent = tasks.reduce((total, task) => total + task.alerts, 0);
+  const visibleTasks = tasks.filter(canAccessAsset);
+  document.getElementById("metricTotal").textContent = visibleTasks.length;
+  document.getElementById("metricSuccess").textContent = visibleTasks.filter((task) => task.status === "success").length;
+  document.getElementById("metricPartial").textContent = visibleTasks.filter((task) => task.status === "partial").length;
+  document.getElementById("metricAlerts").textContent = visibleTasks.reduce((total, task) => total + task.alerts, 0);
 }
 
 function renderRows() {
@@ -714,7 +840,7 @@ function renderRows() {
         </div>
         <div class="task-main">
           <strong>${task.name}</strong>
-          <span>${task.env} · ${task.owner || "未设置负责人"} · ${task.lastRun}</span>
+          <span>${organizationName(task.organizationId)} · ${task.env} · ${task.owner || "未设置负责人"} · ${task.lastRun}</span>
         </div>
         <div>
           <span class="language-chip ${task.language}">${languageLabel(task.language)} / ${task.sdk}</span>
@@ -737,25 +863,25 @@ function renderRows() {
             <i data-lucide="panel-right-open"></i>
             <span>详情</span>
           </button>
-          <button class="ghost-button" type="button" data-action="edit" data-task-id="${task.id}" ${hasPermission("task.create") ? "" : "disabled"}>
+          <button class="ghost-button" type="button" data-action="edit" data-task-id="${task.id}" ${canOperateAsset("task.create", task) ? "" : "disabled"}>
             <i data-lucide="square-pen"></i>
             <span>编辑</span>
           </button>
-          <button class="ghost-button" type="button" data-action="run" data-task-id="${task.id}" ${hasPermission("task.deploy") ? "" : "disabled"}>
+          <button class="ghost-button" type="button" data-action="run" data-task-id="${task.id}" ${canOperateAsset("task.deploy", task) ? "" : "disabled"}>
             <i data-lucide="rocket"></i>
             <span>发布</span>
           </button>
-          <button class="ghost-button" type="button" data-action="schedule" data-task-id="${task.id}" ${hasPermission("task.deploy") ? "" : "disabled"}>
+          <button class="ghost-button" type="button" data-action="schedule" data-task-id="${task.id}" ${canOperateAsset("task.deploy", task) ? "" : "disabled"}>
             <i data-lucide="clock"></i>
             <span>定时</span>
           </button>
           ${
             isTaskActive(task)
-              ? `<button class="ghost-button danger-action" type="button" data-action="cancel" data-task-id="${task.id}" ${hasPermission("task.deploy") ? "" : "disabled"}>
+              ? `<button class="ghost-button danger-action" type="button" data-action="cancel" data-task-id="${task.id}" ${canOperateAsset("task.deploy", task) ? "" : "disabled"}>
                   <i data-lucide="circle-stop"></i>
                   <span>取消</span>
                 </button>`
-              : `<button class="ghost-button danger-action" type="button" data-action="delete" data-task-id="${task.id}" ${hasPermission("task.create") ? "" : "disabled"}>
+              : `<button class="ghost-button danger-action" type="button" data-action="delete" data-task-id="${task.id}" ${canOperateAsset("task.create", task) ? "" : "disabled"}>
                   <i data-lucide="trash-2"></i>
                   <span>删除</span>
                 </button>`
@@ -775,7 +901,7 @@ function renderRows() {
 
 function renderDetail() {
   const task = tasks.find((item) => String(item.id) === String(state.selectedId));
-  if (!task) {
+  if (!task || !canAccessAsset(task)) {
     detailPanel.innerHTML = `
       <div class="empty-state compact">
         <strong>暂无任务详情</strong>
@@ -1026,7 +1152,7 @@ function renderDetailTabs() {
 function renderTaskDetailPage() {
   if (!taskDetailBody) return;
   const task = tasks.find((item) => String(item.id) === String(state.selectedId));
-  if (!task) {
+  if (!task || !canAccessAsset(task)) {
     taskDetailBody.innerHTML = `
       <section class="task-detail-shell">
         <div class="empty-state compact">
@@ -1292,6 +1418,83 @@ function renderAccessView() {
     .join("");
 }
 
+function renderOrganizationOptions() {
+  const firstVisible = visibleOrganizations()[0]?.id || "default";
+  const selects = [
+    [taskOrganizationSelect, taskOrganizationSelect?.value || firstVisible],
+    [clusterOrganizationSelect, clusterOrganizationSelect?.value || firstVisible],
+    [secretOrganizationSelect, secretOrganizationSelect?.value || firstVisible],
+    [editClusterOrganizationSelect, editClusterOrganizationSelect?.value || firstVisible],
+    [editSecretOrganizationSelect, editSecretOrganizationSelect?.value || firstVisible],
+  ];
+  selects.forEach(([select, selected]) => {
+    if (select) select.innerHTML = organizationOptions(selected);
+  });
+}
+
+function renderUserGroupChecks(container, selectedIds = ["default"]) {
+  if (!container) return;
+  const selected = new Set((selectedIds || ["default"]).map(String));
+  container.innerHTML = visibleOrganizations()
+    .map(
+      (group) => `
+        <label class="permission-item">
+          <input type="checkbox" data-user-group="${group.id}" ${selected.has(String(group.id)) ? "checked" : ""} />
+          <span>${group.name}</span>
+        </label>
+      `,
+    )
+    .join("");
+}
+
+function collectUserGroupIds(container) {
+  const ids = Array.from(container?.querySelectorAll("[data-user-group]:checked") || []).map((input) => input.dataset.userGroup);
+  return ids.length ? ids : ["default"];
+}
+
+function renderOrganizationView() {
+  if (!organizationBody) return;
+  const rows = visibleOrganizations();
+  if (rows.length === 0) {
+    organizationBody.innerHTML = emptyState("暂无用户组");
+    return;
+  }
+  organizationBody.innerHTML = rows
+    .map((group) => {
+      const userCount = users.filter((user) => (user.organizationIds || []).includes(group.id)).length;
+      const taskCount = tasks.filter((task) => assetOrgId(task) === String(group.id)).length;
+      const secretCount = secrets.filter((secret) => assetOrgId(secret) === String(group.id)).length;
+      const clusterCount = clusters.filter((cluster) => assetOrgId(cluster) === String(group.id)).length;
+      return `
+        <div class="group-row">
+          <div class="group-head">
+            <div>
+              <strong>${group.name}</strong>
+              <span>${group.description || "未设置描述"} · 用户 ${userCount} · 任务 ${taskCount} · 秘钥 ${secretCount} · 集群 ${clusterCount}</span>
+            </div>
+            <label class="check-line compact-check">
+              <input type="checkbox" data-group-global="${group.id}" ${group.globalAccess ? "checked" : ""} ${hasPermission("org.manage") && hasGlobalAccess() && group.id !== "default" ? "" : "disabled"} />
+              <span>全局组</span>
+            </label>
+          </div>
+          <div class="permission-list group-permissions">
+            ${permissionCatalog
+              .map(
+                (permission) => `
+                <label class="permission-item">
+                  <input type="checkbox" data-group="${group.id}" data-group-permission="${permission.key}" ${(group.permissions || []).includes(permission.key) ? "checked" : ""} ${hasPermission("org.manage") ? "" : "disabled"} />
+                  <span>${permission.label}</span>
+                </label>
+              `,
+              )
+              .join("")}
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
 function emptyState(text) {
   return `<div class="empty-state"><strong>${text}</strong></div>`;
 }
@@ -1307,11 +1510,12 @@ function clusterAgentState(cluster) {
 
 function renderClusterView() {
   const body = document.getElementById("clusterBody");
-  if (clusters.length === 0) {
+  const visibleClusters = clusters.filter(canAccessAsset);
+  if (visibleClusters.length === 0) {
     body.innerHTML = emptyState("暂无集群");
     return;
   }
-  body.innerHTML = clusters
+  body.innerHTML = visibleClusters
     .map(
       (cluster) => {
         const agentState = clusterAgentState(cluster);
@@ -1321,7 +1525,7 @@ function renderClusterView() {
         <div class="cluster-row-main">
           <div>
             <strong>${cluster.name}</strong>
-            <span>${cluster.region || "未设置地域"} · ${cluster.env} · 默认 namespace ${cluster.namespace || "default"}</span>
+            <span>${organizationName(cluster.organizationId)} · ${cluster.region || "未设置地域"} · ${cluster.env} · 默认 namespace ${cluster.namespace || "default"}</span>
           </div>
           <span class="status-chip ${agentState.status}">${agentState.label}</span>
         </div>
@@ -1344,11 +1548,11 @@ function renderClusterView() {
         <div class="cluster-actions">
           <label class="inline-select-control">
             <span>镜像拉取秘钥</span>
-            <select data-cluster-pull-secret="${cluster.id}" ${hasPermission("cluster.manage") ? "" : "disabled"}>
+            <select data-cluster-pull-secret="${cluster.id}" ${canOperateAsset("cluster.manage", cluster) ? "" : "disabled"}>
               ${imagePullSecretOptions(cluster.imagePullSecretId, "不配置")}
             </select>
           </label>
-          <button class="ghost-button" type="button" data-cluster-action="edit" data-cluster-id="${cluster.id}" ${hasPermission("cluster.manage") ? "" : "disabled"}>
+          <button class="ghost-button" type="button" data-cluster-action="edit" data-cluster-id="${cluster.id}" ${canOperateAsset("cluster.manage", cluster) ? "" : "disabled"}>
             <i data-lucide="square-pen"></i>
             <span>编辑</span>
           </button>
@@ -1404,24 +1608,25 @@ function renderChannelView() {
 
 function renderSecretView() {
   const body = document.getElementById("secretBody");
-  if (secrets.length === 0) {
+  const visibleSecrets = secrets.filter(canAccessAsset);
+  if (visibleSecrets.length === 0) {
     body.innerHTML = emptyState("暂无秘钥");
     return;
   }
-  body.innerHTML = secrets
+  body.innerHTML = visibleSecrets
     .map(
       (secret) => `
       <div class="simple-row">
         <div>
           <strong>${secret.name}</strong>
-          <span>${secretTypeLabel(secret.type)} · ${secret.target || "未设置地址"} · ${secret.username || "未设置用户名"} · ${secret.secret ? "已保存秘钥" : "未保存秘钥"}</span>
+          <span>${organizationName(secret.organizationId)} · ${secretTypeLabel(secret.type)} · ${secret.target || "未设置地址"} · ${secret.username || "未设置用户名"} · ${secret.secret ? "已保存秘钥" : "未保存秘钥"}</span>
         </div>
         <div class="row-actions">
-          <button class="ghost-button" type="button" data-secret-edit="${secret.id}" ${hasPermission("secret.manage") ? "" : "disabled"}>
+          <button class="ghost-button" type="button" data-secret-edit="${secret.id}" ${canOperateAsset("secret.manage", secret) ? "" : "disabled"}>
             <i data-lucide="square-pen"></i>
             <span>编辑</span>
           </button>
-          <button class="ghost-button" type="button" data-secret-delete="${secret.id}" ${hasPermission("secret.manage") ? "" : "disabled"}>
+          <button class="ghost-button" type="button" data-secret-delete="${secret.id}" ${canOperateAsset("secret.manage", secret) ? "" : "disabled"}>
             <i data-lucide="trash-2"></i>
             <span>删除</span>
           </button>
@@ -1455,13 +1660,14 @@ function renderPlatformSettings() {
 
 function renderUserView() {
   const userBody = document.getElementById("userBody");
-  userBody.innerHTML = users
+  const visibleUsers = hasGlobalAccess() ? users : users.filter((user) => (user.organizationIds || []).some((id) => currentUserOrgIds().includes(String(id))));
+  userBody.innerHTML = visibleUsers
     .map(
       (user) => `
       <div class="simple-row">
         <div>
           <strong>${user.name}</strong>
-          <span>${user.username}</span>
+          <span>${user.username} · ${(user.organizationIds || ["default"]).map(organizationName).join("、")} ${user.globalAccess ? "· 全局组" : ""}</span>
         </div>
         <div class="row-actions">
           <span class="role-chip">${roles[user.role].label}</span>
@@ -1482,6 +1688,7 @@ function renderUserView() {
   const roleSelect = document.getElementById("newUserRole");
   roleSelect.innerHTML = roleOptions("developer");
   document.getElementById("editUserRole").innerHTML = roleOptions();
+  renderUserGroupChecks(newUserOrgList, ["default"]);
 }
 
 function renderAuditView() {
@@ -1510,6 +1717,7 @@ function renderClusters() {
     clusterEditor.innerHTML = `<div class="empty-state compact"><strong>未选择部署集群</strong><span>请先在集群管理中添加集群，再回到任务中绑定部署目标。</span></div>`;
     return;
   }
+  const selectableClusters = clusters.filter(canAccessAsset);
 
   clusterEditor.innerHTML = clusterDrafts
     .map(
@@ -1518,7 +1726,7 @@ function renderClusters() {
         <label>
           <span>集群</span>
           <select data-field="name">
-            ${clusters.map((item) => `<option ${item.name === cluster.name ? "selected" : ""}>${item.name}</option>`).join("")}
+            ${selectableClusters.map((item) => `<option ${item.name === cluster.name ? "selected" : ""}>${item.name}</option>`).join("")}
           </select>
         </label>
         <label>
@@ -1561,6 +1769,8 @@ function updateSdkOptions(language, force = false) {
 function resetTaskForm() {
   taskForm.reset();
   taskForm.elements.taskId.value = "";
+  taskOrganizationSelect.innerHTML = organizationOptions();
+  taskForm.elements.organizationId.value = visibleOrganizations()[0]?.id || "default";
   taskForm.elements.env.value = "test";
   taskForm.elements.language.value = "java";
   taskForm.elements.artifactPath.value = "";
@@ -1586,12 +1796,18 @@ function openTaskEditor(taskId) {
   if (!requirePermission("task.create")) return;
   const task = tasks.find((item) => String(item.id) === String(taskId));
   if (!task) return;
+  if (!canOperateAsset("task.create", task)) {
+    window.alert("当前用户组无权编辑该任务");
+    return;
+  }
   drawerTitle.textContent = "编辑发布任务";
   taskForm.elements.taskId.value = task.id;
   taskForm.elements.name.value = task.name || "";
   taskForm.elements.owner.value = task.owner || "";
   taskForm.elements.env.value = task.env || "test";
   taskForm.elements.tag.value = task.tag || "";
+  taskOrganizationSelect.innerHTML = organizationOptions(task.organizationId || "default");
+  taskForm.elements.organizationId.value = task.organizationId || "default";
   taskForm.elements.repo.value = task.repo || "";
   taskForm.elements.workdir.value = task.workdir || ".";
   renderGitCredentialOptions(task.gitCredentialId || "");
@@ -1632,6 +1848,12 @@ function closeDrawer() {
 function openCreateDialog(dialog, permission, form) {
   if (!requirePermission(permission)) return;
   if (form) form.reset();
+  renderOrganizationOptions();
+  renderUserGroupChecks(newUserOrgList, ["default"]);
+  if (form?.elements?.globalAccess) {
+    form.elements.globalAccess.checked = false;
+    form.elements.globalAccess.disabled = !hasGlobalAccess();
+  }
   renderGitCredentialOptions();
   renderImagePullSecretOptions();
   renderUserView();
@@ -1681,6 +1903,7 @@ function buildPreviewObject() {
       owner: formValue("owner"),
       env: formValue("env"),
       tag: formValue("tag"),
+      organizationId: formValue("organizationId"),
     },
     repository: {
       url: formValue("repo"),
@@ -1716,11 +1939,16 @@ async function saveTask(event) {
   if (!requirePermission("task.create")) return;
   const preview = buildPreviewObject();
   const taskId = taskForm.elements.taskId.value;
+  if (!canAccessOrg(preview.task.organizationId || "default")) {
+    window.alert("当前用户组无权保存任务到目标用户组");
+    return;
+  }
   const taskPayload = {
     name: preview.task.name,
     owner: preview.task.owner,
     env: preview.task.env,
     tag: preview.task.tag,
+    organizationId: preview.task.organizationId || "default",
     repo: preview.repository.url,
     workdir: preview.repository.workdir,
     artifactPath: preview.repository.artifactPath,
@@ -1777,6 +2005,10 @@ async function openBranchDialog(taskId) {
   if (!requirePermission("task.deploy")) return;
   const task = tasks.find((item) => String(item.id) === String(taskId));
   if (!task) return;
+  if (!canOperateAsset("task.deploy", task)) {
+    window.alert("当前用户组无权发布该任务");
+    return;
+  }
 
   branchForm.elements.taskId.value = task.id;
   branchForm.elements.taskName.value = task.name;
@@ -1790,7 +2022,7 @@ async function openBranchDialog(taskId) {
     const response = await fetch("/api/repositories/branches", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo: task.repo, gitCredentialId: task.gitCredentialId || "" }),
+      body: JSON.stringify({ actor: state.currentUser?.username || "system", repo: task.repo, gitCredentialId: task.gitCredentialId || "" }),
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "读取仓库分支失败");
@@ -1813,7 +2045,7 @@ async function loadBranchesIntoSelect(task, selectElement) {
   const response = await fetch("/api/repositories/branches", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ repo: task.repo, gitCredentialId: task.gitCredentialId || "" }),
+    body: JSON.stringify({ actor: state.currentUser?.username || "system", repo: task.repo, gitCredentialId: task.gitCredentialId || "" }),
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "读取仓库分支失败");
@@ -1845,6 +2077,11 @@ function closeScheduleDialog() {
 
 async function runTask(taskId, branch) {
   if (!requirePermission("task.deploy")) return;
+  const task = tasks.find((item) => String(item.id) === String(taskId));
+  if (!task || !canOperateAsset("task.deploy", task)) {
+    window.alert("当前用户组无权发布该任务");
+    return;
+  }
   const response = await fetch(`/api/tasks/${taskId}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1869,7 +2106,7 @@ async function runTask(taskId, branch) {
 
 function startBatchDeploy() {
   if (!requirePermission("task.deploy")) return;
-  const taskIds = Array.from(state.selectedTaskIds).filter((id) => tasks.some((task) => String(task.id) === id));
+  const taskIds = Array.from(state.selectedTaskIds).filter((id) => tasks.some((task) => String(task.id) === id && canOperateAsset("task.deploy", task)));
   if (taskIds.length === 0) {
     window.alert("请先选择要发布的任务");
     return;
@@ -1942,6 +2179,10 @@ async function openScheduleDialog(taskId) {
   if (!requirePermission("task.deploy")) return;
   const task = tasks.find((item) => String(item.id) === String(taskId));
   if (!task) return;
+  if (!canOperateAsset("task.deploy", task)) {
+    window.alert("当前用户组无权设置该任务定时发布");
+    return;
+  }
   scheduleForm.elements.taskId.value = task.id;
   scheduleForm.elements.taskName.value = task.name;
   scheduleForm.elements.scheduledAt.value = localDateTimeValue();
@@ -2018,6 +2259,10 @@ async function deleteTask(taskId) {
   if (!requirePermission("task.create")) return;
   const task = tasks.find((item) => String(item.id) === String(taskId));
   if (!task) return;
+  if (!canOperateAsset("task.create", task)) {
+    window.alert("当前用户组无权删除该任务");
+    return;
+  }
   if (!window.confirm(`确认删除任务 ${task.name}？删除后会同时清理该任务的执行记录和定时计划。`)) return;
   const actor = encodeURIComponent(state.currentUser?.username || "system");
   const response = await fetch(`/api/tasks/${taskId}?actor=${actor}`, { method: "DELETE" });
@@ -2036,11 +2281,17 @@ function saveCluster(event) {
   if (!requirePermission("cluster.manage")) return;
   const form = event.currentTarget;
   const formData = new FormData(form);
+  const organizationId = formData.get("organizationId") || visibleOrganizations()[0]?.id || "default";
+  if (!canAccessOrg(organizationId)) {
+    window.alert("当前用户组无权添加该资产到目标用户组");
+    return;
+  }
   const cluster = {
     id: Date.now(),
     name: formData.get("name"),
     region: formData.get("region"),
     env: formData.get("env"),
+    organizationId,
     namespace: formData.get("namespace"),
     imagePullSecretId: formData.get("imagePullSecretId"),
     nodes: [],
@@ -2100,10 +2351,16 @@ function openClusterDialog(clusterId) {
   if (!requirePermission("cluster.manage")) return;
   const cluster = clusters.find((item) => String(item.id) === String(clusterId));
   if (!cluster) return;
+  if (!canOperateAsset("cluster.manage", cluster)) {
+    window.alert("当前用户组无权编辑该集群");
+    return;
+  }
   editClusterForm.elements.id.value = cluster.id;
   editClusterForm.elements.name.value = cluster.name || "";
   editClusterForm.elements.region.value = cluster.region || "";
   editClusterForm.elements.env.value = cluster.env || "dev";
+  editClusterOrganizationSelect.innerHTML = organizationOptions(cluster.organizationId || "default");
+  editClusterForm.elements.organizationId.value = cluster.organizationId || "default";
   editClusterForm.elements.namespace.value = cluster.namespace || "default";
   editClusterForm.elements.imagePullSecretId.value = cluster.imagePullSecretId || "";
   clusterNodeDrafts.splice(0, clusterNodeDrafts.length, ...(cluster.nodes || []).map((node) => ({ ...node })));
@@ -2123,10 +2380,19 @@ function saveEditedCluster(event) {
   collectClusterNodes();
   const cluster = clusters.find((item) => String(item.id) === String(editClusterForm.elements.id.value));
   if (!cluster) return;
+  if (!canOperateAsset("cluster.manage", cluster)) {
+    window.alert("当前用户组无权保存该集群");
+    return;
+  }
+  if (!canAccessOrg(editClusterForm.elements.organizationId.value || "default")) {
+    window.alert("当前用户组无权移动该集群到目标用户组");
+    return;
+  }
   Object.assign(cluster, {
     name: editClusterForm.elements.name.value,
     region: editClusterForm.elements.region.value,
     env: editClusterForm.elements.env.value,
+    organizationId: editClusterForm.elements.organizationId.value || "default",
     namespace: editClusterForm.elements.namespace.value || "default",
     imagePullSecretId: editClusterForm.elements.imagePullSecretId.value,
     nodes: clusterNodeDrafts.filter((node) => node.name || node.ip),
@@ -2141,6 +2407,10 @@ function updateClusterPullSecret(clusterId, secretId) {
   if (!requirePermission("cluster.manage")) return;
   const cluster = clusters.find((item) => String(item.id) === String(clusterId));
   if (!cluster) return;
+  if (!canOperateAsset("cluster.manage", cluster)) {
+    window.alert("当前用户组无权修改该集群");
+    return;
+  }
   cluster.imagePullSecretId = secretId;
   addAudit("设置镜像拉取秘钥", `${cluster.name} / ${secretName(secretId)}`);
   render();
@@ -2203,6 +2473,11 @@ function saveSecret(event) {
   const form = event.currentTarget;
   const formData = new FormData(form);
   const name = String(formData.get("name") || "").trim();
+  const organizationId = formData.get("organizationId") || visibleOrganizations()[0]?.id || "default";
+  if (!canAccessOrg(organizationId)) {
+    window.alert("当前用户组无权添加该秘钥到目标用户组");
+    return;
+  }
   if (secretNameExists(name)) {
     window.alert(`秘钥名称 ${name} 已存在，请换一个更明确的名称`);
     return;
@@ -2211,6 +2486,7 @@ function saveSecret(event) {
     id: Date.now(),
     name,
     type: formData.get("type"),
+    organizationId,
     target: formData.get("target"),
     username: formData.get("username"),
     secret: formData.get("secret"),
@@ -2229,9 +2505,15 @@ function openSecretDialog(secretId) {
   if (!requirePermission("secret.manage")) return;
   const secret = secrets.find((item) => String(item.id) === String(secretId));
   if (!secret) return;
+  if (!canOperateAsset("secret.manage", secret)) {
+    window.alert("当前用户组无权编辑该秘钥");
+    return;
+  }
   editSecretForm.elements.id.value = secret.id;
   editSecretForm.elements.name.value = secret.name || "";
   editSecretForm.elements.type.value = secret.type || "git_https_token";
+  editSecretOrganizationSelect.innerHTML = organizationOptions(secret.organizationId || "default");
+  editSecretForm.elements.organizationId.value = secret.organizationId || "default";
   editSecretForm.elements.target.value = secret.target || "";
   editSecretForm.elements.username.value = secret.username || "";
   editSecretForm.elements.secret.value = "";
@@ -2250,6 +2532,14 @@ function saveEditedSecret(event) {
   if (!requirePermission("secret.manage")) return;
   const secret = secrets.find((item) => String(item.id) === String(editSecretForm.elements.id.value));
   if (!secret) return;
+  if (!canOperateAsset("secret.manage", secret)) {
+    window.alert("当前用户组无权保存该秘钥");
+    return;
+  }
+  if (!canAccessOrg(editSecretForm.elements.organizationId.value || "default")) {
+    window.alert("当前用户组无权移动该秘钥到目标用户组");
+    return;
+  }
   const nextName = editSecretForm.elements.name.value.trim();
   if (secretNameExists(nextName, secret.id)) {
     window.alert(`秘钥名称 ${nextName} 已存在，请换一个更明确的名称`);
@@ -2258,6 +2548,7 @@ function saveEditedSecret(event) {
   Object.assign(secret, {
     name: nextName,
     type: editSecretForm.elements.type.value,
+    organizationId: editSecretForm.elements.organizationId.value || "default",
     target: editSecretForm.elements.target.value,
     username: editSecretForm.elements.username.value,
     knownHosts: editSecretForm.elements.knownHosts.value,
@@ -2276,6 +2567,10 @@ function deleteSecret(secretId) {
   if (!requirePermission("secret.manage")) return;
   const secret = secrets.find((item) => String(item.id) === String(secretId));
   if (!secret) return;
+  if (!canOperateAsset("secret.manage", secret)) {
+    window.alert("当前用户组无权删除该秘钥");
+    return;
+  }
   const usedByTask = tasks.find((task) => String(task.gitCredentialId) === String(secretId));
   const usedByImagePull = tasks.find((task) => (task.clusters || []).some((cluster) => String(cluster.imagePullSecretId) === String(secretId)));
   const usedByCluster = clusters.find((cluster) => String(cluster.imagePullSecretId) === String(secretId));
@@ -2313,11 +2608,19 @@ function saveUser(event) {
     window.alert("账号已存在");
     return;
   }
+  const globalAccess = hasGlobalAccess() && Boolean(formData.get("globalAccess"));
+  const organizationIds = collectUserGroupIds(newUserOrgList);
+  if (!canAssignUserAccess(globalAccess, organizationIds)) {
+    window.alert("当前用户组无权为该用户分配这些访问范围");
+    return;
+  }
   const user = {
     username,
     name: formData.get("name"),
     password: formData.get("password"),
     role: formData.get("role"),
+    globalAccess,
+    organizationIds,
   };
   users.push(user);
   addAudit("添加用户", username);
@@ -2327,15 +2630,50 @@ function saveUser(event) {
   closeCreateDialog(userCreateDialog, form);
 }
 
+function saveOrganization(event) {
+  event.preventDefault();
+  if (!requirePermission("org.manage")) return;
+  if (!hasGlobalAccess()) {
+    window.alert("只有全局组用户可以创建新用户组");
+    return;
+  }
+  const formData = new FormData(event.currentTarget);
+  const name = String(formData.get("name") || "").trim();
+  if (!name) return;
+  const id = safeGroupId(name);
+  if (organizations.some((group) => String(group.id) === id)) {
+    window.alert(`用户组 ${name} 已存在`);
+    return;
+  }
+  organizations.push({
+    id,
+    name,
+    description: String(formData.get("description") || "").trim(),
+    permissions: [],
+    globalAccess: false,
+  });
+  addAudit("添加用户组", name);
+  event.currentTarget.reset();
+  render();
+  persistState();
+}
+
 function openUserDialog(username, mode = "edit") {
   if (!requirePermission("user.manage")) return;
   const user = users.find((item) => item.username === username);
   if (!user) return;
+  if (!canAccessUser(user)) {
+    window.alert("当前用户组无权编辑该用户");
+    return;
+  }
 
   editUserForm.elements.username.value = user.username;
   editUserForm.elements.displayUsername.value = user.username;
   editUserForm.elements.name.value = user.name;
   editUserForm.elements.role.innerHTML = roleOptions(user.role);
+  editUserForm.elements.globalAccess.checked = Boolean(user.globalAccess);
+  editUserForm.elements.globalAccess.disabled = !hasGlobalAccess();
+  renderUserGroupChecks(editUserOrgList, user.organizationIds || ["default"]);
   editUserForm.elements.password.value = "";
   userDialog.showModal();
 
@@ -2359,6 +2697,10 @@ function saveEditedUser(event) {
   const username = formData.get("username");
   const user = users.find((item) => item.username === username);
   if (!user) return;
+  if (!canAccessUser(user)) {
+    window.alert("当前用户组无权编辑该用户");
+    return;
+  }
 
   const nextRole = formData.get("role");
   const platformAdminCount = users.filter((item) => item.role === "platform_admin").length;
@@ -2369,12 +2711,21 @@ function saveEditedUser(event) {
 
   const nextName = formData.get("name");
   const nextPassword = formData.get("password");
+  const nextGlobalAccess = hasGlobalAccess() && Boolean(formData.get("globalAccess"));
+  const nextOrganizationIds = collectUserGroupIds(editUserOrgList);
+  if (!canAssignUserAccess(nextGlobalAccess, nextOrganizationIds)) {
+    window.alert("当前用户组无权为该用户分配这些访问范围");
+    return;
+  }
   const changedRole = user.role !== nextRole;
   const changedName = user.name !== nextName;
   const changedPassword = Boolean(nextPassword);
+  const changedAccess = user.globalAccess !== nextGlobalAccess || JSON.stringify(user.organizationIds || []) !== JSON.stringify(nextOrganizationIds);
 
   user.name = nextName;
   user.role = nextRole;
+  user.globalAccess = nextGlobalAccess;
+  user.organizationIds = nextOrganizationIds;
   if (changedPassword) user.password = nextPassword;
 
   if (state.currentUser.username === user.username) {
@@ -2383,7 +2734,7 @@ function saveEditedUser(event) {
     window.localStorage.setItem("deploy-platform-user", JSON.stringify(state.currentUser));
   }
 
-  if (changedName || changedRole) addAudit("编辑用户", username);
+  if (changedName || changedRole || changedAccess) addAudit("编辑用户", username);
   if (changedPassword) addAudit("重置密码", username);
 
   closeUserDialog();
@@ -2399,6 +2750,7 @@ const viewConfig = {
   channels: { title: "通知渠道", subtitle: "告警机器人、邮件与 Webhook", permission: "channel.view" },
   secrets: { title: "秘钥管理", subtitle: "Git 凭据、镜像仓库与 Agent Token", permission: "secret.view" },
   users: { title: "用户管理", subtitle: "账号、姓名与角色绑定", permission: "user.view" },
+  orgs: { title: "用户组管理", subtitle: "用户组权限、成员与资产边界", permission: "org.view" },
   access: { title: "角色权限", subtitle: "用户、角色与操作边界", permission: "rbac.view" },
   audit: { title: "权限审计", subtitle: "登录、发布与权限变更", permission: "audit.view" },
 };
@@ -2426,6 +2778,7 @@ function setView(view) {
   channelView.hidden = view !== "channels";
   secretView.hidden = view !== "secrets";
   userView.hidden = view !== "users";
+  orgView.hidden = view !== "orgs";
   accessView.hidden = view !== "access";
   auditView.hidden = view !== "audit";
 
@@ -2449,7 +2802,7 @@ function renderAuth() {
   if (!isAuthed) return;
 
   currentUserName.textContent = state.currentUser.name;
-  currentUserRole.textContent = roles[state.currentUser.role].label;
+  currentUserRole.textContent = roles[state.currentUser.role]?.label || state.currentUser.role;
   document.querySelectorAll("[data-permission-required]").forEach((element) => {
     const permission = element.dataset.permissionRequired;
     element.disabled = !hasPermission(permission);
@@ -2475,11 +2828,13 @@ function render() {
   renderChannelView();
   renderSecretView();
   renderUserView();
+  renderOrganizationView();
   renderAccessView();
   renderAuditView();
   renderClusters();
   renderGitCredentialOptions();
   renderImagePullSecretOptions();
+  renderOrganizationOptions();
   renderPlatformSettings();
   syncSecretNamePlaceholder();
   lucide.createIcons();
@@ -2551,6 +2906,7 @@ document.getElementById("channelForm").addEventListener("submit", saveChannel);
 platformSettingsForm.addEventListener("submit", savePlatformSettings);
 secretForm.addEventListener("submit", saveSecret);
 document.getElementById("userForm").addEventListener("submit", saveUser);
+organizationForm.addEventListener("submit", saveOrganization);
 editSecretForm.addEventListener("submit", saveEditedSecret);
 editUserForm.addEventListener("submit", saveEditedUser);
 editClusterForm.addEventListener("submit", saveEditedCluster);
@@ -2636,6 +2992,35 @@ document.addEventListener("change", (event) => {
   const clusterPullSecretSelect = event.target.closest("[data-cluster-pull-secret]");
   if (clusterPullSecretSelect) {
     updateClusterPullSecret(clusterPullSecretSelect.dataset.clusterPullSecret, clusterPullSecretSelect.value);
+    return;
+  }
+
+  const groupPermissionInput = event.target.closest("[data-group][data-group-permission]");
+  if (groupPermissionInput) {
+    if (!hasPermission("org.manage")) return;
+    const group = organizations.find((item) => String(item.id) === String(groupPermissionInput.dataset.group));
+    if (!group) return;
+    const permission = groupPermissionInput.dataset.groupPermission;
+    if (groupPermissionInput.checked) {
+      group.permissions = Array.from(new Set([...(group.permissions || []), permission]));
+    } else {
+      group.permissions = (group.permissions || []).filter((item) => item !== permission);
+    }
+    addAudit("更新用户组权限", `${group.name} / ${permission}`);
+    render();
+    persistState();
+    return;
+  }
+
+  const groupGlobalInput = event.target.closest("[data-group-global]");
+  if (groupGlobalInput) {
+    if (!hasPermission("org.manage")) return;
+    const group = organizations.find((item) => String(item.id) === String(groupGlobalInput.dataset.groupGlobal));
+    if (!group || group.id === "default") return;
+    group.globalAccess = groupGlobalInput.checked;
+    addAudit("更新用户组全局权限", `${group.name} / ${group.globalAccess ? "开启" : "关闭"}`);
+    render();
+    persistState();
     return;
   }
 
@@ -2807,12 +3192,13 @@ document.getElementById("addClusterNode").addEventListener("click", () => {
 });
 
 document.getElementById("addCluster").addEventListener("click", () => {
-  if (clusters.length === 0) {
+  const selectableClusters = clusters.filter(canAccessAsset);
+  if (selectableClusters.length === 0) {
     window.alert("请先在集群管理中添加集群");
     return;
   }
   collectClusterDrafts();
-  const firstCluster = clusters[0];
+  const firstCluster = selectableClusters[0];
   clusterDrafts.push({
     name: firstCluster.name,
     namespace: firstCluster.namespace || "default",
