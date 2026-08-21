@@ -441,6 +441,10 @@
               <span>编译命令</span>
               <input name="buildCommand" required placeholder="mvn clean package -DskipTests" />
             </label>
+            <label class="wide-field">
+              <span>构建环境变量</span>
+              <textarea name="buildEnv" placeholder="SENTRY_AUTH_TOKEN=xxxx&#10;SENTRY_ORG=trade&#10;SENTRY_PROJECT=admin"></textarea>
+            </label>
             <label class="wide-field java-build-field">
               <span>Maven 私库地址</span>
               <input name="mavenRepoUrl" placeholder="https://nexus.example.com/repository/maven-public/" />

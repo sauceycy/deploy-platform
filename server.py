@@ -295,6 +295,31 @@ def apply_maven_settings_to_command(command, settings_path):
     return f"{prefix}{binary} -s {settings_path}{rest}", True
 
 
+def parse_build_env(value):
+    env = {}
+    for line_number, raw_line in enumerate(str(value or "").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            raise RuntimeError(f"构建环境变量第 {line_number} 行格式错误，应为 KEY=VALUE")
+        key, item_value = line.split("=", 1)
+        key = key.strip()
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            raise RuntimeError(f"构建环境变量名不合法: {key}")
+        env[key] = item_value
+    return env
+
+
+def docker_env_args(env):
+    args = []
+    for key, value in env.items():
+        args.extend(["-e", f"{key}={value}"])
+    return args
+
+
 def image_name(task, execution_id):
     app = safe_name(task["name"])
     tag = execution_id[:12]
@@ -610,6 +635,9 @@ def build_and_dispatch(execution_id):
                 )
                 if not injected and original_command == command:
                     append_log(execution_id, f"编译命令未以 mvn/mvnw 开头，请手动追加参数: -s {maven_settings_path}")
+            build_env = parse_build_env(task.get("buildEnv"))
+            if build_env:
+                append_log(execution_id, f"已注入构建环境变量: {', '.join(sorted(build_env.keys()))}")
             docker_src_dir = HOST_WORKSPACE_DIR / execution_id / "src"
             docker_cmd = [
                 "docker",
@@ -619,6 +647,7 @@ def build_and_dispatch(execution_id):
                 f"{docker_src_dir}:/workspace",
                 "-w",
                 f"/workspace/{task.get('workdir') or '.'}",
+                *docker_env_args(build_env),
                 builder_image(task.get("sdk")),
                 "sh",
                 "-lc",

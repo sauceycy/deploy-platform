@@ -310,6 +310,15 @@ function activeScheduleForTask(taskId) {
   return schedules.find((schedule) => String(schedule.taskId) === String(taskId) && schedule.status === "pending");
 }
 
+function buildEnvKeys(value) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^export\s+/, ""))
+    .filter((line) => line && !line.startsWith("#") && line.includes("="))
+    .map((line) => line.split("=")[0].trim())
+    .filter(Boolean);
+}
+
 function executionLogLines(execution) {
   return (execution?.logs || [])
     .flatMap((log) =>
@@ -689,6 +698,7 @@ function renderDetail() {
         <span>语言</span><strong>${languageLabel(task.language)}</strong>
         <span>SDK</span><strong>${task.sdk}</strong>
         <span>命令</span><strong>${task.buildCommand}</strong>
+        <span>环境变量</span><strong>${buildEnvKeys(task.buildEnv).join("、") || "未设置"}</strong>
         ${
           task.language === "java"
             ? `<span>Maven 私库</span><strong>${task.mavenRepoUrl || "未设置"}</strong>
@@ -1022,6 +1032,7 @@ function resetTaskForm() {
   taskForm.elements.taskId.value = "";
   taskForm.elements.env.value = "test";
   taskForm.elements.language.value = "java";
+  taskForm.elements.buildEnv.value = "";
   taskForm.elements.mavenRepoUrl.value = "";
   taskForm.elements.mavenMirrorOf.value = "maven-public";
   renderGitCredentialOptions("");
@@ -1057,6 +1068,7 @@ function openTaskEditor(taskId) {
   updateSdkOptions(task.language || "java", true);
   taskForm.elements.sdk.value = task.sdk || sdkOptions[task.language || "java"]?.[0] || "";
   taskForm.elements.buildCommand.value = task.buildCommand || "";
+  taskForm.elements.buildEnv.value = task.buildEnv || "";
   taskForm.elements.mavenRepoUrl.value = task.mavenRepoUrl || "";
   taskForm.elements.mavenMirrorOf.value = task.mavenMirrorOf || "maven-public";
   taskForm.elements.containerPort.value = task.containerPort || "";
@@ -1128,6 +1140,7 @@ function buildPreviewObject() {
       language: formValue("language"),
       sdk: formValue("sdk"),
       command: formValue("buildCommand"),
+      env: formValue("buildEnv"),
       mavenRepoUrl: formValue("mavenRepoUrl"),
       mavenMirrorOf: formValue("mavenMirrorOf") || "maven-public",
     },
@@ -1162,6 +1175,7 @@ function saveTask(event) {
     language: preview.build.language,
     sdk: preview.build.sdk,
     buildCommand: preview.build.command,
+    buildEnv: preview.build.env,
     mavenRepoUrl: preview.build.mavenRepoUrl,
     mavenMirrorOf: preview.build.mavenMirrorOf,
     containerPort: preview.runtime.containerPort,
