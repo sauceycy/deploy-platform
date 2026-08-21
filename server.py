@@ -123,6 +123,10 @@ def merge_defaults(state):
     return state
 
 
+def default_user_passwords():
+    return {user.get("username"): user.get("password") for user in DEFAULT_STATE.get("users", [])}
+
+
 def use_postgres():
     return bool(DATABASE_URL and psycopg)
 
@@ -141,6 +145,34 @@ def connect_postgres():
     return conn
 
 
+def read_raw_state():
+    if use_postgres():
+        with connect_postgres() as conn:
+            row = conn.execute("SELECT value FROM app_state WHERE key = 'state'").fetchone()
+    else:
+        with connect_sqlite() as conn:
+            row = conn.execute("SELECT value FROM app_state WHERE key = 'state'").fetchone()
+    if not row:
+        return None
+    return merge_defaults(json.loads(row[0]))
+
+
+def preserve_existing_user_passwords(next_state):
+    current_state = read_raw_state()
+    if not current_state:
+        return next_state
+    current_passwords = {user.get("username"): user.get("password") for user in current_state.get("users", [])}
+    default_passwords = default_user_passwords()
+    for user in next_state.get("users", []):
+        username = user.get("username")
+        incoming_password = user.get("password")
+        current_password = current_passwords.get(username)
+        default_password = default_passwords.get(username)
+        if current_password and default_password and incoming_password == default_password and current_password != incoming_password:
+            user["password"] = current_password
+    return next_state
+
+
 def read_state():
     with STATE_LOCK:
         if use_postgres():
@@ -151,13 +183,14 @@ def read_state():
                 row = conn.execute("SELECT value FROM app_state WHERE key = 'state'").fetchone()
 
         if not row:
-            write_state(DEFAULT_STATE)
+            write_state(json.loads(json.dumps(DEFAULT_STATE, ensure_ascii=False)))
             return json.loads(json.dumps(DEFAULT_STATE, ensure_ascii=False))
         return merge_defaults(json.loads(row[0]))
 
 
 def write_state(state):
-    payload = json.dumps(merge_defaults(state), ensure_ascii=False, separators=(",", ":"))
+    state = preserve_existing_user_passwords(merge_defaults(state))
+    payload = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
     with STATE_LOCK:
         if use_postgres():
             with connect_postgres() as conn:

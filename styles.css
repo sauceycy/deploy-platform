@@ -1470,11 +1470,24 @@ svg {
   font-size: 16px;
 }
 
-.panel-title span {
+.panel-title > span,
+.panel-title > div > span {
   display: block;
   margin-top: 5px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.primary-button,
+.primary-button span,
+.primary-button svg {
+  color: #ffffff;
+}
+
+.primary-button:hover,
+.primary-button:hover span,
+.primary-button:hover svg {
+  color: #ffffff;
 }
 
 .split-title {
@@ -1552,7 +1565,7 @@ svg {
   font-size: 13px;
 }
 
-.settings-card span,
+.settings-card > div > span,
 .settings-card label span {
   color: var(--muted);
   font-size: 12px;
@@ -2022,7 +2035,8 @@ svg {
   font-size: 14px;
 }
 
-.section-title-row span {
+.section-title-row > span,
+.section-title-row > div > span {
   display: block;
   margin-top: 4px;
   color: var(--muted);
