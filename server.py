@@ -228,7 +228,7 @@ def safe_name(value):
 def builder_image(sdk):
     sdk = str(sdk).lower()
     if sdk.startswith("jdk"):
-        return f"eclipse-temurin:{sdk.replace('jdk', '')}-jdk"
+        return f"maven:3-eclipse-temurin-{sdk.replace('jdk', '')}"
     if sdk.startswith("node"):
         return f"node:{sdk.replace('node', '')}"
     if sdk.startswith("go"):
