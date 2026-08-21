@@ -418,6 +418,20 @@ def is_relative_child(path, parent):
         return False
 
 
+def normalize_artifact_pattern(pattern):
+    value = str(pattern or "").strip().strip("'\"").replace("\\", "/")
+    if value.startswith("/workspace/"):
+        value = value[len("/workspace/") :]
+    if value.startswith("./"):
+        value = value[2:]
+    if value.startswith("/"):
+        value = value[1:]
+    path = Path(value)
+    if not value or path.is_absolute() or ".." in path.parts:
+        raise RuntimeError("JAR 包路径必须是仓库内的相对路径，例如 ruoyi-admin/target/*.jar")
+    return value
+
+
 def java_artifact_candidates(task, src_dir, app_dir):
     artifact_path = str(task.get("artifactPath") or "").strip()
     patterns = [artifact_path] if artifact_path else ["target/*.jar", "**/target/*.jar"]
@@ -425,8 +439,7 @@ def java_artifact_candidates(task, src_dir, app_dir):
     for pattern in patterns:
         if not pattern:
             continue
-        if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
-            raise RuntimeError("JAR 包路径必须是仓库内的相对路径")
+        pattern = normalize_artifact_pattern(pattern)
         matches = []
         if any(char in pattern for char in "*?["):
             matches.extend(src_dir.glob(pattern))
