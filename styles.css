@@ -460,7 +460,7 @@ svg {
 
 .content-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: minmax(0, 1fr) minmax(420px, 0.42fr);
   gap: 14px;
   min-height: 0;
 }
@@ -755,6 +755,138 @@ svg {
   font-size: 13px;
 }
 
+.section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.section-title-row h3 {
+  margin: 0;
+}
+
+.execution-focus {
+  padding-top: 14px;
+}
+
+.execution-head {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.execution-head div {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.execution-head span,
+.execution-head strong {
+  display: block;
+  min-width: 0;
+}
+
+.execution-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.execution-head strong {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.stage-timeline {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.stage-step {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.stage-step span {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--surface-3);
+}
+
+.stage-step.done span {
+  background: var(--green);
+}
+
+.stage-step.current {
+  color: var(--primary);
+}
+
+.stage-step.current span {
+  background: var(--primary);
+}
+
+.issue-summary {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.issue-summary.has-error {
+  border-color: #fac5c0;
+  background: #fff7f6;
+}
+
+.issue-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+}
+
+.issue-title svg {
+  width: 16px;
+  height: 16px;
+  color: var(--red);
+}
+
+.issue-summary p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.issue-summary ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--red);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.image-grid {
+  margin-top: 12px;
+}
+
 .kv-grid {
   display: grid;
   grid-template-columns: 88px minmax(0, 1fr);
@@ -811,6 +943,62 @@ svg {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   line-height: 1.5;
+}
+
+.log-viewer {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.compact-segmented .segment {
+  min-width: 76px;
+}
+
+.log-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.rich-log {
+  max-height: min(54vh, 520px);
+  margin-top: 0;
+  padding: 0;
+  white-space: pre-wrap;
+}
+
+.log-line {
+  display: block;
+  min-height: 20px;
+  padding: 2px 10px;
+  border-left: 3px solid transparent;
+}
+
+.log-line.error {
+  border-left-color: var(--red);
+  background: rgba(180, 35, 24, 0.16);
+  color: #ffd8d3;
+}
+
+.log-line.warn {
+  border-left-color: var(--amber);
+  background: rgba(181, 71, 8, 0.14);
+}
+
+.log-line.success {
+  border-left-color: var(--green);
+}
+
+.log-time {
+  color: #9fb0c8;
 }
 
 .management-view {
@@ -1407,6 +1595,20 @@ pre {
 
   .brand {
     margin-bottom: 10px;
+  }
+
+  .execution-head,
+  .stage-timeline {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .log-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .log-actions {
+    justify-content: flex-end;
   }
 
   .nav-list {

@@ -91,6 +91,7 @@ const state = {
   selectedTaskIds: new Set(),
   batchQueue: [],
   filter: "all",
+  detailLogFilter: "all",
   search: "",
   view: "tasks",
 };
@@ -260,6 +261,15 @@ function statusLabel(status) {
   }[status] || status;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
 function isTaskActive(task) {
   return ["queued", "building", "deploying", "running"].includes(task?.status);
 }
@@ -298,6 +308,150 @@ function scheduleStatusLabel(status) {
 
 function activeScheduleForTask(taskId) {
   return schedules.find((schedule) => String(schedule.taskId) === String(taskId) && schedule.status === "pending");
+}
+
+function executionLogLines(execution) {
+  return (execution?.logs || [])
+    .flatMap((log) =>
+      String(log.message || "")
+        .split(/\r?\n/)
+        .map((line, index) => ({
+          time: index === 0 ? log.time : "",
+          message: line,
+          level: logLineLevel(line),
+        })),
+    )
+    .filter((line) => line.message.trim() || line.time);
+}
+
+function logLineLevel(message) {
+  const text = String(message || "");
+  if (/\[ERROR\]|\berror\b|fatal:|failed|failure|not found|blocked mirror|could not|forbidden|denied|拒绝|失败|异常/i.test(text)) return "error";
+  if (/\[WARNING\]|\bwarn\b|deprecated|retry|timeout|waiting|pulling fs layer/i.test(text)) return "warn";
+  if (/downloaded|pull complete|success|完成|成功/i.test(text)) return "success";
+  return "info";
+}
+
+function importantLogLines(lines) {
+  const seen = new Set();
+  return lines
+    .filter((line) => line.level === "error")
+    .filter((line) => {
+      const text = line.message.trim();
+      if (!text || seen.has(text)) return false;
+      seen.add(text);
+      return true;
+    })
+    .slice(0, 5);
+}
+
+function executionHint(lines) {
+  const fullText = lines.map((line) => line.message).join("\n");
+  if (/maven-default-http-blocker|Blocked mirror/i.test(fullText)) {
+    return "检测到 Maven 拦截 HTTP 私服仓库。建议把 Nexus 改成 HTTPS，或在 Maven settings.xml 中显式允许该 HTTP mirror。";
+  }
+  if (/mvn: not found/i.test(fullText)) {
+    return "检测到构建镜像里缺少 Maven。Java 任务应使用 Maven 构建镜像，例如 maven:3-eclipse-temurin-17。";
+  }
+  if (/Host key verification failed/i.test(fullText)) {
+    return "检测到 SSH 主机指纹校验失败。需要在构建环境配置 known_hosts，或改用 HTTPS Token 凭据。";
+  }
+  if (/Write access to repository not granted|The requested URL returned error: 403/i.test(fullText)) {
+    return "检测到 GitHub 权限不足。请确认 Token 对目标组织仓库有 Contents 读取权限，并完成组织 SSO 授权。";
+  }
+  return "";
+}
+
+function renderExecutionSummary(execution) {
+  const lines = executionLogLines(execution);
+  const errors = importantLogLines(lines);
+  const hint = executionHint(lines);
+  if (!errors.length && !hint) {
+    return `<div class="empty-state compact"><strong>暂未发现关键错误</strong><span>完整输出可以在下方日志查看器中查看。</span></div>`;
+  }
+  return `
+    <div class="issue-summary ${errors.length ? "has-error" : ""}">
+      <div class="issue-title">
+        <i data-lucide="${errors.length ? "triangle-alert" : "info"}"></i>
+        <strong>${errors.length ? "失败摘要" : "诊断提示"}</strong>
+      </div>
+      ${
+        hint
+          ? `<p>${escapeHtml(hint)}</p>`
+          : ""
+      }
+      ${
+        errors.length
+          ? `<ul>${errors.map((line) => `<li>${escapeHtml(line.message.trim())}</li>`).join("")}</ul>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+function renderExecutionTimeline(execution) {
+  const currentProgress = progressValue(execution);
+  const steps = [
+    ["拉取代码", 10],
+    ["执行编译", 35],
+    ["构建镜像", 65],
+    ["推送镜像", 78],
+    ["Agent 部署", 90],
+    ["发布完成", 100],
+  ];
+  return `
+    <div class="stage-timeline">
+      ${steps
+        .map(([name, threshold]) => {
+          const isCurrent = execution.stage === name;
+          const isDone = currentProgress >= threshold && !["failed", "cancelled"].includes(execution.status);
+          return `
+            <div class="stage-step ${isCurrent ? "current" : ""} ${isDone ? "done" : ""}">
+              <span></span>
+              <strong>${name}</strong>
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function renderLogViewer(execution) {
+  const lines = executionLogLines(execution);
+  const visibleLines = state.detailLogFilter === "error" ? lines.filter((line) => line.level === "error") : lines;
+  return `
+    <div class="log-viewer">
+      <div class="log-toolbar">
+        <div class="segmented compact-segmented" role="tablist" aria-label="日志过滤">
+          <button class="segment ${state.detailLogFilter === "all" ? "active" : ""}" type="button" data-log-filter="all">全部日志</button>
+          <button class="segment ${state.detailLogFilter === "error" ? "active" : ""}" type="button" data-log-filter="error">只看错误</button>
+        </div>
+        <div class="log-actions">
+          <button class="icon-button" type="button" data-log-copy="${execution.id}" title="复制日志">
+            <i data-lucide="copy"></i>
+          </button>
+          <button class="icon-button" type="button" data-log-scroll title="跳到底部">
+            <i data-lucide="arrow-down-to-line"></i>
+          </button>
+        </div>
+      </div>
+      <pre class="log-box rich-log">${
+        visibleLines.length
+          ? visibleLines
+              .map(
+                (line) =>
+                  `<span class="log-line ${line.level}">${line.time ? `<span class="log-time">[${escapeHtml(line.time)}]</span> ` : ""}${escapeHtml(line.message)}</span>`,
+              )
+              .join("\n")
+          : "当前过滤条件下暂无日志"
+      }</pre>
+    </div>
+  `;
+}
+
+function selectedExecutionForTask(taskId) {
+  return executions.find((execution) => String(execution.taskId) === String(taskId));
 }
 
 function localDateTimeValue(date = new Date(Date.now() + 10 * 60 * 1000)) {
@@ -467,7 +621,7 @@ function renderDetail() {
     `;
     return;
   }
-  const latestExecution = executions.find((execution) => String(execution.taskId) === String(task.id));
+  const latestExecution = selectedExecutionForTask(task.id);
   const activeSchedule = activeScheduleForTask(task.id);
 
   detailPanel.innerHTML = `
@@ -478,6 +632,52 @@ function renderDetail() {
       </div>
       <span class="status-chip ${task.status}">${statusLabel(task.status)}</span>
     </div>
+
+    ${
+      latestExecution
+        ? `<section class="detail-section execution-focus">
+            <div class="section-title-row">
+              <h3>最近执行</h3>
+              ${
+                ["queued", "building", "deploying", "running"].includes(latestExecution.status)
+                  ? `<button class="ghost-button danger-action" type="button" data-execution-cancel="${latestExecution.id}" ${hasPermission("task.deploy") ? "" : "disabled"}>
+                      <i data-lucide="circle-stop"></i>
+                      <span>取消发布</span>
+                    </button>`
+                  : ""
+              }
+            </div>
+            <div class="execution-head">
+              <div>
+                <span>执行 ID</span>
+                <strong>${latestExecution.id}</strong>
+              </div>
+              <div>
+                <span>分支</span>
+                <strong>${latestExecution.branch || "未记录"}</strong>
+              </div>
+              <div>
+                <span>阶段</span>
+                <strong>${latestExecution.stage || statusLabel(latestExecution.status)}</strong>
+              </div>
+              <div>
+                <span>状态</span>
+                <strong>${statusLabel(latestExecution.status)}</strong>
+              </div>
+            </div>
+            ${renderProgress(latestExecution)}
+            ${renderExecutionTimeline(latestExecution)}
+            ${renderExecutionSummary(latestExecution)}
+            <div class="kv-grid image-grid">
+              <span>镜像</span><strong>${latestExecution.image || "未生成"}</strong>
+            </div>
+            ${renderLogViewer(latestExecution)}
+          </section>`
+        : `<section class="detail-section execution-focus">
+            <h3>最近执行</h3>
+            <div class="empty-state compact"><strong>暂无执行记录</strong><span>点击发布后会显示构建和部署日志。</span></div>
+          </section>`
+    }
 
     <section class="detail-section">
       <h3>构建配置</h3>
@@ -548,30 +748,6 @@ function renderDetail() {
       }
     </section>
 
-    <section class="detail-section">
-      <h3>最近执行</h3>
-      ${
-        latestExecution
-          ? `<div class="kv-grid">
-              <span>执行 ID</span><strong>${latestExecution.id}</strong>
-              <span>分支</span><strong>${latestExecution.branch || "未记录"}</strong>
-              <span>状态</span><strong>${statusLabel(latestExecution.status)}</strong>
-              <span>阶段</span><strong>${latestExecution.stage || statusLabel(latestExecution.status)}</strong>
-              <span>镜像</span><strong>${latestExecution.image || "未生成"}</strong>
-            </div>
-            ${renderProgress(latestExecution)}
-            ${
-              ["queued", "building", "deploying", "running"].includes(latestExecution.status)
-                ? `<button class="ghost-button danger-action full-action" type="button" data-execution-cancel="${latestExecution.id}" ${hasPermission("task.deploy") ? "" : "disabled"}>
-                    <i data-lucide="circle-stop"></i>
-                    <span>取消当前发布</span>
-                  </button>`
-                : ""
-            }
-            <div class="log-box">${(latestExecution.logs || []).slice(-6).map((log) => `[${log.time}] ${log.message}`).join("\n")}</div>`
-          : `<div class="empty-state compact"><strong>暂无执行记录</strong><span>点击发布后会显示构建和部署日志。</span></div>`
-      }
-    </section>
   `;
 }
 
@@ -1782,6 +1958,30 @@ document.addEventListener("click", (event) => {
   const executionCancelButton = event.target.closest("[data-execution-cancel]");
   if (executionCancelButton) {
     cancelExecution(executionCancelButton.dataset.executionCancel);
+    return;
+  }
+
+  const logFilterButton = event.target.closest("[data-log-filter]");
+  if (logFilterButton) {
+    state.detailLogFilter = logFilterButton.dataset.logFilter;
+    renderDetail();
+    lucide.createIcons();
+    return;
+  }
+
+  const logCopyButton = event.target.closest("[data-log-copy]");
+  if (logCopyButton) {
+    const execution = executions.find((item) => String(item.id) === String(logCopyButton.dataset.logCopy));
+    const lines = executionLogLines(execution);
+    const logText = lines.map((line) => `${line.time ? `[${line.time}] ` : ""}${line.message}`).join("\n");
+    navigator.clipboard?.writeText(logText);
+    return;
+  }
+
+  const logScrollButton = event.target.closest("[data-log-scroll]");
+  if (logScrollButton) {
+    const logBox = detailPanel.querySelector(".rich-log");
+    if (logBox) logBox.scrollTop = logBox.scrollHeight;
     return;
   }
 
