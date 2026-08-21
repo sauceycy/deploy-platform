@@ -247,6 +247,10 @@ function persistState() {
   }).catch(() => {});
 }
 
+function cacheStateSnapshot(nextState = exportState()) {
+  window.localStorage.setItem(APP_STATE_KEY, JSON.stringify(nextState));
+}
+
 function statusLabel(status) {
   return {
     pending: "待发布",
@@ -1163,7 +1167,7 @@ function buildPreviewObject() {
   };
 }
 
-function saveTask(event) {
+async function saveTask(event) {
   event.preventDefault();
   if (!requirePermission("task.create")) return;
   const preview = buildPreviewObject();
@@ -1191,33 +1195,26 @@ function saveTask(event) {
     notify: preview.notify,
   };
 
-  if (taskId) {
-    const task = tasks.find((item) => String(item.id) === String(taskId));
-    if (!task) {
-      window.alert("任务不存在，无法保存编辑");
-      return;
-    }
-    Object.assign(task, taskPayload);
-    state.selectedId = task.id;
-    addAudit("编辑任务", task.name);
-  } else {
-    const newTask = {
-      id: Date.now(),
-      ...taskPayload,
-      branch: "",
-      lastBranch: "",
-      status: "pending",
-      lastRun: "草稿",
-      alerts: 0,
-    };
-    tasks.unshift(newTask);
-    state.selectedId = newTask.id;
-    addAudit("创建任务", newTask.name);
+  const submitter = event.submitter;
+  if (submitter) submitter.disabled = true;
+  try {
+    const response = await fetch(taskId ? `/api/tasks/${taskId}` : "/api/tasks", {
+      method: taskId ? "PUT" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actor: state.currentUser?.username || "system", task: taskPayload }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "任务保存失败");
+    hydrateState(result.state);
+    state.selectedId = result.task?.id || taskId;
+    cacheStateSnapshot(result.state);
+    render();
+    closeDrawer();
+  } catch (error) {
+    window.alert(error.message);
+  } finally {
+    if (submitter) submitter.disabled = false;
   }
-
-  render();
-  persistState();
-  closeDrawer();
 }
 
 function renderConfigPreview() {

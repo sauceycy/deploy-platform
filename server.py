@@ -827,6 +827,74 @@ def delete_task(task_id, actor):
     return task, state
 
 
+def normalize_task_payload(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("任务配置格式不正确")
+    notify = payload.get("notify") if isinstance(payload.get("notify"), dict) else {}
+    clusters = payload.get("clusters") if isinstance(payload.get("clusters"), list) else []
+    return {
+        "name": str(payload.get("name") or "").strip(),
+        "owner": str(payload.get("owner") or "").strip(),
+        "env": str(payload.get("env") or "test").strip(),
+        "tag": str(payload.get("tag") or "").strip(),
+        "repo": str(payload.get("repo") or "").strip(),
+        "workdir": str(payload.get("workdir") or ".").strip() or ".",
+        "artifactPath": str(payload.get("artifactPath") or "").strip(),
+        "gitCredentialId": str(payload.get("gitCredentialId") or "").strip(),
+        "language": str(payload.get("language") or "java").strip(),
+        "sdk": str(payload.get("sdk") or "").strip(),
+        "buildCommand": str(payload.get("buildCommand") or "").strip(),
+        "buildEnv": str(payload.get("buildEnv") or ""),
+        "mavenRepoUrl": str(payload.get("mavenRepoUrl") or "").strip(),
+        "mavenMirrorOf": str(payload.get("mavenMirrorOf") or "maven-public").strip() or "maven-public",
+        "containerPort": int(payload.get("containerPort") or 8080),
+        "servicePort": int(payload.get("servicePort") or 80),
+        "replicas": int(payload.get("replicas") or 1),
+        "healthPath": str(payload.get("healthPath") or "").strip(),
+        "clusters": [{**cluster, "status": cluster.get("status") or "success"} for cluster in clusters if isinstance(cluster, dict)],
+        "notify": {
+            "channel": notify.get("channel") or "企业微信",
+            "target": notify.get("target") or "",
+            "events": notify.get("events") if isinstance(notify.get("events"), list) else [],
+        },
+    }
+
+
+def save_task_config(task_id, payload, actor):
+    task_payload = normalize_task_payload(payload)
+    if not task_payload["name"]:
+        raise ValueError("任务名称不能为空")
+    if not task_payload["repo"]:
+        raise ValueError("仓库地址不能为空")
+    if not task_payload["buildCommand"]:
+        raise ValueError("编译命令不能为空")
+
+    def update(state):
+        if task_id:
+            task = find_by_id(state["tasks"], task_id)
+            if not task:
+                raise ValueError("任务不存在")
+            task.update(task_payload)
+            state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "编辑任务", "target": task.get("name"), "result": "成功"})
+            return task
+
+        task = {
+            "id": int(time.time() * 1000),
+            **task_payload,
+            "branch": "",
+            "lastBranch": "",
+            "status": "pending",
+            "lastRun": "草稿",
+            "alerts": 0,
+        }
+        state["tasks"].insert(0, task)
+        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "创建任务", "target": task.get("name"), "result": "成功"})
+        return task
+
+    task, state = mutate_state(update)
+    return task, state
+
+
 def create_execution(task_id, actor, branch):
     def update(state):
         task = find_by_id(state["tasks"], task_id)
@@ -1029,7 +1097,12 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(APP_DIR), **kwargs)
 
     def end_headers(self):
-        self.send_header("Cache-Control", "no-store" if self.path.startswith("/api/") else "public, max-age=60")
+        parsed = urlparse(self.path)
+        no_cache_exts = (".html", ".js", ".css")
+        if parsed.path.startswith("/api/") or parsed.path == "/" or parsed.path.endswith(no_cache_exts):
+            self.send_header("Cache-Control", "no-store")
+        else:
+            self.send_header("Cache-Control", "public, max-age=60")
         super().end_headers()
 
     def read_json_body(self):
@@ -1065,6 +1138,15 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/tasks":
+            body = self.read_json_body()
+            try:
+                task, state = save_task_config(None, body.get("task") or {}, body.get("actor"))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"task": task, "state": state})
+            return
         if parsed.path == "/api/tasks/batch-run":
             body = self.read_json_body()
             try:
@@ -1157,7 +1239,18 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_error(404)
 
     def do_PUT(self):
-        if self.path != "/api/state":
+        parsed = urlparse(self.path)
+        match = re.match(r"^/api/tasks/([^/]+)$", parsed.path)
+        if match:
+            body = self.read_json_body()
+            try:
+                task, state = save_task_config(match.group(1), body.get("task") or {}, body.get("actor"))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"task": task, "state": state})
+            return
+        if parsed.path != "/api/state":
             self.send_error(404)
             return
         try:
