@@ -191,6 +191,10 @@ def read_raw_state():
     return merge_defaults(json.loads(row[0]))
 
 
+def default_state_copy():
+    return merge_defaults(json.loads(json.dumps(DEFAULT_STATE, ensure_ascii=False)))
+
+
 def preserve_existing_user_passwords(next_state):
     current_state = read_raw_state()
     if not current_state:
@@ -212,13 +216,26 @@ def read_state():
         if use_postgres():
             with connect_postgres() as conn:
                 row = conn.execute("SELECT value FROM app_state WHERE key = 'state'").fetchone()
+                if not row:
+                    state = default_state_copy()
+                    payload = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+                    conn.execute(
+                        "INSERT INTO app_state (key, value) VALUES ('state', %s) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value",
+                        (payload,),
+                    )
+                    conn.commit()
+                    return state
         else:
             with connect_sqlite() as conn:
                 row = conn.execute("SELECT value FROM app_state WHERE key = 'state'").fetchone()
-
-        if not row:
-            write_state(json.loads(json.dumps(DEFAULT_STATE, ensure_ascii=False)))
-            return json.loads(json.dumps(DEFAULT_STATE, ensure_ascii=False))
+                if not row:
+                    state = default_state_copy()
+                    payload = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+                    conn.execute(
+                        "INSERT INTO app_state (key, value) VALUES ('state', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (payload,),
+                    )
+                    return state
         return merge_defaults(json.loads(row[0]))
 
 

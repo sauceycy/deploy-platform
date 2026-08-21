@@ -569,10 +569,30 @@ function latestLogMessage(execution) {
   return last ? last.message.trim() : "暂无日志";
 }
 
+function clusterResultEntries(execution) {
+  const raw = execution?.clusterResults;
+  if (Array.isArray(raw)) {
+    return raw
+      .map((item) => [String(item.cluster || item.name || ""), item])
+      .filter(([name]) => name);
+  }
+  if (raw && typeof raw === "object") {
+    return Object.entries(raw).map(([name, value]) => [
+      name,
+      typeof value === "object" && value !== null ? { cluster: name, ...value } : { cluster: name, status: value },
+    ]);
+  }
+  return [];
+}
+
+function clusterResultStatus(result) {
+  return typeof result === "object" && result !== null ? result.status : result;
+}
+
 function clusterResultSummary(execution) {
-  const results = Object.entries(execution?.clusterResults || {});
+  const results = clusterResultEntries(execution);
   if (!results.length) return "暂无集群回执";
-  return results.map(([name, status]) => `${name}: ${statusLabel(status)}`).join(" / ");
+  return results.map(([name, result]) => `${name}: ${statusLabel(clusterResultStatus(result))}`).join(" / ");
 }
 
 function executionHint(lines) {
@@ -1323,7 +1343,7 @@ function renderTaskConfigTab(task, activeSchedule) {
 }
 
 function renderTaskClustersTab(task, latestExecution) {
-  const resultByCluster = new Map((latestExecution?.clusterResults || []).map((item) => [item.cluster, item]));
+  const resultByCluster = new Map(clusterResultEntries(latestExecution));
   return `
     <section class="detail-section detail-card">
       <div class="section-title-row">
@@ -1346,7 +1366,7 @@ function renderTaskClustersTab(task, latestExecution) {
                         <span>镜像拉取秘钥：${secretName(pullSecretId)}</span>
                         ${result?.message ? `<span>最近回执：${result.message}</span>` : ""}
                       </div>
-                      <span class="status-chip ${result?.status || cluster.status || "pending"}">${statusLabel(result?.status || cluster.status || "pending")}</span>
+                      <span class="status-chip ${clusterResultStatus(result) || cluster.status || "pending"}">${statusLabel(clusterResultStatus(result) || cluster.status || "pending")}</span>
                     </div>
                   `;
                 })
