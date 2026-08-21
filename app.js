@@ -899,6 +899,12 @@ function renderClusterView() {
           }
         </div>
         <div class="cluster-actions">
+          <label class="inline-select-control">
+            <span>镜像拉取秘钥</span>
+            <select data-cluster-pull-secret="${cluster.id}" ${hasPermission("cluster.manage") ? "" : "disabled"}>
+              ${imagePullSecretOptions(cluster.imagePullSecretId, "不配置")}
+            </select>
+          </label>
           <button class="ghost-button" type="button" data-cluster-action="edit" data-cluster-id="${cluster.id}" ${hasPermission("cluster.manage") ? "" : "disabled"}>
             <i data-lucide="square-pen"></i>
             <span>编辑</span>
@@ -1658,6 +1664,16 @@ function saveEditedCluster(event) {
   closeClusterDialog();
 }
 
+function updateClusterPullSecret(clusterId, secretId) {
+  if (!requirePermission("cluster.manage")) return;
+  const cluster = clusters.find((item) => String(item.id) === String(clusterId));
+  if (!cluster) return;
+  cluster.imagePullSecretId = secretId;
+  addAudit("设置镜像拉取秘钥", `${cluster.name} / ${secretName(secretId)}`);
+  render();
+  persistState();
+}
+
 function saveTemplate(event) {
   event.preventDefault();
   if (!requirePermission("template.manage")) return;
@@ -2025,6 +2041,12 @@ document.addEventListener("change", (event) => {
       state.selectedTaskIds.delete(taskId);
     }
     renderRows();
+    return;
+  }
+
+  const clusterPullSecretSelect = event.target.closest("[data-cluster-pull-secret]");
+  if (clusterPullSecretSelect) {
+    updateClusterPullSecret(clusterPullSecretSelect.dataset.clusterPullSecret, clusterPullSecretSelect.value);
     return;
   }
 

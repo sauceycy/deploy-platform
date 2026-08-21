@@ -1158,6 +1158,27 @@ svg {
   gap: 12px;
 }
 
+.cluster-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.inline-select-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inline-select-control span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.inline-select-control select {
+  min-width: 220px;
+}
+
 .cluster-row-main strong,
 .cluster-row-main span {
   display: block;
