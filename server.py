@@ -583,9 +583,13 @@ def dispatch_agent_tasks(execution_id, task, image):
         execution = find_by_id(state["executions"], execution_id)
         if not execution:
             return
+        dispatched_clusters = []
         for target in task.get("clusters", []):
             agent_task_id = uuid.uuid4().hex[:12]
-            cluster_name = target.get("name")
+            cluster_name = str(target.get("name") or "").strip()
+            if not cluster_name:
+                continue
+            target = {**target, "name": cluster_name}
             payload = {
                 "appName": task["name"],
                 "namespace": target.get("namespace") or "default",
@@ -607,10 +611,14 @@ def dispatch_agent_tasks(execution_id, task, image):
                 }
             )
             execution.setdefault("clusterResults", {})[cluster_name] = "pending"
+            dispatched_clusters.append(cluster_name)
+        if not dispatched_clusters:
+            raise ValueError("任务未绑定有效部署集群")
         execution["status"] = "deploying"
         execution["image"] = image
         execution["stage"] = "Agent 部署"
         execution["progress"] = 88
+        execution.setdefault("logs", []).append({"time": now_text(), "message": f"已创建 Agent 发布任务: {', '.join(dispatched_clusters)}"})
         task_ref = find_by_id(state["tasks"], task["id"])
         if task_ref:
             task_ref["status"] = "deploying"
@@ -845,6 +853,14 @@ def normalize_task_payload(payload):
         raise ValueError("任务配置格式不正确")
     notify = payload.get("notify") if isinstance(payload.get("notify"), dict) else {}
     clusters = payload.get("clusters") if isinstance(payload.get("clusters"), list) else []
+    normalized_clusters = []
+    for cluster in clusters:
+        if not isinstance(cluster, dict):
+            continue
+        name = str(cluster.get("name") or "").strip()
+        if not name:
+            continue
+        normalized_clusters.append({**cluster, "name": name, "status": cluster.get("status") or "success"})
     return {
         "name": str(payload.get("name") or "").strip(),
         "owner": str(payload.get("owner") or "").strip(),
@@ -864,7 +880,7 @@ def normalize_task_payload(payload):
         "servicePort": int(payload.get("servicePort") or 80),
         "replicas": int(payload.get("replicas") or 1),
         "healthPath": str(payload.get("healthPath") or "").strip(),
-        "clusters": [{**cluster, "status": cluster.get("status") or "success"} for cluster in clusters if isinstance(cluster, dict)],
+        "clusters": normalized_clusters,
         "notify": {
             "channel": notify.get("channel") or "企业微信",
             "target": notify.get("target") or "",
@@ -1134,13 +1150,13 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/agent/tasks":
             query = parse_qs(parsed.query)
-            cluster = query.get("cluster", [""])[0]
+            cluster = query.get("cluster", [""])[0].strip()
             token = query.get("token", [""])[0] or self.headers.get("X-Agent-Token", "")
             if AGENT_SHARED_TOKEN and token != AGENT_SHARED_TOKEN:
                 self.send_json({"error": "unauthorized"}, status=401)
                 return
             state = read_state()
-            task = next((item for item in state["agentTasks"] if item.get("clusterName") == cluster and item.get("status") == "pending"), None)
+            task = next((item for item in state["agentTasks"] if str(item.get("clusterName") or "").strip() == cluster and item.get("status") == "pending"), None)
             if not task:
                 self.send_json({"task": None})
                 return
