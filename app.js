@@ -382,7 +382,7 @@ function executionLogLines(execution) {
 
 function logLineLevel(message) {
   const text = String(message || "");
-  if (/\[ERROR\]|\berror\b|fatal:|failed|failure|not found|blocked mirror|could not|forbidden|denied|拒绝|失败|异常/i.test(text)) return "error";
+  if (/\[ERROR\]|\berror\b|fatal:|\bfailed\b|\bfailure\b|build failure|not found|blocked mirror|could not|forbidden|denied|拒绝|失败|异常/i.test(text)) return "error";
   if (/\[WARNING\]|\bwarn\b|deprecated|retry|timeout|waiting|pulling fs layer/i.test(text)) return "warn";
   if (/downloaded|pull complete|success|完成|成功/i.test(text)) return "success";
   return "info";
@@ -420,7 +420,8 @@ function executionHint(lines) {
 
 function renderExecutionSummary(execution) {
   const lines = executionLogLines(execution);
-  const errors = importantLogLines(lines);
+  const shouldShowErrors = ["failed", "partial"].includes(execution?.status);
+  const errors = shouldShowErrors ? importantLogLines(lines) : [];
   const hint = executionHint(lines);
   if (!errors.length && !hint) {
     return `<div class="empty-state compact"><strong>暂未发现关键错误</strong><span>完整输出可以在下方日志查看器中查看。</span></div>`;

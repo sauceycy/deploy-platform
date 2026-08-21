@@ -33,6 +33,7 @@ IMAGE_NAMESPACE = os.environ.get("IMAGE_NAMESPACE", "deploy-platform")
 REGISTRY_USERNAME = os.environ.get("REGISTRY_USERNAME", "")
 REGISTRY_PASSWORD = os.environ.get("REGISTRY_PASSWORD", "")
 AGENT_SHARED_TOKEN = os.environ.get("AGENT_SHARED_TOKEN", "dev-agent-token")
+AGENT_TASK_RETRY_SECONDS = int(os.environ.get("AGENT_TASK_RETRY_SECONDS", "300"))
 ACTIVE_STATUSES = {"queued", "building", "deploying", "running"}
 CLEAN_WORKSPACE_AFTER_BUILD = os.environ.get("CLEAN_WORKSPACE_AFTER_BUILD", "true").lower() != "false"
 CLEAN_LOCAL_IMAGE_AFTER_BUILD = os.environ.get("CLEAN_LOCAL_IMAGE_AFTER_BUILD", "true").lower() != "false"
@@ -102,6 +103,13 @@ def parse_schedule_time(value):
     if parsed.tzinfo:
         parsed = parsed.astimezone().replace(tzinfo=None)
     return parsed
+
+
+def parse_time_text(value):
+    try:
+        return datetime.strptime(str(value or ""), "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
 
 
 def merge_defaults(state):
@@ -1173,7 +1181,7 @@ def scheduler_loop():
 def mark_agent_task_running(agent_task):
     def update(state):
         item = find_by_id(state["agentTasks"], agent_task["id"])
-        if item and item["status"] == "pending":
+        if item and item["status"] in {"pending", "running"}:
             item["status"] = "running"
             item["updatedAt"] = now_text()
         execution = find_by_id(state["executions"], agent_task["executionId"])
@@ -1181,6 +1189,24 @@ def mark_agent_task_running(agent_task):
             execution.setdefault("clusterResults", {})[agent_task["clusterName"]] = "running"
 
     mutate_state(update)
+
+
+def agent_task_matches_cluster(item, cluster):
+    return str(item.get("clusterName") or "").strip() == cluster
+
+
+def agent_task_is_stale(item):
+    updated_at = parse_time_text(item.get("updatedAt") or item.get("createdAt"))
+    if not updated_at:
+        return True
+    return (datetime.now() - updated_at).total_seconds() >= AGENT_TASK_RETRY_SECONDS
+
+
+def next_agent_task_for_cluster(agent_tasks, cluster):
+    pending = next((item for item in agent_tasks if agent_task_matches_cluster(item, cluster) and item.get("status") == "pending"), None)
+    if pending:
+        return pending
+    return next((item for item in agent_tasks if agent_task_matches_cluster(item, cluster) and item.get("status") == "running" and agent_task_is_stale(item)), None)
 
 
 def update_agent_result(agent_task_id, status, logs):
@@ -1263,7 +1289,7 @@ class Handler(SimpleHTTPRequestHandler):
             if not self.require_agent_token(parsed):
                 return
             state = read_state()
-            task = next((item for item in state["agentTasks"] if str(item.get("clusterName") or "").strip() == cluster and item.get("status") == "pending"), None)
+            task = next_agent_task_for_cluster(state["agentTasks"], cluster)
             if not task:
                 self.send_json({"task": None})
                 return

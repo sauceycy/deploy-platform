@@ -64,6 +64,25 @@ def run_kubectl(args, manifest=None):
     return process.returncode, process.stdout
 
 
+def deployment_is_available(namespace, deployment):
+    code, output = run_kubectl(["get", "deployment", deployment, "-n", namespace, "-o", "json"])
+    if code != 0:
+        return False, output
+    try:
+        resource = json.loads(output)
+    except Exception:
+        return False, output
+    spec_replicas = int(resource.get("spec", {}).get("replicas") or 1)
+    status = resource.get("status", {})
+    available = int(status.get("availableReplicas") or 0)
+    updated = int(status.get("updatedReplicas") or 0)
+    observed = int(status.get("observedGeneration") or 0)
+    generation = int(resource.get("metadata", {}).get("generation") or 0)
+    ready = available >= spec_replicas and updated >= spec_replicas and observed >= generation
+    summary = f"deployment {deployment}: available={available}/{spec_replicas}, updated={updated}/{spec_replicas}, observedGeneration={observed}, generation={generation}"
+    return ready, summary
+
+
 def execute_task(task):
     payload = task["payload"]
     manifest = payload["manifest"]
@@ -79,6 +98,10 @@ def execute_task(task):
     code, output = run_kubectl(["rollout", "status", f"deployment/{deployment}", "-n", namespace, "--timeout=180s"])
     logs.append(output)
     if code != 0:
+        ready, summary = deployment_is_available(namespace, deployment)
+        logs.append(summary)
+        if ready:
+            return "success", "\n".join(logs)
         return "failed", "\n".join(logs)
     return "success", "\n".join(logs)
 
