@@ -985,10 +985,10 @@ function renderImagePullSecretOptions() {
   const clusterPullSecretSelect = document.getElementById("clusterPullSecretSelect");
   const editClusterPullSecretSelect = document.getElementById("editClusterPullSecretSelect");
   if (clusterPullSecretSelect) {
-    clusterPullSecretSelect.innerHTML = imagePullSecretOptions(clusterPullSecretSelect.value, "默认拉取秘钥");
+    clusterPullSecretSelect.innerHTML = imagePullSecretOptions(clusterPullSecretSelect.value, "镜像拉取秘钥：不配置");
   }
   if (editClusterPullSecretSelect) {
-    editClusterPullSecretSelect.innerHTML = imagePullSecretOptions(editClusterPullSecretSelect.value, "默认拉取秘钥");
+    editClusterPullSecretSelect.innerHTML = imagePullSecretOptions(editClusterPullSecretSelect.value, "镜像拉取秘钥：不配置");
   }
 }
 
