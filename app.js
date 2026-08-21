@@ -50,6 +50,7 @@ const roles = {
     permissions: ["task.view", "cluster.view", "template.view", "channel.view"],
   },
 };
+const defaultRoles = JSON.parse(JSON.stringify(roles));
 
 const permissionCatalog = [
   { key: "task.view", label: "查看任务" },
@@ -300,13 +301,26 @@ function replaceArray(target, nextValue) {
 }
 
 function replaceRoles(nextRoles) {
-  if (!nextRoles || typeof nextRoles !== "object") return;
+  const incomingRoles = nextRoles && typeof nextRoles === "object" ? nextRoles : {};
   Object.keys(roles).forEach((key) => delete roles[key]);
-  Object.entries(nextRoles).forEach(([key, role]) => {
-    roles[key] = role;
+  Object.entries(defaultRoles).forEach(([key, role]) => {
+    const incoming = incomingRoles[key] && typeof incomingRoles[key] === "object" ? incomingRoles[key] : {};
+    roles[key] = {
+      ...role,
+      ...incoming,
+      permissions: Array.from(new Set([...(role.permissions || []), ...(Array.isArray(incoming.permissions) ? incoming.permissions : [])])),
+    };
   });
-  roles.platform_admin.permissions = Array.from(new Set([...(roles.platform_admin.permissions || []), "secret.view", "secret.manage"]));
+  Object.entries(incomingRoles).forEach(([key, role]) => {
+    if (roles[key] || !role || typeof role !== "object") return;
+    roles[key] = {
+      label: role.label || key,
+      permissions: Array.isArray(role.permissions) ? role.permissions : [],
+    };
+  });
+  roles.platform_admin.permissions = Array.from(new Set([...(roles.platform_admin.permissions || []), ...(defaultRoles.platform_admin.permissions || []), "secret.view", "secret.manage", "org.view", "org.manage"]));
   if (roles.developer) roles.developer.permissions = Array.from(new Set([...(roles.developer.permissions || []), "secret.view"]));
+  if (roles.auditor) roles.auditor.permissions = Array.from(new Set([...(roles.auditor.permissions || []), "org.view"]));
 }
 
 function normalizeOrganizations() {
@@ -318,6 +332,18 @@ function normalizeOrganizations() {
     group.globalAccess = String(group.id) === "default" ? false : Boolean(group.globalAccess);
   });
   if (!organizations.some((group) => String(group.id) === "default")) organizations.unshift({ id: "default", name: "default", description: "默认用户组", permissions: [], globalAccess: false });
+  if (!users.length) {
+    users.push({ username: "admin", password: "admin123", name: "平台管理员", role: "platform_admin", globalAccess: true, organizationIds: ["default"] });
+  }
+  if (!users.some((user) => user.role === "platform_admin")) {
+    const admin = users.find((user) => user.username === "admin");
+    if (admin) {
+      admin.role = "platform_admin";
+      admin.globalAccess = true;
+    } else {
+      users.unshift({ username: "admin", password: "admin123", name: "平台管理员", role: "platform_admin", globalAccess: true, organizationIds: ["default"] });
+    }
+  }
   users.forEach((user) => {
     if (!Array.isArray(user.organizationIds) || user.organizationIds.length === 0) user.organizationIds = ["default"];
     user.globalAccess = Boolean(user.globalAccess || user.role === "platform_admin");
@@ -2875,10 +2901,11 @@ function syncAutoRefresh() {
 function login(event) {
   event.preventDefault();
   const formData = new FormData(loginForm);
-  const username = formData.get("username");
-  const password = formData.get("password");
+  const username = String(formData.get("username") || "").trim();
+  const password = String(formData.get("password") || "");
   const user = users.find((item) => item.username === username && item.password === password);
   if (!user) {
+    loginError.textContent = username === "admin" && password === "admin123" ? "默认密码可能已被修改，请使用当前 admin 密码" : "账号或密码不正确";
     loginError.hidden = false;
     return;
   }

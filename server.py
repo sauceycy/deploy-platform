@@ -1,4 +1,5 @@
 import base64
+import copy
 import json
 import os
 import re
@@ -122,13 +123,30 @@ def parse_time_text(value):
 def merge_defaults(state):
     for key, value in DEFAULT_STATE.items():
         if key not in state:
-            state[key] = value.copy() if isinstance(value, dict) else list(value)
+            state[key] = copy.deepcopy(value)
+    normalize_roles_state(state)
     normalize_group_state(state)
     return state
 
 
 def default_user_passwords():
     return {user.get("username"): user.get("password") for user in DEFAULT_STATE.get("users", [])}
+
+
+def normalize_roles_state(state):
+    roles = state.get("roles")
+    if not isinstance(roles, dict):
+        state["roles"] = copy.deepcopy(DEFAULT_STATE["roles"])
+        return
+    for key, default_role in DEFAULT_STATE["roles"].items():
+        role = roles.setdefault(key, copy.deepcopy(default_role))
+        role["label"] = role.get("label") or default_role["label"]
+        if not isinstance(role.get("permissions"), list):
+            role["permissions"] = []
+        if key == "platform_admin":
+            role["permissions"] = list(dict.fromkeys([*role["permissions"], *default_role["permissions"]]))
+    if "auditor" in roles:
+        roles["auditor"]["permissions"] = list(dict.fromkeys([*roles["auditor"].get("permissions", []), "org.view"]))
 
 
 def safe_group_id(value):
@@ -152,7 +170,19 @@ def normalize_group_state(state):
         group["globalAccess"] = False if str(group.get("id")) == "default" else bool(group.get("globalAccess"))
     if not any(str(group.get("id")) == "default" for group in groups):
         groups.insert(0, {"id": "default", "name": "default", "description": "默认用户组", "permissions": [], "globalAccess": False})
-    for user in state.setdefault("users", []):
+    users = state.setdefault("users", [])
+    if not isinstance(users, list):
+        state["users"] = users = []
+    if not users:
+        users.append(copy.deepcopy(DEFAULT_STATE["users"][0]))
+    if not any(user.get("role") == "platform_admin" for user in users):
+        admin = next((user for user in users if user.get("username") == "admin"), None)
+        if admin:
+            admin["role"] = "platform_admin"
+            admin["globalAccess"] = True
+        else:
+            users.insert(0, copy.deepcopy(DEFAULT_STATE["users"][0]))
+    for user in users:
         if not isinstance(user.get("organizationIds"), list) or not user.get("organizationIds"):
             user["organizationIds"] = ["default"]
         user["globalAccess"] = bool(user.get("globalAccess") or user.get("role") == "platform_admin")
