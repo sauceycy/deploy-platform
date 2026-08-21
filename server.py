@@ -87,6 +87,10 @@ DEFAULT_STATE = {
     "agentTasks": [],
     "agentHeartbeats": [],
     "schedules": [],
+    "platformSettings": {
+        "registrySecretId": "",
+        "imageNamespace": IMAGE_NAMESPACE,
+    },
 }
 
 STATE_LOCK = threading.RLock()
@@ -332,11 +336,36 @@ def docker_env_args(env):
     return args
 
 
-def image_name(task, execution_id):
+def registry_config(state):
+    settings = state.get("platformSettings") if isinstance(state.get("platformSettings"), dict) else {}
+    registry_secret_id = str(settings.get("registrySecretId") or "").strip()
+    registry_secret = secret_by_id(state, registry_secret_id)
+    if registry_secret_id and not registry_secret:
+        raise RuntimeError("平台默认镜像仓库秘钥不存在，请在秘钥管理重新选择")
+    registry_url = normalize_registry_server((registry_secret or {}).get("target")) if registry_secret else normalize_registry_server(REGISTRY_URL)
+    username = (registry_secret or {}).get("username") if registry_secret else REGISTRY_USERNAME
+    password = (registry_secret or {}).get("secret") if registry_secret else REGISTRY_PASSWORD
+    if registry_secret and registry_secret.get("type") != "registry":
+        raise RuntimeError("平台默认镜像仓库秘钥类型必须是镜像仓库账号")
+    if registry_secret and (not username or not password):
+        raise RuntimeError("平台默认镜像仓库账号缺少用户名或秘钥内容")
+    return {
+        "url": registry_url,
+        "username": username or "",
+        "password": password or "",
+        "namespace": str(settings.get("imageNamespace") or IMAGE_NAMESPACE or "deploy-platform").strip().strip("/") or "deploy-platform",
+        "source": (registry_secret or {}).get("name") or ("环境变量" if registry_url else "未配置"),
+    }
+
+
+def image_name(task, execution_id, config=None):
     app = safe_name(task["name"])
     tag = execution_id[:12]
-    repo = f"{IMAGE_NAMESPACE}/{app}:{tag}"
-    return f"{REGISTRY_URL}/{repo}" if REGISTRY_URL else repo
+    config = config or {}
+    namespace = str(config.get("namespace") or IMAGE_NAMESPACE or "deploy-platform").strip().strip("/")
+    repo = f"{namespace}/{app}:{tag}" if namespace else f"{app}:{tag}"
+    registry_url = normalize_registry_server(config.get("url") or REGISTRY_URL)
+    return f"{registry_url}/{repo}" if registry_url else repo
 
 
 def registry_server_from_image(image):
@@ -749,7 +778,9 @@ def build_and_dispatch(execution_id):
     src_dir = work_dir / "src"
     image = ""
     image_built = False
+    image_pushed = False
     try:
+        registry = registry_config(state)
         set_execution_status(execution_id, "building", "开始拉取代码", stage="拉取代码", progress=10)
         if work_dir.exists():
             shutil.rmtree(work_dir)
@@ -812,7 +843,7 @@ def build_and_dispatch(execution_id):
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "building", "编译命令执行完成", stage="生成镜像", progress=55)
 
-        image = image_name(task, execution_id)
+        image = image_name(task, execution_id, registry)
         dockerfile, docker_context, selected_artifact = generate_dockerfile(task, app_dir, src_dir)
         ensure_execution_active(execution_id)
         if selected_artifact:
@@ -826,15 +857,16 @@ def build_and_dispatch(execution_id):
         ensure_execution_active(execution_id)
         set_execution_status(execution_id, "building", "Docker 镜像构建完成", image=image, stage="准备推送", progress=72)
 
-        if REGISTRY_URL:
+        if registry["url"]:
+            append_log(execution_id, f"使用镜像仓库配置: {registry['source']} / {registry['url']} / {registry['namespace']}")
             registry_env = None
-            if REGISTRY_USERNAME and REGISTRY_PASSWORD:
+            if registry["username"] and registry["password"]:
                 docker_config_dir = work_dir / ".docker"
                 docker_config_dir.mkdir(parents=True, exist_ok=True)
                 registry_env = {**os.environ, "DOCKER_CONFIG": str(docker_config_dir)}
                 code, output = run_command(
-                    ["docker", "login", REGISTRY_URL, "-u", REGISTRY_USERNAME, "--password-stdin"],
-                    input_text=REGISTRY_PASSWORD,
+                    ["docker", "login", registry["url"], "-u", registry["username"], "--password-stdin"],
+                    input_text=registry["password"],
                     env=registry_env,
                 )
                 append_log(execution_id, output)
@@ -846,6 +878,7 @@ def build_and_dispatch(execution_id):
             append_log(execution_id, output)
             if code != 0:
                 raise RuntimeError("镜像推送失败")
+            image_pushed = True
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "building", "镜像推送完成", image=image, stage="等待部署", progress=84)
         else:
@@ -865,7 +898,7 @@ def build_and_dispatch(execution_id):
         set_execution_status(execution_id, "failed", str(exc), stage=current.get("stage") or "执行失败", progress=current.get("progress") or 100)
         send_notification(task, "BUILD_FAILED", str(exc))
     finally:
-        cleanup_build_artifacts(execution_id, work_dir, image, image_built)
+        cleanup_build_artifacts(execution_id, work_dir, image, image_built and image_pushed)
 
 
 def create_execution_record(state, task, actor, branch, action="触发发布"):

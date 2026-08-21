@@ -75,7 +75,13 @@ http://localhost:8080
 
 ## 镜像仓库
 
-真实发布到 Kubernetes 时，业务集群必须能拉取构建出的镜像。建议配置 Harbor 或其他镜像仓库：
+真实发布到 Kubernetes 时，业务集群必须能拉取构建出的镜像。推荐在页面里配置镜像仓库：
+
+1. 进入「秘钥管理」，新增 `镜像仓库账号`，地址填写仓库域名，例如 `harbor.example.com` 或 `trade-acr-registry.ap-southeast-1.cr.aliyuncs.com`。
+2. 在「平台默认推送镜像仓库」选择该账号，并设置镜像命名空间，例如 `deploy-platform`。
+3. 在「集群管理」为目标集群选择默认镜像拉取秘钥，或在任务的多集群配置中单独覆盖。
+
+如果未在页面配置平台默认推送仓库，平台会回退读取 Docker Compose 环境变量：
 
 ```bash
 export REGISTRY_URL=harbor.example.com

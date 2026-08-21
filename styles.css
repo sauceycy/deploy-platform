@@ -568,9 +568,19 @@ svg {
 
 .task-main span,
 .repo-cell span,
-.muted {
+.muted,
+.recent-log {
   color: var(--muted);
   font-size: 12px;
+}
+
+.recent-log {
+  display: block;
+  width: 180px;
+  margin-top: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .language-chip,
@@ -803,6 +813,33 @@ svg {
   font-size: 13px;
 }
 
+.execution-snapshot {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.execution-snapshot div {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.execution-snapshot span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.execution-snapshot strong {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .stage-timeline {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -951,6 +988,39 @@ svg {
   margin-top: 12px;
 }
 
+.log-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.log-stats span {
+  min-height: 24px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.log-stats .error {
+  color: var(--red);
+  background: var(--red-soft);
+  border-color: #fac5c0;
+}
+
+.log-stats .warn {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.log-stats .success {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
 .log-toolbar {
   display: flex;
   align-items: center;
@@ -966,6 +1036,26 @@ svg {
   display: flex;
   align-items: center;
   gap: 7px;
+}
+
+.log-search {
+  position: relative;
+  min-width: 210px;
+}
+
+.log-search svg {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  color: var(--subtle);
+  transform: translateY(-50%);
+}
+
+.log-search input {
+  min-height: 34px;
+  padding-left: 32px;
 }
 
 .rich-log {
@@ -1078,6 +1168,38 @@ svg {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.settings-card {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(180px, 0.8fr) minmax(150px, 0.6fr) auto;
+  align-items: end;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.settings-card > div {
+  display: grid;
+  gap: 4px;
+  align-self: center;
+}
+
+.settings-card strong {
+  font-size: 13px;
+}
+
+.settings-card span,
+.settings-card label span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-card label {
+  display: grid;
+  gap: 6px;
 }
 
 .simple-table {
@@ -1679,6 +1801,7 @@ pre {
   .form-grid,
   .notify-grid,
   .inline-form,
+  .settings-card,
   .cluster-token-note,
   .compact-grid,
   .node-edit-row {

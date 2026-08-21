@@ -80,6 +80,7 @@ const executions = [];
 const agentTasks = [];
 const agentHeartbeats = [];
 const schedules = [];
+const platformSettings = { registrySecretId: "", imageNamespace: "deploy-platform" };
 const clusterDrafts = [];
 const clusterNodeDrafts = [];
 const APP_STATE_KEY = "deploy-platform-state";
@@ -92,6 +93,7 @@ const state = {
   batchQueue: [],
   filter: "all",
   detailLogFilter: "all",
+  detailLogQuery: "",
   search: "",
   view: "tasks",
 };
@@ -131,6 +133,9 @@ const secretNameInput = document.getElementById("secretNameInput");
 const secretTypeSelect = document.getElementById("secretType");
 const secretDialog = document.getElementById("secretDialog");
 const editSecretForm = document.getElementById("editSecretForm");
+const platformSettingsForm = document.getElementById("platformSettingsForm");
+const platformRegistrySecret = document.getElementById("platformRegistrySecret");
+const platformImageNamespace = document.getElementById("platformImageNamespace");
 const clusterDialog = document.getElementById("clusterDialog");
 const editClusterForm = document.getElementById("editClusterForm");
 const clusterNodeEditor = document.getElementById("clusterNodeEditor");
@@ -193,6 +198,7 @@ function exportState() {
     agentTasks,
     agentHeartbeats,
     schedules,
+    platformSettings,
   };
 }
 
@@ -226,6 +232,7 @@ function hydrateState(nextState) {
   replaceArray(agentTasks, nextState.agentTasks);
   replaceArray(agentHeartbeats, nextState.agentHeartbeats);
   replaceArray(schedules, nextState.schedules);
+  Object.assign(platformSettings, { registrySecretId: "", imageNamespace: "deploy-platform" }, nextState.platformSettings || {});
   state.selectedId = tasks.some((task) => String(task.id) === String(previousSelectedId)) ? previousSelectedId : tasks[0]?.id || null;
 }
 
@@ -403,8 +410,49 @@ function importantLogLines(lines) {
     .slice(0, 5);
 }
 
+function logStats(lines) {
+  return lines.reduce(
+    (stats, line) => {
+      stats.total += 1;
+      stats[line.level] = (stats[line.level] || 0) + 1;
+      return stats;
+    },
+    { total: 0, error: 0, warn: 0, success: 0, info: 0 },
+  );
+}
+
+function filteredLogLines(lines) {
+  const query = state.detailLogQuery.trim().toLowerCase();
+  return lines.filter((line) => {
+    const levelMatch = state.detailLogFilter === "all" || line.level === state.detailLogFilter;
+    const queryMatch = !query || `${line.time} ${line.message}`.toLowerCase().includes(query);
+    return levelMatch && queryMatch;
+  });
+}
+
+function latestLogMessage(execution) {
+  const lines = executionLogLines(execution).filter((line) => line.message.trim());
+  const last = lines.at(-1);
+  return last ? last.message.trim() : "暂无日志";
+}
+
+function clusterResultSummary(execution) {
+  const results = Object.entries(execution?.clusterResults || {});
+  if (!results.length) return "暂无集群回执";
+  return results.map(([name, status]) => `${name}: ${statusLabel(status)}`).join(" / ");
+}
+
 function executionHint(lines) {
   const fullText = lines.map((line) => line.message).join("\n");
+  if (/ImagePullBackOff|ErrImagePull|pull access denied|Failed to pull image/i.test(fullText)) {
+    return "检测到镜像拉取失败。请确认业务集群已配置镜像拉取秘钥、镜像地址可访问，并且 Pod 使用了正确的 imagePullSecrets。";
+  }
+  if (/CrashLoopBackOff|Back-off restarting failed container/i.test(fullText)) {
+    return "检测到容器反复崩溃。请查看下方 Kubernetes 诊断里的容器日志，重点检查启动参数、配置文件、数据库连接和运行环境变量。";
+  }
+  if (/Readiness probe failed|Liveness probe failed/i.test(fullText)) {
+    return "检测到健康检查失败。请确认任务里的健康检查路径、容器端口和应用实际监听端口一致。";
+  }
   if (/maven-default-http-blocker|Blocked mirror/i.test(fullText)) {
     return "检测到 Maven 拦截 HTTP 私服仓库。建议把 Nexus 改成 HTTPS，或在 Maven settings.xml 中显式允许该 HTTP mirror。";
   }
@@ -478,15 +526,29 @@ function renderExecutionTimeline(execution) {
 
 function renderLogViewer(execution) {
   const lines = executionLogLines(execution);
-  const visibleLines = state.detailLogFilter === "error" ? lines.filter((line) => line.level === "error") : lines;
+  const visibleLines = filteredLogLines(lines);
+  const stats = logStats(lines);
   return `
     <div class="log-viewer">
+      <div class="log-stats">
+        <span>总计 ${stats.total}</span>
+        <span class="error">错误 ${stats.error}</span>
+        <span class="warn">警告 ${stats.warn}</span>
+        <span class="success">成功 ${stats.success}</span>
+        <span>显示 ${visibleLines.length}</span>
+      </div>
       <div class="log-toolbar">
         <div class="segmented compact-segmented" role="tablist" aria-label="日志过滤">
           <button class="segment ${state.detailLogFilter === "all" ? "active" : ""}" type="button" data-log-filter="all">全部日志</button>
           <button class="segment ${state.detailLogFilter === "error" ? "active" : ""}" type="button" data-log-filter="error">只看错误</button>
+          <button class="segment ${state.detailLogFilter === "warn" ? "active" : ""}" type="button" data-log-filter="warn">警告</button>
+          <button class="segment ${state.detailLogFilter === "success" ? "active" : ""}" type="button" data-log-filter="success">成功</button>
         </div>
         <div class="log-actions">
+          <label class="log-search">
+            <i data-lucide="search"></i>
+            <input type="search" value="${escapeHtml(state.detailLogQuery)}" placeholder="搜索日志、Pod、错误码" data-log-query />
+          </label>
           <button class="icon-button" type="button" data-log-copy="${execution.id}" title="复制日志">
             <i data-lucide="copy"></i>
           </button>
@@ -654,6 +716,7 @@ function renderRows() {
         <div>
           <span class="status-chip ${task.status}">${statusLabel(task.status)}</span>
           ${renderProgress(task, true)}
+          <span class="recent-log">${escapeHtml(latestLogMessage(selectedExecutionForTask(task.id)))}</span>
         </div>
         <div class="row-actions">
           <button class="ghost-button" type="button" data-action="select" data-task-id="${task.id}">
@@ -749,6 +812,16 @@ function renderDetail() {
               <div>
                 <span>状态</span>
                 <strong>${statusLabel(latestExecution.status)}</strong>
+              </div>
+            </div>
+            <div class="execution-snapshot">
+              <div>
+                <span>集群回执</span>
+                <strong>${clusterResultSummary(latestExecution)}</strong>
+              </div>
+              <div>
+                <span>最新日志</span>
+                <strong>${latestLogMessage(latestExecution)}</strong>
               </div>
             </div>
             ${renderProgress(latestExecution)}
@@ -1028,6 +1101,12 @@ function renderImagePullSecretOptions() {
   if (editClusterPullSecretSelect) {
     editClusterPullSecretSelect.innerHTML = imagePullSecretOptions(editClusterPullSecretSelect.value, "镜像拉取秘钥：不配置");
   }
+}
+
+function renderPlatformSettings() {
+  if (!platformRegistrySecret || !platformImageNamespace) return;
+  platformRegistrySecret.innerHTML = imagePullSecretOptions(platformSettings.registrySecretId, "使用环境变量配置");
+  platformImageNamespace.value = platformSettings.imageNamespace || "deploy-platform";
 }
 
 function renderUserView() {
@@ -1744,6 +1823,16 @@ function saveChannel(event) {
   persistState();
 }
 
+function savePlatformSettings(event) {
+  event.preventDefault();
+  if (!requirePermission("secret.manage")) return;
+  platformSettings.registrySecretId = platformSettingsForm.elements.registrySecretId.value;
+  platformSettings.imageNamespace = (platformSettingsForm.elements.imageNamespace.value || "deploy-platform").trim().replace(/^\/+|\/+$/g, "") || "deploy-platform";
+  addAudit("保存镜像仓库配置", `${secretName(platformSettings.registrySecretId)} / ${platformSettings.imageNamespace}`);
+  render();
+  persistState();
+}
+
 function saveSecret(event) {
   event.preventDefault();
   if (!requirePermission("secret.manage")) return;
@@ -1825,6 +1914,7 @@ function deleteSecret(secretId) {
   const usedByTask = tasks.find((task) => String(task.gitCredentialId) === String(secretId));
   const usedByImagePull = tasks.find((task) => (task.clusters || []).some((cluster) => String(cluster.imagePullSecretId) === String(secretId)));
   const usedByCluster = clusters.find((cluster) => String(cluster.imagePullSecretId) === String(secretId));
+  const usedByPlatformRegistry = String(platformSettings.registrySecretId) === String(secretId);
   if (usedByTask) {
     window.alert(`任务 ${usedByTask.name} 正在使用该秘钥，请先编辑任务取消绑定`);
     return;
@@ -1835,6 +1925,10 @@ function deleteSecret(secretId) {
   }
   if (usedByCluster) {
     window.alert(`集群 ${usedByCluster.name} 正在使用该默认镜像拉取秘钥，请先编辑集群取消绑定`);
+    return;
+  }
+  if (usedByPlatformRegistry) {
+    window.alert("平台默认推送镜像仓库正在使用该秘钥，请先在秘钥管理中切换仓库配置");
     return;
   }
   const index = secrets.findIndex((item) => String(item.id) === String(secretId));
@@ -2009,6 +2103,7 @@ function render() {
   renderClusters();
   renderGitCredentialOptions();
   renderImagePullSecretOptions();
+  renderPlatformSettings();
   syncSecretNamePlaceholder();
   lucide.createIcons();
   syncAutoRefresh();
@@ -2071,6 +2166,7 @@ taskForm.addEventListener("submit", saveTask);
 document.getElementById("clusterForm").addEventListener("submit", saveCluster);
 document.getElementById("templateForm").addEventListener("submit", saveTemplate);
 document.getElementById("channelForm").addEventListener("submit", saveChannel);
+platformSettingsForm.addEventListener("submit", savePlatformSettings);
 secretForm.addEventListener("submit", saveSecret);
 document.getElementById("userForm").addEventListener("submit", saveUser);
 editSecretForm.addEventListener("submit", saveEditedSecret);
@@ -2095,6 +2191,22 @@ document.getElementById("editSecretType").addEventListener("change", (event) => 
 taskSearch.addEventListener("input", (event) => {
   state.search = event.target.value;
   renderRows();
+});
+
+document.addEventListener("input", (event) => {
+  const logQuery = event.target.closest("[data-log-query]");
+  if (logQuery) {
+    state.detailLogQuery = logQuery.value;
+    renderDetail();
+    lucide.createIcons();
+    window.setTimeout(() => {
+      const nextInput = detailPanel.querySelector("[data-log-query]");
+      if (nextInput) {
+        nextInput.focus();
+        nextInput.setSelectionRange(nextInput.value.length, nextInput.value.length);
+      }
+    }, 0);
+  }
 });
 
 selectAllTasks.addEventListener("change", (event) => {
