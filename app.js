@@ -382,6 +382,7 @@ function executionLogLines(execution) {
 
 function logLineLevel(message) {
   const text = String(message || "");
+  if (/^(Downloading|Downloaded) from /i.test(text.trim())) return "info";
   if (/\[ERROR\]|\berror\b|fatal:|\bfailed\b|\bfailure\b|build failure|not found|blocked mirror|could not|forbidden|denied|拒绝|失败|异常/i.test(text)) return "error";
   if (/\[WARNING\]|\bwarn\b|deprecated|retry|timeout|waiting|pulling fs layer/i.test(text)) return "warn";
   if (/downloaded|pull complete|success|完成|成功/i.test(text)) return "success";
@@ -394,6 +395,7 @@ function importantLogLines(lines) {
     .filter((line) => line.level === "error")
     .filter((line) => {
       const text = line.message.trim();
+      if (/^(Downloading|Downloaded) from /i.test(text)) return false;
       if (!text || seen.has(text)) return false;
       seen.add(text);
       return true;

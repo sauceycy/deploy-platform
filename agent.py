@@ -83,6 +83,83 @@ def deployment_is_available(namespace, deployment):
     return ready, summary
 
 
+def last_lines(text, limit=120):
+    lines = str(text or "").splitlines()
+    return "\n".join(lines[-limit:])
+
+
+def pod_names_for_deployment(namespace, deployment):
+    code, output = run_kubectl(["get", "pods", "-n", namespace, "-l", f"app={deployment}", "-o", "json"])
+    if code != 0:
+        return [], output
+    try:
+        resource = json.loads(output)
+    except Exception:
+        return [], output
+    return [item.get("metadata", {}).get("name") for item in resource.get("items", []) if item.get("metadata", {}).get("name")], output
+
+
+def summarize_pod_statuses(pods_json):
+    try:
+        resource = json.loads(pods_json)
+    except Exception:
+        return pods_json
+    summaries = []
+    for pod in resource.get("items", []):
+        name = pod.get("metadata", {}).get("name", "unknown")
+        phase = pod.get("status", {}).get("phase", "Unknown")
+        statuses = pod.get("status", {}).get("containerStatuses", [])
+        container_parts = []
+        for status in statuses:
+            state = status.get("state", {})
+            if state.get("waiting"):
+                waiting = state["waiting"]
+                container_parts.append(f"{status.get('name')}: waiting {waiting.get('reason')} {waiting.get('message', '')}".strip())
+            elif state.get("terminated"):
+                terminated = state["terminated"]
+                container_parts.append(f"{status.get('name')}: terminated {terminated.get('reason')} exitCode={terminated.get('exitCode')}")
+            else:
+                container_parts.append(f"{status.get('name')}: ready={status.get('ready')} restartCount={status.get('restartCount')}")
+        summaries.append(f"{name}: phase={phase}; {'; '.join(container_parts) or 'no container status'}")
+    return "\n".join(summaries) or "未找到匹配 Pod"
+
+
+def collect_failure_diagnostics(namespace, deployment):
+    diagnostics = ["=== Kubernetes 部署诊断 ==="]
+
+    code, output = run_kubectl(["get", "deployment", deployment, "-n", namespace, "-o", "wide"])
+    diagnostics.append("$ kubectl get deployment")
+    diagnostics.append(output.strip() or f"exit={code}")
+
+    code, output = run_kubectl(["get", "pods", "-n", namespace, "-l", f"app={deployment}", "-o", "wide"])
+    diagnostics.append("$ kubectl get pods")
+    diagnostics.append(output.strip() or f"exit={code}")
+
+    pod_names, pods_json = pod_names_for_deployment(namespace, deployment)
+    diagnostics.append("$ pod status summary")
+    diagnostics.append(summarize_pod_statuses(pods_json))
+
+    code, output = run_kubectl(["describe", "deployment", deployment, "-n", namespace])
+    diagnostics.append("$ kubectl describe deployment")
+    diagnostics.append(last_lines(output, 80) or f"exit={code}")
+
+    for pod_name in pod_names[:3]:
+        code, output = run_kubectl(["describe", "pod", pod_name, "-n", namespace])
+        diagnostics.append(f"$ kubectl describe pod {pod_name}")
+        diagnostics.append(last_lines(output, 100) or f"exit={code}")
+
+        code, output = run_kubectl(["logs", pod_name, "-n", namespace, "--all-containers=true", "--tail=120"])
+        diagnostics.append(f"$ kubectl logs {pod_name} --all-containers --tail=120")
+        diagnostics.append(output.strip() or f"exit={code}")
+
+        code, output = run_kubectl(["logs", pod_name, "-n", namespace, "--all-containers=true", "--previous", "--tail=80"])
+        if code == 0 and output.strip():
+            diagnostics.append(f"$ kubectl logs {pod_name} --previous --all-containers --tail=80")
+            diagnostics.append(output.strip())
+
+    return "\n".join(diagnostics)
+
+
 def execute_task(task):
     payload = task["payload"]
     manifest = payload["manifest"]
@@ -102,6 +179,7 @@ def execute_task(task):
         logs.append(summary)
         if ready:
             return "success", "\n".join(logs)
+        logs.append(collect_failure_diagnostics(namespace, deployment))
         return "failed", "\n".join(logs)
     return "success", "\n".join(logs)
 
