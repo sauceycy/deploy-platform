@@ -10,13 +10,19 @@ PLATFORM_URL = os.environ.get("PLATFORM_URL", "http://deploy-platform-web").rstr
 CLUSTER_NAME = os.environ.get("CLUSTER_NAME", "dev-01")
 AGENT_TOKEN = os.environ.get("AGENT_TOKEN", "dev-agent-token")
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
+AGENT_HEADERS = {
+    "User-Agent": "DeployPlatformAgent/0.1",
+    "Accept": "application/json",
+    "X-Agent-Token": AGENT_TOKEN,
+}
 
 
 def api_get(path, query=None):
     url = f"{PLATFORM_URL}{path}"
     if query:
         url = f"{url}?{urlencode(query)}"
-    with urlopen(url, timeout=20) as response:
+    req = Request(url, headers=AGENT_HEADERS)
+    with urlopen(req, timeout=20) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -24,7 +30,7 @@ def api_post(path, payload):
     req = Request(
         f"{PLATFORM_URL}{path}",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={**AGENT_HEADERS, "Content-Type": "application/json"},
     )
     with urlopen(req, timeout=20) as response:
         return json.loads(response.read().decode("utf-8"))

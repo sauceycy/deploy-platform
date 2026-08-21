@@ -753,7 +753,7 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/agent/tasks":
             query = parse_qs(parsed.query)
             cluster = query.get("cluster", [""])[0]
-            token = query.get("token", [""])[0]
+            token = query.get("token", [""])[0] or self.headers.get("X-Agent-Token", "")
             if AGENT_SHARED_TOKEN and token != AGENT_SHARED_TOKEN:
                 self.send_json({"error": "unauthorized"}, status=401)
                 return
