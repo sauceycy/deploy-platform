@@ -415,7 +415,7 @@
               <input name="repo" required placeholder="git@example.com:group/project.git" />
             </label>
             <label>
-              <span>工作路径</span>
+              <span>编译工作路径</span>
               <input name="workdir" required placeholder="." />
             </label>
             <label>
@@ -440,6 +440,10 @@
             <label class="wide-field">
               <span>编译命令</span>
               <input name="buildCommand" required placeholder="mvn clean package -DskipTests" />
+            </label>
+            <label class="wide-field java-build-field">
+              <span>JAR 包路径</span>
+              <input name="artifactPath" placeholder="ruoyi-admin/target/*.jar" />
             </label>
             <label class="wide-field">
               <span>构建环境变量</span>

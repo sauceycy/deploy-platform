@@ -205,6 +205,14 @@ Git 凭据：选择 Git HTTPS Token
 
 Java 任务编译时会使用 Maven + Temurin JDK 构建镜像，例如 `jdk17` 会使用 `maven:3-eclipse-temurin-17` 执行 `mvn clean package -DskipTests`；最终运行镜像仍使用 Temurin JRE。
 
+「编译工作路径」只决定编译命令在哪里执行；「JAR 包路径」决定自动生成 Dockerfile 时复制哪个产物，路径相对仓库根目录，支持通配符。多模块 Maven 项目可以这样配置：
+
+```text
+编译工作路径：.
+编译命令：mvn clean package -DskipTests -pl ruoyi-admin -am
+JAR 包路径：ruoyi-admin/target/*.jar
+```
+
 如果业务 POM 里引用了内网 Maven 仓库，可以在任务的「Maven 私库地址」填写公网 Nexus 地址，例如：
 
 ```text

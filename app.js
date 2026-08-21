@@ -523,8 +523,8 @@ function filteredTasks() {
     const statusMatch = state.filter === "all" || task.status === state.filter;
     const searchMatch =
       !query ||
-      [task.name, task.repo, task.owner, task.tag, task.env, task.language, task.sdk, task.workdir, task.lastBranch || "", schedule?.branch || "", schedule?.scheduledAt || ""].some((value) =>
-        String(value || "").toLowerCase().includes(query),
+      [task.name, task.repo, task.owner, task.tag, task.env, task.language, task.sdk, task.workdir, task.artifactPath, task.lastBranch || "", schedule?.branch || "", schedule?.scheduledAt || ""].some(
+        (value) => String(value || "").toLowerCase().includes(query),
       );
     return statusMatch && searchMatch;
   });
@@ -568,7 +568,7 @@ function renderRows() {
         </div>
         <div class="repo-cell">
           <strong>${task.repo}</strong>
-          <span>${task.workdir} · ${task.lastBranch ? `最近发布 ${task.lastBranch}` : "发布时选择分支"}</span>
+          <span>${task.workdir} · ${task.artifactPath || "自动识别制品"} · ${task.lastBranch ? `最近发布 ${task.lastBranch}` : "发布时选择分支"}</span>
         </div>
         <div>
           <strong>${task.clusters.length} 个集群</strong>
@@ -693,7 +693,8 @@ function renderDetail() {
       <div class="kv-grid">
         <span>仓库</span><strong>${task.repo}</strong>
         <span>最近分支</span><strong>${task.lastBranch || "未发布"}</strong>
-        <span>工作路径</span><strong>${task.workdir}</strong>
+        <span>编译路径</span><strong>${task.workdir}</strong>
+        <span>制品路径</span><strong>${task.artifactPath || "自动识别"}</strong>
         <span>Git 凭据</span><strong>${secretName(task.gitCredentialId)}</strong>
         <span>语言</span><strong>${languageLabel(task.language)}</strong>
         <span>SDK</span><strong>${task.sdk}</strong>
@@ -1032,6 +1033,7 @@ function resetTaskForm() {
   taskForm.elements.taskId.value = "";
   taskForm.elements.env.value = "test";
   taskForm.elements.language.value = "java";
+  taskForm.elements.artifactPath.value = "";
   taskForm.elements.buildEnv.value = "";
   taskForm.elements.mavenRepoUrl.value = "";
   taskForm.elements.mavenMirrorOf.value = "maven-public";
@@ -1068,6 +1070,7 @@ function openTaskEditor(taskId) {
   updateSdkOptions(task.language || "java", true);
   taskForm.elements.sdk.value = task.sdk || sdkOptions[task.language || "java"]?.[0] || "";
   taskForm.elements.buildCommand.value = task.buildCommand || "";
+  taskForm.elements.artifactPath.value = task.artifactPath || "";
   taskForm.elements.buildEnv.value = task.buildEnv || "";
   taskForm.elements.mavenRepoUrl.value = task.mavenRepoUrl || "";
   taskForm.elements.mavenMirrorOf.value = task.mavenMirrorOf || "maven-public";
@@ -1134,6 +1137,7 @@ function buildPreviewObject() {
     repository: {
       url: formValue("repo"),
       workdir: formValue("workdir"),
+      artifactPath: formValue("artifactPath"),
       gitCredentialId: formValue("gitCredentialId"),
     },
     build: {
@@ -1171,6 +1175,7 @@ function saveTask(event) {
     tag: preview.task.tag,
     repo: preview.repository.url,
     workdir: preview.repository.workdir,
+    artifactPath: preview.repository.artifactPath,
     gitCredentialId: preview.repository.gitCredentialId,
     language: preview.build.language,
     sdk: preview.build.sdk,

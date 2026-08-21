@@ -410,43 +410,81 @@ def list_repository_branches(repo, secret_id=None):
     return sorted(set(branches))
 
 
-def generate_dockerfile(task, app_dir):
+def is_relative_child(path, parent):
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def java_artifact_candidates(task, src_dir, app_dir):
+    artifact_path = str(task.get("artifactPath") or "").strip()
+    patterns = [artifact_path] if artifact_path else ["target/*.jar", "**/target/*.jar"]
+    candidates = []
+    for pattern in patterns:
+        if not pattern:
+            continue
+        if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+            raise RuntimeError("JAR 包路径必须是仓库内的相对路径")
+        matches = []
+        if any(char in pattern for char in "*?["):
+            matches.extend(src_dir.glob(pattern))
+            if not artifact_path:
+                matches.extend(app_dir.glob(pattern))
+        else:
+            matches.append(src_dir / pattern)
+            if not artifact_path:
+                matches.append(app_dir / pattern)
+        candidates.extend(item for item in matches if item.is_file() and item.suffix == ".jar" and is_relative_child(item, src_dir))
+
+    def sort_key(path):
+        name = path.name
+        classifier = name.endswith("-sources.jar") or name.endswith("-javadoc.jar") or name.endswith("-tests.jar")
+        return (classifier, len(path.parts), str(path))
+
+    return sorted(set(candidates), key=sort_key)
+
+
+def generate_dockerfile(task, app_dir, src_dir):
     existing = app_dir / "Dockerfile"
     if existing.exists():
-        return existing
+        return existing, app_dir, None
 
-    generated = app_dir / ".deploy-platform.Dockerfile"
     language = task.get("language")
     port = int(task.get("containerPort") or 8080)
     if language == "java":
-        jars = sorted(app_dir.glob("target/*.jar"))
+        generated = src_dir / ".deploy-platform.Dockerfile"
+        jars = java_artifact_candidates(task, src_dir, app_dir)
         if not jars:
-            jars = sorted(app_dir.glob("**/target/*.jar"))
-        if not jars:
-            raise RuntimeError("未找到 Java 构建产物 target/*.jar")
-        jar = jars[0].relative_to(app_dir)
+            target = task.get("artifactPath") or "target/*.jar 或 **/target/*.jar"
+            raise RuntimeError(f"未找到 Java 构建产物: {target}")
+        jar = jars[0].relative_to(src_dir).as_posix()
         generated.write_text(
             f"FROM {runtime_base(task)}\nWORKDIR /app\nCOPY {jar} app.jar\nEXPOSE {port}\nENTRYPOINT [\"java\",\"-jar\",\"/app/app.jar\"]\n",
             encoding="utf-8",
         )
     elif language == "golang":
+        generated = app_dir / ".deploy-platform.Dockerfile"
         generated.write_text(
             f"FROM alpine:3.20\nWORKDIR /app\nCOPY . /app\nEXPOSE {port}\nCMD [\"./app\"]\n",
             encoding="utf-8",
         )
     elif language == "node":
+        generated = app_dir / ".deploy-platform.Dockerfile"
         generated.write_text(
             f"FROM {runtime_base(task)}\nWORKDIR /app\nCOPY . /app\nEXPOSE {port}\nCMD [\"npm\",\"start\"]\n",
             encoding="utf-8",
         )
     elif language == "python":
+        generated = app_dir / ".deploy-platform.Dockerfile"
         generated.write_text(
             f"FROM {runtime_base(task)}\nWORKDIR /app\nCOPY . /app\nEXPOSE {port}\nCMD [\"python\",\"app.py\"]\n",
             encoding="utf-8",
         )
     else:
         raise RuntimeError(f"暂不支持自动生成 {language} 运行镜像")
-    return generated
+    return generated, src_dir if language == "java" else app_dir, jar if language == "java" else None
 
 
 def create_manifest(task, target, image):
@@ -661,10 +699,12 @@ def build_and_dispatch(execution_id):
             set_execution_status(execution_id, "building", "编译命令执行完成", stage="生成镜像", progress=55)
 
         image = image_name(task, execution_id)
-        dockerfile = generate_dockerfile(task, app_dir)
+        dockerfile, docker_context, selected_artifact = generate_dockerfile(task, app_dir, src_dir)
         ensure_execution_active(execution_id)
+        if selected_artifact:
+            append_log(execution_id, f"已选择 Java 制品: {selected_artifact}")
         set_execution_status(execution_id, "building", f"开始构建镜像 {image}", stage="构建镜像", progress=65)
-        code, output = run_command(["docker", "build", "-t", image, "-f", str(dockerfile), "."], cwd=app_dir)
+        code, output = run_command(["docker", "build", "-t", image, "-f", str(dockerfile), "."], cwd=docker_context)
         append_log(execution_id, output)
         if code != 0:
             raise RuntimeError("Docker 镜像构建失败")
