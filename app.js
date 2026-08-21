@@ -940,10 +940,6 @@ function taskActionButtons(task) {
   );
   return `
     <div class="detail-action-bar">
-      <button class="ghost-button" type="button" data-detail-back>
-        <i data-lucide="arrow-left"></i>
-        <span>返回列表</span>
-      </button>
       <button class="ghost-button" type="button" data-action="edit" data-task-id="${task.id}" ${hasPermission("task.create") ? "" : "disabled"}>
         <i data-lucide="square-pen"></i>
         <span>编辑任务</span>
@@ -967,6 +963,33 @@ function taskActionButtons(task) {
               <span>删除</span>
             </button>`
       }
+    </div>
+  `;
+}
+
+function renderDetailMeta(task, latestExecution, activeSchedule) {
+  return `
+    <div class="detail-meta-strip">
+      <div>
+        <span>分支</span>
+        <strong>${latestExecution?.branch || task.lastBranch || "发布时选择"}</strong>
+      </div>
+      <div>
+        <span>阶段</span>
+        <strong>${latestExecution?.stage || statusLabel(task.status)}</strong>
+      </div>
+      <div>
+        <span>集群</span>
+        <strong>${task.clusters.length} 个</strong>
+      </div>
+      <div>
+        <span>SDK</span>
+        <strong>${languageLabel(task.language)} / ${task.sdk}</strong>
+      </div>
+      <div>
+        <span>定时</span>
+        <strong>${activeSchedule ? activeSchedule.scheduledAt : "未设置"}</strong>
+      </div>
     </div>
   `;
 }
@@ -1037,21 +1060,26 @@ function renderTaskDetailPage() {
             <p>${task.repo}</p>
           </div>
         </div>
-        <div class="task-detail-status">
-          <span class="status-chip ${task.status}">${statusLabel(task.status)}</span>
-          <span>${task.lastBranch ? `最近发布 ${task.lastBranch}` : "发布时选择分支"}</span>
+        <div class="task-detail-side">
+          <div class="task-detail-status">
+            <span class="status-chip ${task.status}">${statusLabel(task.status)}</span>
+            <span>${task.lastBranch ? `最近发布 ${task.lastBranch}` : "发布时选择分支"}</span>
+          </div>
+          ${taskActionButtons(task)}
         </div>
       </div>
 
-      ${taskActionButtons(task)}
-      ${renderDetailTabs()}
+      ${renderDetailMeta(task, latestExecution, activeSchedule)}
 
-      <div class="detail-tab-panel">
-        ${tab === "overview" ? renderTaskOverviewTab(task, latestExecution, activeSchedule) : ""}
-        ${tab === "logs" ? renderTaskLogsTab(focusedExecution) : ""}
-        ${tab === "config" ? renderTaskConfigTab(task, activeSchedule) : ""}
-        ${tab === "clusters" ? renderTaskClustersTab(task, focusedExecution) : ""}
-        ${tab === "history" ? renderTaskHistoryTab(history) : ""}
+      <div class="detail-workspace">
+        ${renderDetailTabs()}
+        <div class="detail-tab-panel">
+          ${tab === "overview" ? renderTaskOverviewTab(task, latestExecution, activeSchedule) : ""}
+          ${tab === "logs" ? renderTaskLogsTab(focusedExecution) : ""}
+          ${tab === "config" ? renderTaskConfigTab(task, activeSchedule) : ""}
+          ${tab === "clusters" ? renderTaskClustersTab(task, focusedExecution) : ""}
+          ${tab === "history" ? renderTaskHistoryTab(history) : ""}
+        </div>
       </div>
     </section>
   `;
@@ -1087,12 +1115,19 @@ function renderTaskOverviewTab(task, latestExecution, activeSchedule) {
       </section>
 
       <section class="detail-section detail-card">
-        <h3>任务摘要</h3>
+        <div class="section-title-row">
+          <h3>任务摘要</h3>
+          <span class="muted">${task.servicePort} -> ${task.containerPort}</span>
+        </div>
         <div class="summary-cards">
           <div><span>语言 / SDK</span><strong>${languageLabel(task.language)} / ${task.sdk}</strong></div>
           <div><span>容器端口</span><strong>${task.containerPort}</strong></div>
           <div><span>部署集群</span><strong>${task.clusters.length} 个</strong></div>
           <div><span>定时发布</span><strong>${activeSchedule ? activeSchedule.scheduledAt : "未设置"}</strong></div>
+        </div>
+        <div class="quick-repo-card">
+          <span>代码仓库</span>
+          <strong>${task.repo}</strong>
         </div>
       </section>
     </div>
