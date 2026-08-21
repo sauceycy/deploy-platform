@@ -33,6 +33,9 @@ REGISTRY_USERNAME = os.environ.get("REGISTRY_USERNAME", "")
 REGISTRY_PASSWORD = os.environ.get("REGISTRY_PASSWORD", "")
 AGENT_SHARED_TOKEN = os.environ.get("AGENT_SHARED_TOKEN", "dev-agent-token")
 ACTIVE_STATUSES = {"queued", "building", "deploying", "running"}
+CLEAN_WORKSPACE_AFTER_BUILD = os.environ.get("CLEAN_WORKSPACE_AFTER_BUILD", "true").lower() != "false"
+CLEAN_LOCAL_IMAGE_AFTER_BUILD = os.environ.get("CLEAN_LOCAL_IMAGE_AFTER_BUILD", "true").lower() != "false"
+DOCKER_PRUNE_AFTER_BUILD = os.environ.get("DOCKER_PRUNE_AFTER_BUILD", "false").lower() == "true"
 
 DEFAULT_STATE = {
     "roles": {
@@ -339,6 +342,30 @@ def run_command(args, cwd=None, input_text=None, env=None):
         env=env,
     )
     return process.returncode, process.stdout
+
+
+def cleanup_build_artifacts(execution_id, work_dir, image=None, image_built=False):
+    cleaned = []
+    if CLEAN_WORKSPACE_AFTER_BUILD and work_dir.exists():
+        shutil.rmtree(work_dir, ignore_errors=True)
+        cleaned.append("工作区")
+
+    if CLEAN_LOCAL_IMAGE_AFTER_BUILD and REGISTRY_URL and image and image_built:
+        code, output = run_command(["docker", "image", "rm", image])
+        if code == 0:
+            cleaned.append("本地镜像")
+        else:
+            append_log(execution_id, f"本地镜像清理失败: {output.strip() or image}")
+
+    if DOCKER_PRUNE_AFTER_BUILD:
+        code, output = run_command(["docker", "image", "prune", "-f"])
+        if code == 0:
+            cleaned.append("Docker dangling 镜像")
+        else:
+            append_log(execution_id, f"Docker dangling 镜像清理失败: {output.strip()}")
+
+    if cleaned:
+        append_log(execution_id, f"构建后清理完成: {', '.join(cleaned)}")
 
 
 def secret_by_id(state, secret_id):
@@ -656,6 +683,8 @@ def build_and_dispatch(execution_id):
 
     work_dir = WORKSPACE_DIR / execution_id
     src_dir = work_dir / "src"
+    image = ""
+    image_built = False
     try:
         set_execution_status(execution_id, "building", "开始拉取代码", stage="拉取代码", progress=10)
         if work_dir.exists():
@@ -729,6 +758,7 @@ def build_and_dispatch(execution_id):
         append_log(execution_id, output)
         if code != 0:
             raise RuntimeError("Docker 镜像构建失败")
+        image_built = True
         ensure_execution_active(execution_id)
         set_execution_status(execution_id, "building", "Docker 镜像构建完成", image=image, stage="准备推送", progress=72)
 
@@ -762,6 +792,8 @@ def build_and_dispatch(execution_id):
         current = find_by_id(latest["executions"], execution_id) or {}
         set_execution_status(execution_id, "failed", str(exc), stage=current.get("stage") or "执行失败", progress=current.get("progress") or 100)
         send_notification(task, "BUILD_FAILED", str(exc))
+    finally:
+        cleanup_build_artifacts(execution_id, work_dir, image, image_built)
 
 
 def create_execution_record(state, task, actor, branch, action="触发发布"):

@@ -231,6 +231,16 @@ SENTRY_PROJECT=admin
 
 发布时这些变量会注入到 SDK 构建容器中。任务详情只展示变量名，不展示变量值。
 
+每次构建结束后平台会自动清理临时文件：
+
+```text
+CLEAN_WORKSPACE_AFTER_BUILD=true      # 清理 /data/workspaces/{execution_id}
+CLEAN_LOCAL_IMAGE_AFTER_BUILD=true    # 已配置 REGISTRY_URL 时，构建后删除本机业务镜像 tag
+DOCKER_PRUNE_AFTER_BUILD=false        # 可选，清理 Docker dangling 镜像
+```
+
+默认不会删除基础镜像和 Maven 依赖缓存，避免下次构建明显变慢。
+
 ## 发布接口
 
 单任务发布：

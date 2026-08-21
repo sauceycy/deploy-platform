@@ -18,6 +18,9 @@ services:
       REGISTRY_USERNAME: ${REGISTRY_USERNAME:-}
       REGISTRY_PASSWORD: ${REGISTRY_PASSWORD:-}
       AGENT_SHARED_TOKEN: ${AGENT_SHARED_TOKEN:-dev-agent-token}
+      CLEAN_WORKSPACE_AFTER_BUILD: ${CLEAN_WORKSPACE_AFTER_BUILD:-true}
+      CLEAN_LOCAL_IMAGE_AFTER_BUILD: ${CLEAN_LOCAL_IMAGE_AFTER_BUILD:-true}
+      DOCKER_PRUNE_AFTER_BUILD: ${DOCKER_PRUNE_AFTER_BUILD:-false}
     volumes:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock
