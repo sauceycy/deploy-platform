@@ -127,6 +127,10 @@ const configPreview = document.getElementById("configPreview");
 const userDialog = document.getElementById("userDialog");
 const editUserForm = document.getElementById("editUserForm");
 const secretForm = document.getElementById("secretForm");
+const secretNameInput = document.getElementById("secretNameInput");
+const secretTypeSelect = document.getElementById("secretType");
+const secretDialog = document.getElementById("secretDialog");
+const editSecretForm = document.getElementById("editSecretForm");
 const clusterDialog = document.getElementById("clusterDialog");
 const editClusterForm = document.getElementById("editClusterForm");
 const clusterNodeEditor = document.getElementById("clusterNodeEditor");
@@ -538,6 +542,25 @@ function secretTypeLabel(type) {
     agent_token: "Agent Token 记录",
     webhook: "Webhook Secret",
   }[type] || type;
+}
+
+function secretNamePlaceholder(type) {
+  return {
+    git_https_token: "例如 trade-github-readonly",
+    git_ssh_key: "例如 trade-git-ssh-key",
+    registry: "例如 aliyun-acr-pull",
+    agent_token: "例如 trade-test-agent-token",
+    webhook: "例如 deploy-alert-webhook",
+  }[type] || "例如 my-secret";
+}
+
+function secretNameExists(name, excludeId = "") {
+  const normalized = String(name || "").trim().toLowerCase();
+  return secrets.some((item) => String(item.id) !== String(excludeId) && String(item.name || "").trim().toLowerCase() === normalized);
+}
+
+function syncSecretNamePlaceholder() {
+  if (secretNameInput) secretNameInput.placeholder = secretNamePlaceholder(secretTypeSelect.value);
 }
 
 function gitCredentialOptions(selectedId = "") {
@@ -973,10 +996,16 @@ function renderSecretView() {
           <strong>${secret.name}</strong>
           <span>${secretTypeLabel(secret.type)} · ${secret.target || "未设置地址"} · ${secret.username || "未设置用户名"} · ${secret.secret ? "已保存秘钥" : "未保存秘钥"}</span>
         </div>
-        <button class="ghost-button" type="button" data-secret-delete="${secret.id}" ${hasPermission("secret.manage") ? "" : "disabled"}>
-          <i data-lucide="trash-2"></i>
-          <span>删除</span>
-        </button>
+        <div class="row-actions">
+          <button class="ghost-button" type="button" data-secret-edit="${secret.id}" ${hasPermission("secret.manage") ? "" : "disabled"}>
+            <i data-lucide="square-pen"></i>
+            <span>编辑</span>
+          </button>
+          <button class="ghost-button" type="button" data-secret-delete="${secret.id}" ${hasPermission("secret.manage") ? "" : "disabled"}>
+            <i data-lucide="trash-2"></i>
+            <span>删除</span>
+          </button>
+        </div>
       </div>
     `,
     )
@@ -1717,9 +1746,14 @@ function saveSecret(event) {
   if (!requirePermission("secret.manage")) return;
   const form = event.currentTarget;
   const formData = new FormData(form);
+  const name = String(formData.get("name") || "").trim();
+  if (secretNameExists(name)) {
+    window.alert(`秘钥名称 ${name} 已存在，请换一个更明确的名称`);
+    return;
+  }
   const secret = {
     id: Date.now(),
-    name: formData.get("name"),
+    name,
     type: formData.get("type"),
     target: formData.get("target"),
     username: formData.get("username"),
@@ -1732,6 +1766,53 @@ function saveSecret(event) {
   form.reset();
   render();
   persistState();
+}
+
+function openSecretDialog(secretId) {
+  if (!requirePermission("secret.manage")) return;
+  const secret = secrets.find((item) => String(item.id) === String(secretId));
+  if (!secret) return;
+  editSecretForm.elements.id.value = secret.id;
+  editSecretForm.elements.name.value = secret.name || "";
+  editSecretForm.elements.type.value = secret.type || "git_https_token";
+  editSecretForm.elements.target.value = secret.target || "";
+  editSecretForm.elements.username.value = secret.username || "";
+  editSecretForm.elements.secret.value = "";
+  editSecretForm.elements.knownHosts.value = secret.knownHosts || "";
+  editSecretForm.elements.name.placeholder = secretNamePlaceholder(secret.type);
+  secretDialog.showModal();
+}
+
+function closeSecretDialog() {
+  if (secretDialog.open) secretDialog.close();
+  editSecretForm.reset();
+}
+
+function saveEditedSecret(event) {
+  event.preventDefault();
+  if (!requirePermission("secret.manage")) return;
+  const secret = secrets.find((item) => String(item.id) === String(editSecretForm.elements.id.value));
+  if (!secret) return;
+  const nextName = editSecretForm.elements.name.value.trim();
+  if (secretNameExists(nextName, secret.id)) {
+    window.alert(`秘钥名称 ${nextName} 已存在，请换一个更明确的名称`);
+    return;
+  }
+  Object.assign(secret, {
+    name: nextName,
+    type: editSecretForm.elements.type.value,
+    target: editSecretForm.elements.target.value,
+    username: editSecretForm.elements.username.value,
+    knownHosts: editSecretForm.elements.knownHosts.value,
+    updatedAt: nowText(),
+  });
+  if (editSecretForm.elements.secret.value) {
+    secret.secret = editSecretForm.elements.secret.value;
+  }
+  addAudit("编辑秘钥", `${secret.name} / ${secretTypeLabel(secret.type)}`);
+  render();
+  persistState();
+  closeSecretDialog();
 }
 
 function deleteSecret(secretId) {
@@ -1925,6 +2006,7 @@ function render() {
   renderClusters();
   renderGitCredentialOptions();
   renderImagePullSecretOptions();
+  syncSecretNamePlaceholder();
   lucide.createIcons();
   syncAutoRefresh();
 }
@@ -1972,6 +2054,8 @@ document.getElementById("previewYaml").addEventListener("click", renderConfigPre
 document.getElementById("closeConfig").addEventListener("click", () => configDialog.close());
 document.getElementById("closeUserDialog").addEventListener("click", closeUserDialog);
 document.getElementById("cancelUserEdit").addEventListener("click", closeUserDialog);
+document.getElementById("closeSecretDialog").addEventListener("click", closeSecretDialog);
+document.getElementById("cancelSecretEdit").addEventListener("click", closeSecretDialog);
 document.getElementById("closeClusterDialog").addEventListener("click", closeClusterDialog);
 document.getElementById("cancelClusterEdit").addEventListener("click", closeClusterDialog);
 document.getElementById("closeBranchDialog").addEventListener("click", closeBranchDialog);
@@ -1986,6 +2070,7 @@ document.getElementById("templateForm").addEventListener("submit", saveTemplate)
 document.getElementById("channelForm").addEventListener("submit", saveChannel);
 secretForm.addEventListener("submit", saveSecret);
 document.getElementById("userForm").addEventListener("submit", saveUser);
+editSecretForm.addEventListener("submit", saveEditedSecret);
 editUserForm.addEventListener("submit", saveEditedUser);
 editClusterForm.addEventListener("submit", saveEditedCluster);
 batchForm.addEventListener("submit", submitBatchDeploy);
@@ -1997,6 +2082,11 @@ branchForm.addEventListener("submit", (event) => {
 
 languageSelect.addEventListener("change", (event) => {
   updateSdkOptions(event.target.value);
+});
+
+secretTypeSelect.addEventListener("change", syncSecretNamePlaceholder);
+document.getElementById("editSecretType").addEventListener("change", (event) => {
+  editSecretForm.elements.name.placeholder = secretNamePlaceholder(event.target.value);
 });
 
 taskSearch.addEventListener("input", (event) => {
@@ -2075,6 +2165,12 @@ document.addEventListener("click", (event) => {
     if (clusterButton.dataset.clusterAction === "edit") {
       openClusterDialog(clusterButton.dataset.clusterId);
     }
+    return;
+  }
+
+  const secretEditButton = event.target.closest("[data-secret-edit]");
+  if (secretEditButton) {
+    openSecretDialog(secretEditButton.dataset.secretEdit);
     return;
   }
 

@@ -291,7 +291,7 @@
               <form class="side-form" id="secretForm">
                 <label>
                   <span>名称</span>
-                  <input name="name" placeholder="例如 github-token" required />
+                  <input name="name" id="secretNameInput" placeholder="例如 github-token" required />
                 </label>
                 <label>
                   <span>类型</span>
@@ -589,6 +589,57 @@
           <button class="primary-button" type="submit">
             <i data-lucide="save"></i>
             <span>保存用户</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="config-dialog form-dialog" id="secretDialog">
+      <div class="dialog-header">
+        <h2>编辑秘钥</h2>
+        <button class="icon-button" id="closeSecretDialog" type="button" title="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <form class="dialog-form" id="editSecretForm">
+        <input type="hidden" name="id" />
+        <label>
+          <span>名称</span>
+          <input name="name" required />
+        </label>
+        <label>
+          <span>类型</span>
+          <select name="type" id="editSecretType">
+            <option value="git_https_token">Git HTTPS Token</option>
+            <option value="git_ssh_key">Git SSH 私钥</option>
+            <option value="registry">镜像仓库账号</option>
+            <option value="agent_token">Agent Token 记录</option>
+            <option value="webhook">Webhook Secret</option>
+          </select>
+        </label>
+        <label>
+          <span>地址 / 用途</span>
+          <input name="target" />
+        </label>
+        <label>
+          <span>用户名</span>
+          <input name="username" />
+        </label>
+        <label>
+          <span>秘钥内容</span>
+          <textarea name="secret" rows="5" placeholder="留空则不修改已保存秘钥"></textarea>
+        </label>
+        <label>
+          <span>known_hosts</span>
+          <textarea name="knownHosts" rows="4"></textarea>
+        </label>
+        <div class="drawer-actions">
+          <button class="ghost-button" type="button" id="cancelSecretEdit">
+            <span>取消</span>
+          </button>
+          <button class="primary-button" type="submit">
+            <i data-lucide="save"></i>
+            <span>保存秘钥</span>
           </button>
         </div>
       </form>

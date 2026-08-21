@@ -1109,6 +1109,14 @@ svg {
   font-size: 12px;
 }
 
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .cluster-token-note {
   display: grid;
   grid-template-columns: minmax(240px, 1fr) auto auto;
