@@ -140,6 +140,11 @@ const editSecretForm = document.getElementById("editSecretForm");
 const platformSettingsForm = document.getElementById("platformSettingsForm");
 const platformRegistrySecret = document.getElementById("platformRegistrySecret");
 const platformImageNamespace = document.getElementById("platformImageNamespace");
+const clusterCreateDialog = document.getElementById("clusterCreateDialog");
+const templateCreateDialog = document.getElementById("templateCreateDialog");
+const channelCreateDialog = document.getElementById("channelCreateDialog");
+const secretCreateDialog = document.getElementById("secretCreateDialog");
+const userCreateDialog = document.getElementById("userCreateDialog");
 const clusterDialog = document.getElementById("clusterDialog");
 const editClusterForm = document.getElementById("editClusterForm");
 const clusterNodeEditor = document.getElementById("clusterNodeEditor");
@@ -1624,6 +1629,23 @@ function closeDrawer() {
   }, 180);
 }
 
+function openCreateDialog(dialog, permission, form) {
+  if (!requirePermission(permission)) return;
+  if (form) form.reset();
+  renderGitCredentialOptions();
+  renderImagePullSecretOptions();
+  renderUserView();
+  syncSecretNamePlaceholder();
+  dialog.showModal();
+  window.setTimeout(() => dialog.querySelector("input, select, textarea, button")?.focus(), 0);
+}
+
+function closeCreateDialog(dialog, form) {
+  if (dialog?.open) dialog.close();
+  if (form) form.reset();
+  syncSecretNamePlaceholder();
+}
+
 function formValue(name) {
   return taskForm.elements[name]?.value || "";
 }
@@ -2028,6 +2050,7 @@ function saveCluster(event) {
   form.reset();
   render();
   persistState();
+  closeCreateDialog(clusterCreateDialog, form);
 }
 
 function renderClusterNodes() {
@@ -2141,6 +2164,7 @@ function saveTemplate(event) {
   form.reset();
   render();
   persistState();
+  closeCreateDialog(templateCreateDialog, form);
 }
 
 function saveChannel(event) {
@@ -2160,6 +2184,7 @@ function saveChannel(event) {
   form.reset();
   render();
   persistState();
+  closeCreateDialog(channelCreateDialog, form);
 }
 
 function savePlatformSettings(event) {
@@ -2197,6 +2222,7 @@ function saveSecret(event) {
   form.reset();
   render();
   persistState();
+  closeCreateDialog(secretCreateDialog, form);
 }
 
 function openSecretDialog(secretId) {
@@ -2298,6 +2324,7 @@ function saveUser(event) {
   form.reset();
   render();
   persistState();
+  closeCreateDialog(userCreateDialog, form);
 }
 
 function openUserDialog(username, mode = "edit") {
@@ -2498,6 +2525,11 @@ document.getElementById("logoutButton").addEventListener("click", logout);
 document.getElementById("openCreate").addEventListener("click", openDrawer);
 document.getElementById("closeCreate").addEventListener("click", closeDrawer);
 backdrop.addEventListener("click", closeDrawer);
+document.getElementById("openClusterCreate").addEventListener("click", () => openCreateDialog(clusterCreateDialog, "cluster.manage", document.getElementById("clusterForm")));
+document.getElementById("openTemplateCreate").addEventListener("click", () => openCreateDialog(templateCreateDialog, "template.manage", document.getElementById("templateForm")));
+document.getElementById("openChannelCreate").addEventListener("click", () => openCreateDialog(channelCreateDialog, "channel.manage", document.getElementById("channelForm")));
+document.getElementById("openSecretCreate").addEventListener("click", () => openCreateDialog(secretCreateDialog, "secret.manage", secretForm));
+document.getElementById("openUserCreate").addEventListener("click", () => openCreateDialog(userCreateDialog, "user.manage", document.getElementById("userForm")));
 document.getElementById("previewYaml").addEventListener("click", renderConfigPreview);
 document.getElementById("closeConfig").addEventListener("click", () => configDialog.close());
 document.getElementById("closeUserDialog").addEventListener("click", closeUserDialog);
@@ -2621,6 +2653,13 @@ document.addEventListener("change", (event) => {
 });
 
 document.addEventListener("click", (event) => {
+  const dialogCloseButton = event.target.closest("[data-dialog-close]");
+  if (dialogCloseButton) {
+    const dialog = document.getElementById(dialogCloseButton.dataset.dialogClose);
+    closeCreateDialog(dialog, dialog?.querySelector("form"));
+    return;
+  }
+
   const detailBackButton = event.target.closest("[data-detail-back]");
   if (detailBackButton) {
     setView("tasks");

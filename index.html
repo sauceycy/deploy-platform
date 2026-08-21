@@ -193,24 +193,11 @@
                 <h2>集群列表</h2>
                 <span>Agent 接入与部署目标</span>
               </div>
-            </div>
-            <form class="inline-form" id="clusterForm">
-              <input name="name" placeholder="集群名称，例如 shanghai-prod" required />
-              <input name="region" placeholder="地域，例如 上海" />
-              <select name="env">
-                <option value="dev">dev</option>
-                <option value="test">test</option>
-                <option value="prod">prod</option>
-              </select>
-              <input name="namespace" placeholder="默认 namespace" />
-              <select name="imagePullSecretId" id="clusterPullSecretSelect">
-                <option value="">镜像拉取秘钥：不配置</option>
-              </select>
-              <button class="primary-button" type="submit" data-permission-required="cluster.manage">
+              <button class="primary-button" id="openClusterCreate" type="button" data-permission-required="cluster.manage">
                 <i data-lucide="plus"></i>
                 <span>添加集群</span>
               </button>
-            </form>
+            </div>
             <div class="cluster-token-note">
               <div>
                 <strong>Agent Token 设置位置</strong>
@@ -225,61 +212,48 @@
 
         <section class="management-view" id="templateView" hidden>
           <section class="management-panel">
-            <div class="panel-title">
-              <h2>构建模板</h2>
-              <span>语言、SDK 与默认构建命令</span>
-            </div>
-            <form class="inline-form" id="templateForm">
-              <input name="name" placeholder="模板名称，例如 Java 17 Maven" required />
-              <select name="language">
-                <option value="java">Java</option>
-                <option value="node">Node.js</option>
-                <option value="golang">Golang</option>
-                <option value="python">Python</option>
-              </select>
-              <input name="sdk" placeholder="SDK，例如 jdk17" required />
-              <input name="command" placeholder="默认构建命令" required />
-              <button class="primary-button" type="submit" data-permission-required="template.manage">
+            <div class="panel-title split-title">
+              <div>
+                <h2>构建模板</h2>
+                <span>语言、SDK 与默认构建命令</span>
+              </div>
+              <button class="primary-button" id="openTemplateCreate" type="button" data-permission-required="template.manage">
                 <i data-lucide="plus"></i>
                 <span>添加模板</span>
               </button>
-            </form>
+            </div>
             <div class="simple-table" id="templateBody"></div>
           </section>
         </section>
 
         <section class="management-view" id="channelView" hidden>
           <section class="management-panel">
-            <div class="panel-title">
-              <h2>通知渠道</h2>
-              <span>告警机器人、邮件或 Webhook</span>
-            </div>
-            <form class="inline-form" id="channelForm">
-              <input name="name" placeholder="渠道名称，例如 deploy-alerts" required />
-              <select name="type">
-                <option value="wecom">企业微信</option>
-                <option value="dingtalk">钉钉</option>
-                <option value="feishu">飞书</option>
-                <option value="email">邮件</option>
-                <option value="webhook">Webhook</option>
-              </select>
-              <input name="target" placeholder="通知目标" required />
-              <input name="secret" type="password" placeholder="Token / Secret" />
-              <button class="primary-button" type="submit" data-permission-required="channel.manage">
+            <div class="panel-title split-title">
+              <div>
+                <h2>通知渠道</h2>
+                <span>告警机器人、邮件或 Webhook</span>
+              </div>
+              <button class="primary-button" id="openChannelCreate" type="button" data-permission-required="channel.manage">
                 <i data-lucide="plus"></i>
                 <span>添加渠道</span>
               </button>
-            </form>
+            </div>
             <div class="simple-table" id="channelBody"></div>
           </section>
         </section>
 
         <section class="management-view" id="secretView" hidden>
-          <section class="management-grid">
+          <section class="management-view">
             <div class="management-panel">
-              <div class="panel-title">
-                <h2>秘钥列表</h2>
-                <span>Git 凭据、镜像仓库账号、Agent Token 记录</span>
+              <div class="panel-title split-title">
+                <div>
+                  <h2>秘钥列表</h2>
+                  <span>Git 凭据、镜像仓库账号、Agent Token 记录</span>
+                </div>
+                <button class="primary-button" id="openSecretCreate" type="button" data-permission-required="secret.manage">
+                  <i data-lucide="key-round"></i>
+                  <span>添加秘钥</span>
+                </button>
               </div>
               <form class="settings-card" id="platformSettingsForm">
                 <div>
@@ -307,67 +281,21 @@
               </div>
               <div class="simple-table" id="secretBody"></div>
             </div>
-            <aside class="management-panel">
-              <div class="panel-title">
-                <h2>添加秘钥</h2>
-                <span>私密值会持久化到平台数据库</span>
-              </div>
-              <form class="side-form" id="secretForm">
-                <label>
-                  <span>名称</span>
-                  <input name="name" id="secretNameInput" placeholder="例如 github-token" required />
-                </label>
-                <label>
-                  <span>类型</span>
-                  <select name="type" id="secretType">
-                    <option value="git_https_token">Git HTTPS Token</option>
-                    <option value="git_ssh_key">Git SSH 私钥</option>
-                    <option value="registry">镜像仓库账号</option>
-                    <option value="agent_token">Agent Token 记录</option>
-                    <option value="webhook">Webhook Secret</option>
-                  </select>
-                </label>
-                <label>
-                  <span>地址 / 用途</span>
-                  <input name="target" placeholder="github.com / harbor.example.com / Trade_test_k8s" />
-                </label>
-                <label>
-                  <span>用户名</span>
-                  <input name="username" placeholder="HTTPS Token 可填 oauth2 或用户名" />
-                </label>
-                <label>
-                  <span>秘钥内容</span>
-                  <textarea name="secret" rows="7" placeholder="Token、私钥或密码" required></textarea>
-                </label>
-                <label>
-                  <span>known_hosts</span>
-                  <textarea name="knownHosts" rows="4" placeholder="SSH 私钥可选，建议填 ssh-keyscan github.com 的输出"></textarea>
-                </label>
-                <button class="primary-button" type="submit" data-permission-required="secret.manage">
-                  <i data-lucide="key-round"></i>
-                  <span>保存秘钥</span>
-                </button>
-              </form>
-            </aside>
           </section>
         </section>
 
         <section class="management-view" id="userView" hidden>
           <section class="management-panel">
-            <div class="panel-title">
-              <h2>用户管理</h2>
-              <span>账号、姓名与角色绑定</span>
-            </div>
-            <form class="inline-form" id="userForm">
-              <input name="username" placeholder="登录账号" required />
-              <input name="name" placeholder="姓名" required />
-              <input name="password" type="password" placeholder="初始密码" required />
-              <select name="role" id="newUserRole"></select>
-              <button class="primary-button" type="submit" data-permission-required="user.manage">
+            <div class="panel-title split-title">
+              <div>
+                <h2>用户管理</h2>
+                <span>账号、姓名与角色绑定</span>
+              </div>
+              <button class="primary-button" id="openUserCreate" type="button" data-permission-required="user.manage">
                 <i data-lucide="user-plus"></i>
                 <span>添加用户</span>
               </button>
-            </form>
+            </div>
             <div class="simple-table" id="userBody"></div>
           </section>
         </section>
@@ -579,6 +507,244 @@
         </button>
       </div>
       <pre id="configPreview"></pre>
+    </dialog>
+
+    <dialog class="config-dialog form-dialog wide-dialog" id="clusterCreateDialog">
+      <div class="dialog-header">
+        <div>
+          <h2>添加集群</h2>
+          <span>创建 Agent 可接入的部署目标</span>
+        </div>
+        <button class="icon-button" data-dialog-close="clusterCreateDialog" type="button" title="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <form class="dialog-form" id="clusterForm">
+        <div class="form-grid compact-grid">
+          <label>
+            <span>集群名称</span>
+            <input name="name" placeholder="例如 shanghai-prod" required />
+          </label>
+          <label>
+            <span>地域</span>
+            <input name="region" placeholder="例如 上海" />
+          </label>
+          <label>
+            <span>环境</span>
+            <select name="env">
+              <option value="dev">dev</option>
+              <option value="test">test</option>
+              <option value="prod">prod</option>
+            </select>
+          </label>
+          <label>
+            <span>默认 namespace</span>
+            <input name="namespace" placeholder="default" />
+          </label>
+          <label class="wide-field">
+            <span>默认镜像拉取秘钥</span>
+            <select name="imagePullSecretId" id="clusterPullSecretSelect">
+              <option value="">镜像拉取秘钥：不配置</option>
+            </select>
+          </label>
+        </div>
+        <div class="drawer-actions">
+          <button class="ghost-button" type="button" data-dialog-close="clusterCreateDialog">
+            <span>取消</span>
+          </button>
+          <button class="primary-button" type="submit" data-permission-required="cluster.manage">
+            <i data-lucide="plus"></i>
+            <span>添加集群</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="config-dialog form-dialog wide-dialog" id="templateCreateDialog">
+      <div class="dialog-header">
+        <div>
+          <h2>添加模板</h2>
+          <span>沉淀常用语言、SDK 和构建命令</span>
+        </div>
+        <button class="icon-button" data-dialog-close="templateCreateDialog" type="button" title="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <form class="dialog-form" id="templateForm">
+        <div class="form-grid compact-grid">
+          <label>
+            <span>模板名称</span>
+            <input name="name" placeholder="例如 Java 17 Maven" required />
+          </label>
+          <label>
+            <span>编译语言</span>
+            <select name="language">
+              <option value="java">Java</option>
+              <option value="node">Node.js</option>
+              <option value="golang">Golang</option>
+              <option value="python">Python</option>
+            </select>
+          </label>
+          <label>
+            <span>SDK</span>
+            <input name="sdk" placeholder="例如 jdk17" required />
+          </label>
+          <label class="wide-field">
+            <span>默认构建命令</span>
+            <input name="command" placeholder="mvn clean package -DskipTests" required />
+          </label>
+        </div>
+        <div class="drawer-actions">
+          <button class="ghost-button" type="button" data-dialog-close="templateCreateDialog">
+            <span>取消</span>
+          </button>
+          <button class="primary-button" type="submit" data-permission-required="template.manage">
+            <i data-lucide="plus"></i>
+            <span>添加模板</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="config-dialog form-dialog wide-dialog" id="channelCreateDialog">
+      <div class="dialog-header">
+        <div>
+          <h2>添加渠道</h2>
+          <span>配置发布结果和异常告警通知目标</span>
+        </div>
+        <button class="icon-button" data-dialog-close="channelCreateDialog" type="button" title="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <form class="dialog-form" id="channelForm">
+        <div class="form-grid compact-grid">
+          <label>
+            <span>渠道名称</span>
+            <input name="name" placeholder="例如 deploy-alerts" required />
+          </label>
+          <label>
+            <span>类型</span>
+            <select name="type">
+              <option value="wecom">企业微信</option>
+              <option value="dingtalk">钉钉</option>
+              <option value="feishu">飞书</option>
+              <option value="email">邮件</option>
+              <option value="webhook">Webhook</option>
+            </select>
+          </label>
+          <label>
+            <span>通知目标</span>
+            <input name="target" placeholder="机器人地址、邮箱或 Webhook" required />
+          </label>
+          <label>
+            <span>Token / Secret</span>
+            <input name="secret" type="password" placeholder="可选" />
+          </label>
+        </div>
+        <div class="drawer-actions">
+          <button class="ghost-button" type="button" data-dialog-close="channelCreateDialog">
+            <span>取消</span>
+          </button>
+          <button class="primary-button" type="submit" data-permission-required="channel.manage">
+            <i data-lucide="plus"></i>
+            <span>添加渠道</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="config-dialog form-dialog wide-dialog" id="secretCreateDialog">
+      <div class="dialog-header">
+        <div>
+          <h2>添加秘钥</h2>
+          <span>私密值会持久化到平台数据库</span>
+        </div>
+        <button class="icon-button" data-dialog-close="secretCreateDialog" type="button" title="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <form class="dialog-form" id="secretForm">
+        <div class="form-grid compact-grid">
+          <label>
+            <span>名称</span>
+            <input name="name" id="secretNameInput" placeholder="例如 github-token" required />
+          </label>
+          <label>
+            <span>类型</span>
+            <select name="type" id="secretType">
+              <option value="git_https_token">Git HTTPS Token</option>
+              <option value="git_ssh_key">Git SSH 私钥</option>
+              <option value="registry">镜像仓库账号</option>
+              <option value="agent_token">Agent Token 记录</option>
+              <option value="webhook">Webhook Secret</option>
+            </select>
+          </label>
+          <label>
+            <span>地址 / 用途</span>
+            <input name="target" placeholder="github.com / harbor.example.com / Trade_test_k8s" />
+          </label>
+          <label>
+            <span>用户名</span>
+            <input name="username" placeholder="HTTPS Token 可填 oauth2 或用户名" />
+          </label>
+          <label class="wide-field">
+            <span>秘钥内容</span>
+            <textarea name="secret" rows="6" placeholder="Token、私钥或密码" required></textarea>
+          </label>
+          <label class="wide-field">
+            <span>known_hosts</span>
+            <textarea name="knownHosts" rows="4" placeholder="SSH 私钥可选，建议填 ssh-keyscan github.com 的输出"></textarea>
+          </label>
+        </div>
+        <div class="drawer-actions">
+          <button class="ghost-button" type="button" data-dialog-close="secretCreateDialog">
+            <span>取消</span>
+          </button>
+          <button class="primary-button" type="submit" data-permission-required="secret.manage">
+            <i data-lucide="key-round"></i>
+            <span>保存秘钥</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="config-dialog form-dialog" id="userCreateDialog">
+      <div class="dialog-header">
+        <div>
+          <h2>添加用户</h2>
+          <span>创建平台登录账号并绑定角色</span>
+        </div>
+        <button class="icon-button" data-dialog-close="userCreateDialog" type="button" title="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <form class="dialog-form" id="userForm">
+        <label>
+          <span>登录账号</span>
+          <input name="username" placeholder="登录账号" required />
+        </label>
+        <label>
+          <span>姓名</span>
+          <input name="name" placeholder="姓名" required />
+        </label>
+        <label>
+          <span>初始密码</span>
+          <input name="password" type="password" placeholder="初始密码" required />
+        </label>
+        <label>
+          <span>角色</span>
+          <select name="role" id="newUserRole"></select>
+        </label>
+        <div class="drawer-actions">
+          <button class="ghost-button" type="button" data-dialog-close="userCreateDialog">
+            <span>取消</span>
+          </button>
+          <button class="primary-button" type="submit" data-permission-required="user.manage">
+            <i data-lucide="user-plus"></i>
+            <span>添加用户</span>
+          </button>
+        </div>
+      </form>
     </dialog>
 
     <dialog class="config-dialog form-dialog" id="userDialog">
