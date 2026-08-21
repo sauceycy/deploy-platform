@@ -93,6 +93,13 @@ docker compose up -d --build
 
 用于执行 SDK 容器编译、Docker build 和 Docker push。
 
+平台推送镜像的账号和 Pod 拉取镜像的账号是两套配置：
+
+- 平台推送镜像：通过 `REGISTRY_URL`、`REGISTRY_USERNAME`、`REGISTRY_PASSWORD` 配置在平台容器环境变量里。
+- Pod 拉取镜像：在「秘钥管理」新增 `镜像仓库账号`，地址填镜像仓库域名，用户名和秘钥填拉取账号；然后在「集群管理」设置默认镜像拉取秘钥，或在任务的「多集群部署」里单独选择。
+
+发布时平台会把该账号生成为 `kubernetes.io/dockerconfigjson` Secret，下发给集群 Agent。Agent 会先创建或更新 Secret，再创建 Deployment，并在 Pod 上自动关联 `imagePullSecrets`。这个拉取秘钥不需要公网访问平台，只需要目标集群能访问镜像仓库。
+
 如果你的 Docker Compose 不是在项目目录启动，显式设置宿主数据目录：
 
 ```bash

@@ -548,6 +548,14 @@ function gitCredentialOptions(selectedId = "") {
   ].join("");
 }
 
+function imagePullSecretOptions(selectedId = "", emptyLabel = "不使用拉取秘钥") {
+  const registrySecrets = secrets.filter((item) => item.type === "registry");
+  return [
+    `<option value="">${emptyLabel}</option>`,
+    ...registrySecrets.map((item) => `<option value="${item.id}" ${String(item.id) === String(selectedId) ? "selected" : ""}>${item.name} / ${item.target || "镜像仓库"}</option>`),
+  ].join("");
+}
+
 function secretName(secretId) {
   const secret = secrets.find((item) => String(item.id) === String(secretId));
   return secret ? `${secret.name} / ${secretTypeLabel(secret.type)}` : "未使用";
@@ -771,7 +779,7 @@ function renderDetail() {
             <div class="cluster-item">
               <div>
                 <strong>${cluster.name}</strong>
-                <span>${cluster.namespace || "default"} · ${cluster.replicas} replicas · ${cluster.ingress || "未设置 Ingress"}</span>
+                <span>${cluster.namespace || "default"} · ${cluster.replicas} replicas · ${cluster.ingress || "未设置 Ingress"} · 拉取秘钥 ${secretName(cluster.imagePullSecretId || clusters.find((item) => item.name === cluster.name)?.imagePullSecretId)}</span>
               </div>
               <span class="status-chip ${cluster.status}">${statusLabel(cluster.status)}</span>
             </div>
@@ -878,6 +886,7 @@ function renderClusterView() {
           <span>心跳：${agentState.time}</span>
           <span>节点：${nodes.length} 个</span>
           <span>任务绑定：${tasks.filter((task) => (task.clusters || []).some((target) => target.name === cluster.name)).length} 个</span>
+          <span>拉取秘钥：${secretName(cluster.imagePullSecretId)}</span>
         </div>
         <div class="cluster-node-preview">
           ${
@@ -972,6 +981,17 @@ function renderGitCredentialOptions(selectedId = taskForm.elements.gitCredential
   gitCredentialSelect.innerHTML = gitCredentialOptions(selectedId);
 }
 
+function renderImagePullSecretOptions() {
+  const clusterPullSecretSelect = document.getElementById("clusterPullSecretSelect");
+  const editClusterPullSecretSelect = document.getElementById("editClusterPullSecretSelect");
+  if (clusterPullSecretSelect) {
+    clusterPullSecretSelect.innerHTML = imagePullSecretOptions(clusterPullSecretSelect.value, "默认拉取秘钥");
+  }
+  if (editClusterPullSecretSelect) {
+    editClusterPullSecretSelect.innerHTML = imagePullSecretOptions(editClusterPullSecretSelect.value, "默认拉取秘钥");
+  }
+}
+
 function renderUserView() {
   const userBody = document.getElementById("userBody");
   userBody.innerHTML = users
@@ -1051,6 +1071,12 @@ function renderClusters() {
         <label>
           <span>Ingress</span>
           <input data-field="ingress" value="${cluster.ingress || ""}" />
+        </label>
+        <label>
+          <span>镜像拉取秘钥</span>
+          <select data-field="imagePullSecretId">
+            ${imagePullSecretOptions(cluster.imagePullSecretId, "使用集群默认")}
+          </select>
         </label>
         <button class="icon-button" type="button" title="移除集群" data-remove-cluster="${index}">
           <i data-lucide="trash-2"></i>
@@ -1164,6 +1190,7 @@ function collectClusterDrafts() {
       namespace: row.querySelector('[data-field="namespace"]').value,
       replicas: Number(row.querySelector('[data-field="replicas"]').value || 1),
       ingress: row.querySelector('[data-field="ingress"]').value,
+      imagePullSecretId: row.querySelector('[data-field="imagePullSecretId"]').value,
     };
   });
 }
@@ -1537,6 +1564,7 @@ function saveCluster(event) {
     region: formData.get("region"),
     env: formData.get("env"),
     namespace: formData.get("namespace"),
+    imagePullSecretId: formData.get("imagePullSecretId"),
     nodes: [],
   };
   clusters.unshift(cluster);
@@ -1598,6 +1626,7 @@ function openClusterDialog(clusterId) {
   editClusterForm.elements.region.value = cluster.region || "";
   editClusterForm.elements.env.value = cluster.env || "dev";
   editClusterForm.elements.namespace.value = cluster.namespace || "default";
+  editClusterForm.elements.imagePullSecretId.value = cluster.imagePullSecretId || "";
   clusterNodeDrafts.splice(0, clusterNodeDrafts.length, ...(cluster.nodes || []).map((node) => ({ ...node })));
   renderClusterNodes();
   clusterDialog.showModal();
@@ -1620,6 +1649,7 @@ function saveEditedCluster(event) {
     region: editClusterForm.elements.region.value,
     env: editClusterForm.elements.env.value,
     namespace: editClusterForm.elements.namespace.value || "default",
+    imagePullSecretId: editClusterForm.elements.imagePullSecretId.value,
     nodes: clusterNodeDrafts.filter((node) => node.name || node.ip),
   });
   addAudit("编辑集群", cluster.name);
@@ -1693,8 +1723,18 @@ function deleteSecret(secretId) {
   const secret = secrets.find((item) => String(item.id) === String(secretId));
   if (!secret) return;
   const usedByTask = tasks.find((task) => String(task.gitCredentialId) === String(secretId));
+  const usedByImagePull = tasks.find((task) => (task.clusters || []).some((cluster) => String(cluster.imagePullSecretId) === String(secretId)));
+  const usedByCluster = clusters.find((cluster) => String(cluster.imagePullSecretId) === String(secretId));
   if (usedByTask) {
     window.alert(`任务 ${usedByTask.name} 正在使用该秘钥，请先编辑任务取消绑定`);
+    return;
+  }
+  if (usedByImagePull) {
+    window.alert(`任务 ${usedByImagePull.name} 正在使用该镜像拉取秘钥，请先编辑任务取消绑定`);
+    return;
+  }
+  if (usedByCluster) {
+    window.alert(`集群 ${usedByCluster.name} 正在使用该默认镜像拉取秘钥，请先编辑集群取消绑定`);
     return;
   }
   const index = secrets.findIndex((item) => String(item.id) === String(secretId));
@@ -1868,6 +1908,7 @@ function render() {
   renderAuditView();
   renderClusters();
   renderGitCredentialOptions();
+  renderImagePullSecretOptions();
   lucide.createIcons();
   syncAutoRefresh();
 }
@@ -2120,6 +2161,7 @@ document.getElementById("addCluster").addEventListener("click", () => {
     namespace: firstCluster.namespace || "default",
     replicas: 1,
     ingress: "",
+    imagePullSecretId: firstCluster.imagePullSecretId || "",
   });
   renderClusters();
 });

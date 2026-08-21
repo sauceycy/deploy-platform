@@ -199,6 +199,9 @@
                 <option value="prod">prod</option>
               </select>
               <input name="namespace" placeholder="默认 namespace" />
+              <select name="imagePullSecretId" id="clusterPullSecretSelect">
+                <option value="">默认拉取秘钥</option>
+              </select>
               <button class="primary-button" type="submit" data-permission-required="cluster.manage">
                 <i data-lucide="plus"></i>
                 <span>添加集群</span>
@@ -620,6 +623,12 @@
           <label>
             <span>默认 namespace</span>
             <input name="namespace" />
+          </label>
+          <label>
+            <span>默认镜像拉取秘钥</span>
+            <select name="imagePullSecretId" id="editClusterPullSecretSelect">
+              <option value="">默认拉取秘钥</option>
+            </select>
           </label>
         </div>
 

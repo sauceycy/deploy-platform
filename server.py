@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -330,6 +331,34 @@ def image_name(task, execution_id):
     return f"{REGISTRY_URL}/{repo}" if REGISTRY_URL else repo
 
 
+def registry_server_from_image(image):
+    first = str(image or "").split("/")[0]
+    if "." in first or ":" in first or first == "localhost":
+        return first
+    return "https://index.docker.io/v1/"
+
+
+def normalize_registry_server(value):
+    value = str(value or "").strip().rstrip("/")
+    if not value:
+        return ""
+    parsed = urlparse(value if "://" in value else f"dummy://{value}")
+    if parsed.netloc:
+        return parsed.netloc
+    return value.split("/")[0]
+
+
+def dockerconfigjson_for_secret(secret, image):
+    username = str((secret or {}).get("username") or "").strip()
+    password = str((secret or {}).get("secret") or "")
+    server = normalize_registry_server((secret or {}).get("target")) or registry_server_from_image(image)
+    if not username or not password:
+        raise RuntimeError("镜像拉取秘钥缺少用户名或密码")
+    auth = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("utf-8")
+    config = {"auths": {server: {"username": username, "password": password, "auth": auth}}}
+    return base64.b64encode(json.dumps(config, separators=(",", ":")).encode("utf-8")).decode("utf-8")
+
+
 def run_command(args, cwd=None, input_text=None, env=None):
     process = subprocess.run(
         args,
@@ -527,7 +556,7 @@ def generate_dockerfile(task, app_dir, src_dir):
     return generated, src_dir if language == "java" else app_dir, jar if language == "java" else None
 
 
-def create_manifest(task, target, image):
+def create_manifest(task, target, image, pull_secret=None):
     app = safe_name(task["name"])
     namespace = target.get("namespace") or "default"
     replicas = int(target.get("replicas") or task.get("replicas") or 1)
@@ -535,7 +564,29 @@ def create_manifest(task, target, image):
     service_port = int(task.get("servicePort") or 80)
     health_path = task.get("healthPath") or "/"
     ingress_host = target.get("ingress") or ""
-    docs = [
+    image_pull_secret_block = ""
+    docs = []
+    if pull_secret:
+        secret_name = safe_name(f"{app}-{pull_secret.get('name') or 'registry'}-pull")
+        dockerconfigjson = dockerconfigjson_for_secret(pull_secret, image)
+        image_pull_secret_block = f"""      imagePullSecrets:
+        - name: {secret_name}
+"""
+        docs.append(
+            f"""apiVersion: v1
+kind: Secret
+metadata:
+  name: {secret_name}
+  namespace: {namespace}
+  labels:
+    app: {app}
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: {dockerconfigjson}
+"""
+        )
+
+    docs.extend([
         f"""apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -553,7 +604,7 @@ spec:
       labels:
         app: {app}
     spec:
-      containers:
+{image_pull_secret_block}      containers:
         - name: {app}
           image: {image}
           imagePullPolicy: Always
@@ -580,7 +631,7 @@ spec:
       port: {service_port}
       targetPort: {container_port}
 """,
-    ]
+    ])
     if ingress_host:
         docs.append(
             f"""apiVersion: networking.k8s.io/v1
@@ -617,11 +668,16 @@ def dispatch_agent_tasks(execution_id, task, image):
             if not cluster_name:
                 continue
             target = {**target, "name": cluster_name}
+            cluster_ref = next((item for item in state.get("clusters", []) if str(item.get("name") or "").strip() == cluster_name), {})
+            pull_secret_id = str(target.get("imagePullSecretId") or cluster_ref.get("imagePullSecretId") or "").strip()
+            pull_secret = secret_by_id(state, pull_secret_id)
+            if pull_secret_id and (not pull_secret or pull_secret.get("type") != "registry"):
+                raise ValueError(f"集群 {cluster_name} 绑定的镜像拉取秘钥不存在或类型不正确")
             payload = {
                 "appName": task["name"],
                 "namespace": target.get("namespace") or "default",
                 "image": image,
-                "manifest": create_manifest(task, target, image),
+                "manifest": create_manifest(task, target, image, pull_secret),
                 "deployment": safe_name(task["name"]),
             }
             state["agentTasks"].append(
@@ -900,7 +956,12 @@ def normalize_task_payload(payload):
         name = str(cluster.get("name") or "").strip()
         if not name:
             continue
-        normalized_clusters.append({**cluster, "name": name, "status": cluster.get("status") or "success"})
+        normalized_clusters.append({
+            **cluster,
+            "name": name,
+            "imagePullSecretId": str(cluster.get("imagePullSecretId") or "").strip(),
+            "status": cluster.get("status") or "success",
+        })
     return {
         "name": str(payload.get("name") or "").strip(),
         "owner": str(payload.get("owner") or "").strip(),
