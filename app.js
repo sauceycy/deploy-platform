@@ -83,6 +83,7 @@ const schedules = [];
 const clusterDrafts = [];
 const clusterNodeDrafts = [];
 const APP_STATE_KEY = "deploy-platform-state";
+let refreshTimer = null;
 
 const state = {
   currentUser: null,
@@ -255,7 +256,35 @@ function statusLabel(status) {
     success: "部署成功",
     partial: "部分成功",
     failed: "部署失败",
+    cancelled: "已取消",
   }[status] || status;
+}
+
+function isTaskActive(task) {
+  return ["queued", "building", "deploying", "running"].includes(task?.status);
+}
+
+function progressValue(source) {
+  if (!source) return 0;
+  if (source.progress !== undefined && source.progress !== null) return Math.max(0, Math.min(100, Number(source.progress) || 0));
+  return source.status === "success" || source.status === "partial" ? 100 : 0;
+}
+
+function renderProgress(source, compact = false) {
+  if (!source || (!isTaskActive(source) && !["success", "partial", "failed", "cancelled"].includes(source.status))) return "";
+  const value = progressValue(source);
+  const stage = source.stage || statusLabel(source.status);
+  return `
+    <div class="progress-block ${compact ? "compact-progress" : ""}">
+      <div class="progress-meta">
+        <span>${stage}</span>
+        <strong>${value}%</strong>
+      </div>
+      <div class="progress-track">
+        <div class="progress-fill ${source.status || ""}" style="width: ${value}%"></div>
+      </div>
+    </div>
+  `;
 }
 
 function scheduleStatusLabel(status) {
@@ -384,6 +413,7 @@ function renderRows() {
         </div>
         <div>
           <span class="status-chip ${task.status}">${statusLabel(task.status)}</span>
+          ${renderProgress(task, true)}
         </div>
         <div class="row-actions">
           <button class="ghost-button" type="button" data-action="select" data-task-id="${task.id}">
@@ -402,6 +432,17 @@ function renderRows() {
             <i data-lucide="clock"></i>
             <span>定时</span>
           </button>
+          ${
+            isTaskActive(task)
+              ? `<button class="ghost-button danger-action" type="button" data-action="cancel" data-task-id="${task.id}" ${hasPermission("task.deploy") ? "" : "disabled"}>
+                  <i data-lucide="circle-stop"></i>
+                  <span>取消</span>
+                </button>`
+              : `<button class="ghost-button danger-action" type="button" data-action="delete" data-task-id="${task.id}" ${hasPermission("task.create") ? "" : "disabled"}>
+                  <i data-lucide="trash-2"></i>
+                  <span>删除</span>
+                </button>`
+          }
         </div>
       </div>
     `,
@@ -515,8 +556,18 @@ function renderDetail() {
               <span>执行 ID</span><strong>${latestExecution.id}</strong>
               <span>分支</span><strong>${latestExecution.branch || "未记录"}</strong>
               <span>状态</span><strong>${statusLabel(latestExecution.status)}</strong>
+              <span>阶段</span><strong>${latestExecution.stage || statusLabel(latestExecution.status)}</strong>
               <span>镜像</span><strong>${latestExecution.image || "未生成"}</strong>
             </div>
+            ${renderProgress(latestExecution)}
+            ${
+              ["queued", "building", "deploying", "running"].includes(latestExecution.status)
+                ? `<button class="ghost-button danger-action full-action" type="button" data-execution-cancel="${latestExecution.id}" ${hasPermission("task.deploy") ? "" : "disabled"}>
+                    <i data-lucide="circle-stop"></i>
+                    <span>取消当前发布</span>
+                  </button>`
+                : ""
+            }
             <div class="log-box">${(latestExecution.logs || []).slice(-6).map((log) => `[${log.time}] ${log.message}`).join("\n")}</div>`
           : `<div class="empty-state compact"><strong>暂无执行记录</strong><span>点击发布后会显示构建和部署日志。</span></div>`
       }
@@ -1194,6 +1245,39 @@ async function cancelSchedule(scheduleId) {
   render();
 }
 
+async function cancelExecution(executionId) {
+  if (!requirePermission("task.deploy")) return;
+  const response = await fetch(`/api/executions/${executionId}/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ actor: state.currentUser?.username || "system" }),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    window.alert(result.error || "取消发布失败");
+    return;
+  }
+  hydrateState(result.state);
+  render();
+}
+
+async function deleteTask(taskId) {
+  if (!requirePermission("task.create")) return;
+  const task = tasks.find((item) => String(item.id) === String(taskId));
+  if (!task) return;
+  if (!window.confirm(`确认删除任务 ${task.name}？删除后会同时清理该任务的执行记录和定时计划。`)) return;
+  const actor = encodeURIComponent(state.currentUser?.username || "system");
+  const response = await fetch(`/api/tasks/${taskId}?actor=${actor}`, { method: "DELETE" });
+  const result = await response.json();
+  if (!response.ok) {
+    window.alert(result.error || "删除任务失败");
+    return;
+  }
+  hydrateState(result.state);
+  state.selectedTaskIds.delete(String(taskId));
+  render();
+}
+
 function saveCluster(event) {
   event.preventDefault();
   if (!requirePermission("cluster.manage")) return;
@@ -1537,6 +1621,18 @@ function render() {
   renderClusters();
   renderGitCredentialOptions();
   lucide.createIcons();
+  syncAutoRefresh();
+}
+
+function syncAutoRefresh() {
+  const hasActiveTask = tasks.some((task) => isTaskActive(task));
+  if (hasActiveTask && !refreshTimer) {
+    refreshTimer = window.setInterval(refreshRemoteState, 3000);
+  }
+  if (!hasActiveTask && refreshTimer) {
+    window.clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
 }
 
 function login(event) {
@@ -1683,6 +1779,12 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  const executionCancelButton = event.target.closest("[data-execution-cancel]");
+  if (executionCancelButton) {
+    cancelExecution(executionCancelButton.dataset.executionCancel);
+    return;
+  }
+
   const actionButton = event.target.closest("[data-action]");
   if (actionButton) {
     const taskId = actionButton.dataset.taskId;
@@ -1699,6 +1801,15 @@ document.addEventListener("click", (event) => {
     }
     if (action === "schedule") {
       openScheduleDialog(taskId);
+      return;
+    }
+    if (action === "cancel") {
+      const latestExecution = executions.find((execution) => String(execution.taskId) === String(taskId) && ["queued", "building", "deploying", "running"].includes(execution.status));
+      if (latestExecution) cancelExecution(latestExecution.id);
+      return;
+    }
+    if (action === "delete") {
+      deleteTask(taskId);
       return;
     }
     render();

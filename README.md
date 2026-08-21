@@ -9,6 +9,8 @@
 - 按任务名、仓库、负责人、环境、语言、SDK、工作路径、最近分支关键字搜索任务
 - 勾选多个任务后批量发布
 - 为单个任务创建定时发布计划，到点后自动进入发布队列
+- 发布中显示阶段进度，可取消未完成发布
+- 支持删除非发布中的任务，并清理对应执行记录和定时计划
 - 登录鉴权
 - 角色权限管理
 - PostgreSQL 持久化
@@ -193,6 +195,14 @@ Git 凭据：选择 Git HTTPS Token
 10. Agent 创建 Deployment、Service 和可选 Ingress
 11. 任务详情中查看执行日志和待执行定时发布
 
+发布阶段会显示进度：
+
+```text
+等待执行 -> 拉取代码 -> 执行编译 -> 构建镜像 -> 推送镜像 -> Agent 部署 -> 发布完成
+```
+
+发布中可以点击「取消」。如果当前正在执行 Maven/Docker 等命令，平台会在该命令返回后停止后续阶段。任务不在发布中时，可以点击「删除」清理任务配置、执行记录和定时计划。
+
 ## 发布接口
 
 单任务发布：
@@ -212,6 +222,13 @@ POST /api/tasks/batch-run
 ```text
 POST /api/tasks/{taskId}/schedule
 POST /api/schedules/{scheduleId}/cancel
+```
+
+取消发布和删除任务：
+
+```text
+POST /api/executions/{executionId}/cancel
+DELETE /api/tasks/{taskId}
 ```
 
 停止：

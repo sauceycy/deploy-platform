@@ -31,6 +31,7 @@ IMAGE_NAMESPACE = os.environ.get("IMAGE_NAMESPACE", "deploy-platform")
 REGISTRY_USERNAME = os.environ.get("REGISTRY_USERNAME", "")
 REGISTRY_PASSWORD = os.environ.get("REGISTRY_PASSWORD", "")
 AGENT_SHARED_TOKEN = os.environ.get("AGENT_SHARED_TOKEN", "dev-agent-token")
+ACTIVE_STATUSES = {"queued", "building", "deploying", "running"}
 
 DEFAULT_STATE = {
     "roles": {
@@ -172,13 +173,17 @@ def append_log(execution_id, message):
     mutate_state(update)
 
 
-def set_execution_status(execution_id, status, message=None, image=None):
+def set_execution_status(execution_id, status, message=None, image=None, stage=None, progress=None):
     def update(state):
         execution = find_by_id(state["executions"], execution_id)
         if not execution:
             return
         execution["status"] = status
         execution["updatedAt"] = now_text()
+        if stage:
+            execution["stage"] = stage
+        if progress is not None:
+            execution["progress"] = max(0, min(100, int(progress)))
         if image:
             execution["image"] = image
         if message:
@@ -187,6 +192,10 @@ def set_execution_status(execution_id, status, message=None, image=None):
         if task:
             task["status"] = status
             task["lastRun"] = now_text()
+            if stage:
+                task["stage"] = stage
+            if progress is not None:
+                task["progress"] = max(0, min(100, int(progress)))
 
     mutate_state(update)
 
@@ -194,6 +203,21 @@ def set_execution_status(execution_id, status, message=None, image=None):
 def find_by_id(items, item_id):
     item_id = str(item_id)
     return next((item for item in items if str(item.get("id")) == item_id), None)
+
+
+def is_active_status(status):
+    return status in ACTIVE_STATUSES
+
+
+def is_execution_cancelled(execution_id):
+    state = read_state()
+    execution = find_by_id(state["executions"], execution_id)
+    return bool(execution and execution.get("status") == "cancelled")
+
+
+def ensure_execution_active(execution_id):
+    if is_execution_cancelled(execution_id):
+        raise RuntimeError("发布已取消")
 
 
 def safe_name(value):
@@ -463,10 +487,14 @@ def dispatch_agent_tasks(execution_id, task, image):
             execution.setdefault("clusterResults", {})[cluster_name] = "pending"
         execution["status"] = "deploying"
         execution["image"] = image
+        execution["stage"] = "Agent 部署"
+        execution["progress"] = 88
         task_ref = find_by_id(state["tasks"], task["id"])
         if task_ref:
             task_ref["status"] = "deploying"
             task_ref["lastRun"] = now_text()
+            task_ref["stage"] = "Agent 部署"
+            task_ref["progress"] = 88
 
     mutate_state(update)
 
@@ -499,7 +527,7 @@ def build_and_dispatch(execution_id):
     work_dir = WORKSPACE_DIR / execution_id
     src_dir = work_dir / "src"
     try:
-        set_execution_status(execution_id, "building", "开始拉取代码")
+        set_execution_status(execution_id, "building", "开始拉取代码", stage="拉取代码", progress=10)
         if work_dir.exists():
             shutil.rmtree(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -507,6 +535,7 @@ def build_and_dispatch(execution_id):
         branch = execution.get("branch")
         if not branch:
             raise RuntimeError("未选择发布分支")
+        ensure_execution_active(execution_id)
         git_secret = secret_by_id(state, task.get("gitCredentialId"))
         clone_repo = authenticated_repo_url(task["repo"], git_secret)
         clone_env = clone_environment(work_dir, git_secret)
@@ -515,6 +544,8 @@ def build_and_dispatch(execution_id):
         append_log(execution_id, redact_secret_text(output, git_secret))
         if code != 0:
             raise RuntimeError("代码拉取失败")
+        ensure_execution_active(execution_id)
+        set_execution_status(execution_id, "building", "代码拉取完成", stage="准备编译", progress=25)
 
         app_dir = (src_dir / (task.get("workdir") or ".")).resolve()
         if not app_dir.exists():
@@ -522,7 +553,7 @@ def build_and_dispatch(execution_id):
 
         command = task.get("buildCommand") or ""
         if command:
-            set_execution_status(execution_id, "building", f"使用 {task.get('sdk')} 执行编译命令")
+            set_execution_status(execution_id, "building", f"使用 {task.get('sdk')} 执行编译命令", stage="执行编译", progress=35)
             docker_src_dir = HOST_WORKSPACE_DIR / execution_id / "src"
             docker_cmd = [
                 "docker",
@@ -541,14 +572,19 @@ def build_and_dispatch(execution_id):
             append_log(execution_id, output)
             if code != 0:
                 raise RuntimeError("编译命令执行失败")
+            ensure_execution_active(execution_id)
+            set_execution_status(execution_id, "building", "编译命令执行完成", stage="生成镜像", progress=55)
 
         image = image_name(task, execution_id)
         dockerfile = generate_dockerfile(task, app_dir)
-        set_execution_status(execution_id, "building", f"开始构建镜像 {image}")
+        ensure_execution_active(execution_id)
+        set_execution_status(execution_id, "building", f"开始构建镜像 {image}", stage="构建镜像", progress=65)
         code, output = run_command(["docker", "build", "-t", image, "-f", str(dockerfile), "."], cwd=app_dir)
         append_log(execution_id, output)
         if code != 0:
             raise RuntimeError("Docker 镜像构建失败")
+        ensure_execution_active(execution_id)
+        set_execution_status(execution_id, "building", "Docker 镜像构建完成", image=image, stage="准备推送", progress=72)
 
         if REGISTRY_URL:
             if REGISTRY_USERNAME and REGISTRY_PASSWORD:
@@ -556,20 +592,29 @@ def build_and_dispatch(execution_id):
                 append_log(execution_id, output)
                 if code != 0:
                     raise RuntimeError("镜像仓库登录失败")
-            set_execution_status(execution_id, "building", f"推送镜像 {image}")
+            ensure_execution_active(execution_id)
+            set_execution_status(execution_id, "building", f"推送镜像 {image}", stage="推送镜像", progress=78)
             code, output = run_command(["docker", "push", image])
             append_log(execution_id, output)
             if code != 0:
                 raise RuntimeError("镜像推送失败")
+            ensure_execution_active(execution_id)
+            set_execution_status(execution_id, "building", "镜像推送完成", image=image, stage="等待部署", progress=84)
         else:
             append_log(execution_id, "未配置 REGISTRY_URL，镜像只保留在本机 Docker，远端集群可能无法拉取。")
+            set_execution_status(execution_id, "building", "镜像保留在本机 Docker", image=image, stage="等待部署", progress=84)
 
         if not task.get("clusters"):
             raise RuntimeError("任务未绑定部署集群")
+        ensure_execution_active(execution_id)
         dispatch_agent_tasks(execution_id, task, image)
         send_notification(task, "BUILD_SUCCESS", f"镜像已构建: {image}")
     except Exception as exc:
-        set_execution_status(execution_id, "failed", str(exc))
+        if str(exc) == "发布已取消":
+            return
+        latest = read_state()
+        current = find_by_id(latest["executions"], execution_id) or {}
+        set_execution_status(execution_id, "failed", str(exc), stage=current.get("stage") or "执行失败", progress=current.get("progress") or 100)
         send_notification(task, "BUILD_FAILED", str(exc))
 
 
@@ -582,6 +627,8 @@ def create_execution_record(state, task, actor, branch, action="触发发布"):
         "branch": branch,
         "actor": actor or "system",
         "status": "queued",
+        "stage": "等待执行",
+        "progress": 5,
         "image": "",
         "logs": [{"time": now_text(), "message": "执行已进入队列"}],
         "clusterResults": {},
@@ -590,6 +637,8 @@ def create_execution_record(state, task, actor, branch, action="触发发布"):
     }
     state["executions"].insert(0, execution)
     task["status"] = "queued"
+    task["stage"] = "等待执行"
+    task["progress"] = 5
     task["lastRun"] = now_text()
     task["lastBranch"] = branch
     state["auditLogs"].insert(
@@ -603,6 +652,54 @@ def create_execution_record(state, task, actor, branch, action="触发发布"):
         },
     )
     return execution
+
+
+def cancel_execution(execution_id, actor):
+    def update(state):
+        execution = find_by_id(state["executions"], execution_id)
+        if not execution:
+            raise ValueError("执行记录不存在")
+        if execution.get("status") not in ACTIVE_STATUSES:
+            raise ValueError("当前执行状态不可取消")
+        execution["status"] = "cancelled"
+        execution["stage"] = "已取消"
+        execution["progress"] = execution.get("progress") or 0
+        execution["updatedAt"] = now_text()
+        execution.setdefault("logs", []).append({"time": now_text(), "message": f"发布已由 {actor or 'system'} 取消"})
+        for item in state["agentTasks"]:
+            if item.get("executionId") == execution_id and item.get("status") in {"pending", "running"}:
+                item["status"] = "cancelled"
+                item["updatedAt"] = now_text()
+        task = find_by_id(state["tasks"], execution["taskId"])
+        if task:
+            task["status"] = "cancelled"
+            task["stage"] = "已取消"
+            task["progress"] = execution["progress"]
+            task["lastRun"] = now_text()
+        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "取消发布", "target": execution.get("taskName"), "result": "成功"})
+        return execution
+
+    execution, state = mutate_state(update)
+    return execution, state
+
+
+def delete_task(task_id, actor):
+    def update(state):
+        task = find_by_id(state["tasks"], task_id)
+        if not task:
+            raise ValueError("任务不存在")
+        active_execution = next((item for item in state["executions"] if str(item.get("taskId")) == str(task_id) and is_active_status(item.get("status"))), None)
+        if active_execution:
+            raise ValueError("任务正在发布中，请先取消发布")
+        state["tasks"] = [item for item in state["tasks"] if str(item.get("id")) != str(task_id)]
+        state["executions"] = [item for item in state["executions"] if str(item.get("taskId")) != str(task_id)]
+        state["agentTasks"] = [item for item in state["agentTasks"] if str(item.get("taskId")) != str(task_id)]
+        state["schedules"] = [item for item in state.setdefault("schedules", []) if str(item.get("taskId")) != str(task_id)]
+        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "删除任务", "target": task.get("name"), "result": "成功"})
+        return task
+
+    task, state = mutate_state(update)
+    return task, state
 
 
 def create_execution(task_id, actor, branch):
@@ -774,18 +871,28 @@ def update_agent_result(agent_task_id, status, logs):
             item.setdefault("logs", []).append({"time": now_text(), "message": logs})
         execution = find_by_id(state["executions"], item["executionId"])
         if execution:
+            if execution.get("status") == "cancelled":
+                return item
             execution.setdefault("clusterResults", {})[item["clusterName"]] = status
             statuses = list(execution["clusterResults"].values())
             if statuses and all(value == "success" for value in statuses):
                 execution["status"] = "success"
+                execution["stage"] = "发布完成"
+                execution["progress"] = 100
                 task = find_by_id(state["tasks"], execution["taskId"])
                 if task:
                     task["status"] = "success"
+                    task["stage"] = "发布完成"
+                    task["progress"] = 100
             elif any(value == "failed" for value in statuses):
                 execution["status"] = "partial" if any(value == "success" for value in statuses) else "failed"
+                execution["stage"] = "部署异常"
+                execution["progress"] = 100 if execution["status"] == "partial" else max(90, int(execution.get("progress") or 90))
                 task = find_by_id(state["tasks"], execution["taskId"])
                 if task:
                     task["status"] = execution["status"]
+                    task["stage"] = execution["stage"]
+                    task["progress"] = execution["progress"]
         return item
 
     item, state = mutate_state(update)
@@ -862,6 +969,16 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             self.send_json({"schedule": schedule, "state": state})
             return
+        match = re.match(r"^/api/executions/([^/]+)/cancel$", parsed.path)
+        if match:
+            body = self.read_json_body()
+            try:
+                execution, state = cancel_execution(match.group(1), body.get("actor"))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"execution": execution, "state": state})
+            return
         match = re.match(r"^/api/schedules/([^/]+)/cancel$", parsed.path)
         if match:
             body = self.read_json_body()
@@ -897,6 +1014,20 @@ class Handler(SimpleHTTPRequestHandler):
 
             mutate_state(update)
             self.send_json({"ok": True})
+            return
+        self.send_error(404)
+
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        match = re.match(r"^/api/tasks/([^/]+)$", parsed.path)
+        if match:
+            query = parse_qs(parsed.query)
+            try:
+                task, state = delete_task(match.group(1), query.get("actor", ["system"])[0])
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"task": task, "state": state})
             return
         self.send_error(404)
 
