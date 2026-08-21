@@ -16,6 +16,7 @@
 - 配置编译语言与 SDK 版本
 - 配置编译命令、端口、副本数、健康检查
 - 配置多集群部署目标
+- 集群管理支持查看 Agent 心跳、编辑集群和维护节点信息
 - 配置告警通知事件与通知渠道
 - Worker 拉代码、编译、构建镜像、推送镜像
 - Agent 拉取部署任务并创建 Deployment / Service / Ingress
@@ -129,6 +130,21 @@ Agent 会轮询平台的 `/api/agent/tasks`，收到发布任务后执行：
 kubectl apply -f manifest
 kubectl rollout status deployment/<app>
 ```
+
+Agent Token 有两个设置位置，值必须一致：
+
+```text
+平台服务端：docker-compose.yml / AGENT_SHARED_TOKEN
+集群 Agent：k8s-agent.yaml / AGENT_TOKEN
+```
+
+默认值都是：
+
+```text
+dev-agent-token
+```
+
+如果你修改了平台的 `AGENT_SHARED_TOKEN`，需要同步修改每个集群 Agent 的 `AGENT_TOKEN`，然后重启 Agent Deployment。
 
 ## 发布流程
 

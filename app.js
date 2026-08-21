@@ -76,6 +76,7 @@ const agentTasks = [];
 const agentHeartbeats = [];
 const schedules = [];
 const clusterDrafts = [];
+const clusterNodeDrafts = [];
 const APP_STATE_KEY = "deploy-platform-state";
 
 const state = {
@@ -116,6 +117,9 @@ const configDialog = document.getElementById("configDialog");
 const configPreview = document.getElementById("configPreview");
 const userDialog = document.getElementById("userDialog");
 const editUserForm = document.getElementById("editUserForm");
+const clusterDialog = document.getElementById("clusterDialog");
+const editClusterForm = document.getElementById("editClusterForm");
+const clusterNodeEditor = document.getElementById("clusterNodeEditor");
 const branchDialog = document.getElementById("branchDialog");
 const branchForm = document.getElementById("branchForm");
 const branchSelect = document.getElementById("branchSelect");
@@ -518,6 +522,15 @@ function emptyState(text) {
   return `<div class="empty-state"><strong>${text}</strong></div>`;
 }
 
+function heartbeatForCluster(clusterName) {
+  return agentHeartbeats.find((item) => item.cluster === clusterName);
+}
+
+function clusterAgentState(cluster) {
+  const heartbeat = heartbeatForCluster(cluster.name);
+  return heartbeat ? { label: "Agent 在线", status: "success", time: heartbeat.time } : { label: "Agent 未连接", status: "pending", time: "暂无心跳" };
+}
+
 function renderClusterView() {
   const body = document.getElementById("clusterBody");
   if (clusters.length === 0) {
@@ -526,15 +539,42 @@ function renderClusterView() {
   }
   body.innerHTML = clusters
     .map(
-      (cluster) => `
-      <div class="simple-row">
-        <div>
-          <strong>${cluster.name}</strong>
-          <span>${cluster.region || "未设置地域"} · ${cluster.env} · ${cluster.namespace || "default"}</span>
+      (cluster) => {
+        const agentState = clusterAgentState(cluster);
+        const nodes = cluster.nodes || [];
+        return `
+      <div class="cluster-row">
+        <div class="cluster-row-main">
+          <div>
+            <strong>${cluster.name}</strong>
+            <span>${cluster.region || "未设置地域"} · ${cluster.env} · 默认 namespace ${cluster.namespace || "default"}</span>
+          </div>
+          <span class="status-chip ${agentState.status}">${agentState.label}</span>
         </div>
-        <span class="status-chip success">Agent 待安装</span>
+        <div class="cluster-meta">
+          <span>心跳：${agentState.time}</span>
+          <span>节点：${nodes.length} 个</span>
+          <span>任务绑定：${tasks.filter((task) => (task.clusters || []).some((target) => target.name === cluster.name)).length} 个</span>
+        </div>
+        <div class="cluster-node-preview">
+          ${
+            nodes.length
+              ? nodes
+                  .slice(0, 4)
+                  .map((node) => `<span>${node.name || "未命名节点"} · ${node.ip || "未设置 IP"} · ${node.role || "worker"} · ${node.status || "Ready"}</span>`)
+                  .join("")
+              : `<span>暂无节点信息，点击编辑维护节点</span>`
+          }
+        </div>
+        <div class="cluster-actions">
+          <button class="ghost-button" type="button" data-cluster-action="edit" data-cluster-id="${cluster.id}" ${hasPermission("cluster.manage") ? "" : "disabled"}>
+            <i data-lucide="square-pen"></i>
+            <span>编辑</span>
+          </button>
+        </div>
       </div>
-    `,
+    `;
+      },
     )
     .join("");
 }
@@ -1096,12 +1136,95 @@ function saveCluster(event) {
     region: formData.get("region"),
     env: formData.get("env"),
     namespace: formData.get("namespace"),
+    nodes: [],
   };
   clusters.unshift(cluster);
   addAudit("添加集群", cluster.name);
   form.reset();
   render();
   persistState();
+}
+
+function renderClusterNodes() {
+  if (clusterNodeDrafts.length === 0) {
+    clusterNodeEditor.innerHTML = `<div class="empty-state compact"><strong>暂无节点</strong><span>添加节点后可记录名称、IP、角色和状态。</span></div>`;
+    return;
+  }
+  clusterNodeEditor.innerHTML = clusterNodeDrafts
+    .map(
+      (node, index) => `
+      <div class="node-edit-row" data-node-index="${index}">
+        <input data-node-field="name" placeholder="节点名称" value="${node.name || ""}" />
+        <input data-node-field="ip" placeholder="节点 IP" value="${node.ip || ""}" />
+        <select data-node-field="role">
+          <option value="worker" ${node.role === "worker" ? "selected" : ""}>worker</option>
+          <option value="master" ${node.role === "master" ? "selected" : ""}>master</option>
+          <option value="infra" ${node.role === "infra" ? "selected" : ""}>infra</option>
+        </select>
+        <select data-node-field="status">
+          <option value="Ready" ${node.status === "Ready" ? "selected" : ""}>Ready</option>
+          <option value="NotReady" ${node.status === "NotReady" ? "selected" : ""}>NotReady</option>
+          <option value="维护中" ${node.status === "维护中" ? "selected" : ""}>维护中</option>
+        </select>
+        <button class="icon-button" type="button" title="移除节点" data-remove-node="${index}">
+          <i data-lucide="trash-2"></i>
+        </button>
+      </div>
+    `,
+    )
+    .join("");
+  lucide.createIcons();
+}
+
+function collectClusterNodes() {
+  document.querySelectorAll(".node-edit-row").forEach((row) => {
+    const index = Number(row.dataset.nodeIndex);
+    clusterNodeDrafts[index] = {
+      name: row.querySelector('[data-node-field="name"]').value,
+      ip: row.querySelector('[data-node-field="ip"]').value,
+      role: row.querySelector('[data-node-field="role"]').value,
+      status: row.querySelector('[data-node-field="status"]').value,
+    };
+  });
+}
+
+function openClusterDialog(clusterId) {
+  if (!requirePermission("cluster.manage")) return;
+  const cluster = clusters.find((item) => String(item.id) === String(clusterId));
+  if (!cluster) return;
+  editClusterForm.elements.id.value = cluster.id;
+  editClusterForm.elements.name.value = cluster.name || "";
+  editClusterForm.elements.region.value = cluster.region || "";
+  editClusterForm.elements.env.value = cluster.env || "dev";
+  editClusterForm.elements.namespace.value = cluster.namespace || "default";
+  clusterNodeDrafts.splice(0, clusterNodeDrafts.length, ...(cluster.nodes || []).map((node) => ({ ...node })));
+  renderClusterNodes();
+  clusterDialog.showModal();
+}
+
+function closeClusterDialog() {
+  if (clusterDialog.open) clusterDialog.close();
+  editClusterForm.reset();
+  clusterNodeDrafts.splice(0, clusterNodeDrafts.length);
+}
+
+function saveEditedCluster(event) {
+  event.preventDefault();
+  if (!requirePermission("cluster.manage")) return;
+  collectClusterNodes();
+  const cluster = clusters.find((item) => String(item.id) === String(editClusterForm.elements.id.value));
+  if (!cluster) return;
+  Object.assign(cluster, {
+    name: editClusterForm.elements.name.value,
+    region: editClusterForm.elements.region.value,
+    env: editClusterForm.elements.env.value,
+    namespace: editClusterForm.elements.namespace.value || "default",
+    nodes: clusterNodeDrafts.filter((node) => node.name || node.ip),
+  });
+  addAudit("编辑集群", cluster.name);
+  render();
+  persistState();
+  closeClusterDialog();
 }
 
 function saveTemplate(event) {
@@ -1337,6 +1460,8 @@ document.getElementById("previewYaml").addEventListener("click", renderConfigPre
 document.getElementById("closeConfig").addEventListener("click", () => configDialog.close());
 document.getElementById("closeUserDialog").addEventListener("click", closeUserDialog);
 document.getElementById("cancelUserEdit").addEventListener("click", closeUserDialog);
+document.getElementById("closeClusterDialog").addEventListener("click", closeClusterDialog);
+document.getElementById("cancelClusterEdit").addEventListener("click", closeClusterDialog);
 document.getElementById("closeBranchDialog").addEventListener("click", closeBranchDialog);
 document.getElementById("cancelBranchSelect").addEventListener("click", closeBranchDialog);
 document.getElementById("closeBatchDialog").addEventListener("click", closeBatchDialog);
@@ -1349,6 +1474,7 @@ document.getElementById("templateForm").addEventListener("submit", saveTemplate)
 document.getElementById("channelForm").addEventListener("submit", saveChannel);
 document.getElementById("userForm").addEventListener("submit", saveUser);
 editUserForm.addEventListener("submit", saveEditedUser);
+editClusterForm.addEventListener("submit", saveEditedCluster);
 batchForm.addEventListener("submit", submitBatchDeploy);
 scheduleForm.addEventListener("submit", saveSchedule);
 branchForm.addEventListener("submit", (event) => {
@@ -1425,6 +1551,14 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  const clusterButton = event.target.closest("[data-cluster-action]");
+  if (clusterButton) {
+    if (clusterButton.dataset.clusterAction === "edit") {
+      openClusterDialog(clusterButton.dataset.clusterId);
+    }
+    return;
+  }
+
   const scheduleCancelButton = event.target.closest("[data-schedule-cancel]");
   if (scheduleCancelButton) {
     cancelSchedule(scheduleCancelButton.dataset.scheduleCancel);
@@ -1458,6 +1592,19 @@ document.addEventListener("click", (event) => {
     clusterDrafts.splice(Number(removeButton.dataset.removeCluster), 1);
     renderClusters();
   }
+
+  const removeNodeButton = event.target.closest("[data-remove-node]");
+  if (removeNodeButton && clusterNodeDrafts.length > 0) {
+    collectClusterNodes();
+    clusterNodeDrafts.splice(Number(removeNodeButton.dataset.removeNode), 1);
+    renderClusterNodes();
+  }
+});
+
+document.getElementById("addClusterNode").addEventListener("click", () => {
+  collectClusterNodes();
+  clusterNodeDrafts.push({ name: "", ip: "", role: "worker", status: "Ready" });
+  renderClusterNodes();
 });
 
 document.getElementById("addCluster").addEventListener("click", () => {

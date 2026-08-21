@@ -808,6 +808,84 @@ svg {
   font-size: 12px;
 }
 
+.cluster-token-note {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: #fbfcfe;
+}
+
+.cluster-token-note strong,
+.cluster-token-note span {
+  display: block;
+}
+
+.cluster-token-note span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cluster-token-note code {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: #344054;
+  font-size: 12px;
+}
+
+.cluster-row {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.cluster-row:last-child {
+  border-bottom: 0;
+}
+
+.cluster-row-main,
+.cluster-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cluster-row-main strong,
+.cluster-row-main span {
+  display: block;
+}
+
+.cluster-row-main div > span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cluster-meta,
+.cluster-node-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cluster-meta span,
+.cluster-node-preview span {
+  min-height: 26px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .empty-state {
   display: grid;
   gap: 5px;
@@ -1092,6 +1170,46 @@ svg {
   font-weight: 700;
 }
 
+.compact-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.dialog-section {
+  display: grid;
+  gap: 10px;
+}
+
+.section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.section-title-row h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.section-title-row span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.node-editor {
+  display: grid;
+  gap: 8px;
+}
+
+.node-edit-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(120px, 0.9fr) minmax(100px, 0.55fr) minmax(110px, 0.6fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
 .form-hint {
   margin: 0;
   color: var(--muted);
@@ -1216,7 +1334,10 @@ pre {
 
   .form-grid,
   .notify-grid,
-  .inline-form {
+  .inline-form,
+  .cluster-token-note,
+  .compact-grid,
+  .node-edit-row {
     grid-template-columns: 1fr;
   }
 

@@ -200,6 +200,14 @@
                 <span>添加集群</span>
               </button>
             </form>
+            <div class="cluster-token-note">
+              <div>
+                <strong>Agent Token 设置位置</strong>
+                <span>平台服务端使用 AGENT_SHARED_TOKEN，集群 Agent 使用 AGENT_TOKEN，两边必须保持一致。</span>
+              </div>
+              <code>docker-compose.yml: AGENT_SHARED_TOKEN</code>
+              <code>k8s-agent.yaml: AGENT_TOKEN</code>
+            </div>
             <div class="simple-table" id="clusterBody"></div>
           </section>
         </section>
@@ -494,6 +502,64 @@
           <button class="primary-button" type="submit">
             <i data-lucide="save"></i>
             <span>保存用户</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="config-dialog form-dialog wide-dialog" id="clusterDialog">
+      <div class="dialog-header">
+        <h2>编辑集群</h2>
+        <button class="icon-button" id="closeClusterDialog" type="button" title="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <form class="dialog-form" id="editClusterForm">
+        <input type="hidden" name="id" />
+        <div class="form-grid compact-grid">
+          <label>
+            <span>集群名称</span>
+            <input name="name" required />
+          </label>
+          <label>
+            <span>地域</span>
+            <input name="region" />
+          </label>
+          <label>
+            <span>环境</span>
+            <select name="env">
+              <option value="dev">dev</option>
+              <option value="test">test</option>
+              <option value="prod">prod</option>
+            </select>
+          </label>
+          <label>
+            <span>默认 namespace</span>
+            <input name="namespace" />
+          </label>
+        </div>
+
+        <section class="dialog-section">
+          <div class="section-title-row">
+            <div>
+              <h3>节点信息</h3>
+              <span>用于记录集群节点、IP、角色和状态</span>
+            </div>
+            <button class="ghost-button" type="button" id="addClusterNode">
+              <i data-lucide="plus"></i>
+              <span>添加节点</span>
+            </button>
+          </div>
+          <div class="node-editor" id="clusterNodeEditor"></div>
+        </section>
+
+        <div class="drawer-actions">
+          <button class="ghost-button" type="button" id="cancelClusterEdit">
+            <span>取消</span>
+          </button>
+          <button class="primary-button" type="submit">
+            <i data-lucide="save"></i>
+            <span>保存集群</span>
           </button>
         </div>
       </form>
