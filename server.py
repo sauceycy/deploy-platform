@@ -763,14 +763,22 @@ def build_and_dispatch(execution_id):
         set_execution_status(execution_id, "building", "Docker 镜像构建完成", image=image, stage="准备推送", progress=72)
 
         if REGISTRY_URL:
+            registry_env = None
             if REGISTRY_USERNAME and REGISTRY_PASSWORD:
-                code, output = run_command(["docker", "login", REGISTRY_URL, "-u", REGISTRY_USERNAME, "--password-stdin"], input_text=REGISTRY_PASSWORD)
+                docker_config_dir = work_dir / ".docker"
+                docker_config_dir.mkdir(parents=True, exist_ok=True)
+                registry_env = {**os.environ, "DOCKER_CONFIG": str(docker_config_dir)}
+                code, output = run_command(
+                    ["docker", "login", REGISTRY_URL, "-u", REGISTRY_USERNAME, "--password-stdin"],
+                    input_text=REGISTRY_PASSWORD,
+                    env=registry_env,
+                )
                 append_log(execution_id, output)
                 if code != 0:
                     raise RuntimeError("镜像仓库登录失败")
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "building", f"推送镜像 {image}", stage="推送镜像", progress=78)
-            code, output = run_command(["docker", "push", image])
+            code, output = run_command(["docker", "push", image], env=registry_env)
             append_log(execution_id, output)
             if code != 0:
                 raise RuntimeError("镜像推送失败")
@@ -1172,6 +1180,14 @@ class Handler(SimpleHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
+    def require_agent_token(self, parsed):
+        query = parse_qs(parsed.query)
+        token = query.get("token", [""])[0] or self.headers.get("X-Agent-Token", "")
+        if AGENT_SHARED_TOKEN and token != AGENT_SHARED_TOKEN:
+            self.send_json({"error": "unauthorized"}, status=401)
+            return False
+        return True
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
@@ -1183,9 +1199,7 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/agent/tasks":
             query = parse_qs(parsed.query)
             cluster = query.get("cluster", [""])[0].strip()
-            token = query.get("token", [""])[0] or self.headers.get("X-Agent-Token", "")
-            if AGENT_SHARED_TOKEN and token != AGENT_SHARED_TOKEN:
-                self.send_json({"error": "unauthorized"}, status=401)
+            if not self.require_agent_token(parsed):
                 return
             state = read_state()
             task = next((item for item in state["agentTasks"] if str(item.get("clusterName") or "").strip() == cluster and item.get("status") == "pending"), None)
@@ -1268,11 +1282,15 @@ class Handler(SimpleHTTPRequestHandler):
             return
         match = re.match(r"^/api/agent/tasks/([^/]+)/result$", parsed.path)
         if match:
+            if not self.require_agent_token(parsed):
+                return
             body = self.read_json_body()
             item, state = update_agent_result(match.group(1), body.get("status") or "failed", body.get("logs") or "")
-            self.send_json({"task": item, "state": state})
+            self.send_json({"ok": True, "task": {"id": match.group(1), "status": (item or {}).get("status")}})
             return
         if parsed.path == "/api/agent/heartbeat":
+            if not self.require_agent_token(parsed):
+                return
             body = self.read_json_body()
 
             def update(state):

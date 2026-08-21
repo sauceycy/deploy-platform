@@ -3,6 +3,7 @@ import os
 import subprocess
 import time
 from urllib.parse import urlencode
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -18,22 +19,37 @@ AGENT_HEADERS = {
 
 
 def api_get(path, query=None):
-    url = f"{PLATFORM_URL}{path}"
-    if query:
-        url = f"{url}?{urlencode(query)}"
-    req = Request(url, headers=AGENT_HEADERS)
-    with urlopen(req, timeout=20) as response:
-        return json.loads(response.read().decode("utf-8"))
+    return api_request("GET", path, query=query)
 
 
 def api_post(path, payload):
+    return api_request("POST", path, payload=payload)
+
+
+def api_request(method, path, payload=None, query=None):
+    url = f"{PLATFORM_URL}{path}"
+    if query:
+        url = f"{url}?{urlencode(query)}"
+    data = None
+    headers = AGENT_HEADERS
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {**AGENT_HEADERS, "Content-Type": "application/json"}
     req = Request(
-        f"{PLATFORM_URL}{path}",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={**AGENT_HEADERS, "Content-Type": "application/json"},
+        url,
+        data=data,
+        headers=headers,
+        method=method,
     )
-    with urlopen(req, timeout=20) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(req, timeout=20) as response:
+            body = response.read().decode("utf-8")
+            return json.loads(body) if body else {}
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"{method} {path} HTTP {exc.code}: {body}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"{method} {path} failed: {exc.reason}") from exc
 
 
 def run_kubectl(args, manifest=None):
@@ -77,16 +93,28 @@ def heartbeat():
 if __name__ == "__main__":
     print(f"Deploy Agent started cluster={CLUSTER_NAME} platform={PLATFORM_URL}", flush=True)
     last_heartbeat = 0
+    pending_result = None
     while True:
         try:
             if time.time() - last_heartbeat > 30:
                 heartbeat()
                 last_heartbeat = time.time()
-            result = api_get("/api/agent/tasks", {"cluster": CLUSTER_NAME, "token": AGENT_TOKEN})
+            if pending_result:
+                api_post(
+                    f"/api/agent/tasks/{pending_result['id']}/result",
+                    {"status": pending_result["status"], "logs": pending_result["logs"]},
+                )
+                print(f"reported task result id={pending_result['id']} status={pending_result['status']}", flush=True)
+                pending_result = None
+                continue
+            result = api_get("/api/agent/tasks", {"cluster": CLUSTER_NAME})
             task = result.get("task")
             if task:
                 status, logs = execute_task(task)
+                pending_result = {"id": task["id"], "status": status, "logs": logs}
                 api_post(f"/api/agent/tasks/{task['id']}/result", {"status": status, "logs": logs})
+                print(f"reported task result id={task['id']} status={status}", flush=True)
+                pending_result = None
             else:
                 time.sleep(POLL_SECONDS)
         except Exception as exc:
