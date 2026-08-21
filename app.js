@@ -94,6 +94,8 @@ const state = {
   filter: "all",
   detailLogFilter: "all",
   detailLogQuery: "",
+  detailTab: "overview",
+  detailExecutionId: "",
   search: "",
   view: "tasks",
 };
@@ -114,6 +116,8 @@ const secretView = document.getElementById("secretView");
 const userView = document.getElementById("userView");
 const accessView = document.getElementById("accessView");
 const auditView = document.getElementById("auditView");
+const taskDetailView = document.getElementById("taskDetailView");
+const taskDetailBody = document.getElementById("taskDetailBody");
 const taskRows = document.getElementById("taskRows");
 const detailPanel = document.getElementById("detailPanel");
 const taskSearch = document.getElementById("taskSearch");
@@ -575,6 +579,11 @@ function selectedExecutionForTask(taskId) {
   return executions.find((execution) => String(execution.taskId) === String(taskId));
 }
 
+function detailExecutionForTask(taskId) {
+  const focused = executions.find((execution) => String(execution.id) === String(state.detailExecutionId) && String(execution.taskId) === String(taskId));
+  return focused || selectedExecutionForTask(taskId);
+}
+
 function localDateTimeValue(date = new Date(Date.now() + 10 * 60 * 1000)) {
   const pad = (value) => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
@@ -719,7 +728,7 @@ function renderRows() {
           <span class="recent-log">${escapeHtml(latestLogMessage(selectedExecutionForTask(task.id)))}</span>
         </div>
         <div class="row-actions">
-          <button class="ghost-button" type="button" data-action="select" data-task-id="${task.id}">
+          <button class="ghost-button" type="button" data-action="detail" data-task-id="${task.id}">
             <i data-lucide="panel-right-open"></i>
             <span>详情</span>
           </button>
@@ -915,6 +924,301 @@ function renderDetail() {
       }
     </section>
 
+  `;
+  renderTaskDetailPage();
+}
+
+function taskExecutionHistory(taskId) {
+  return executions
+    .filter((execution) => String(execution.taskId) === String(taskId))
+    .sort((a, b) => String(b.id).localeCompare(String(a.id)));
+}
+
+function taskActionButtons(task) {
+  const latestExecution = executions.find(
+    (execution) => String(execution.taskId) === String(task.id) && ["queued", "building", "deploying", "running"].includes(execution.status),
+  );
+  return `
+    <div class="detail-action-bar">
+      <button class="ghost-button" type="button" data-detail-back>
+        <i data-lucide="arrow-left"></i>
+        <span>返回列表</span>
+      </button>
+      <button class="ghost-button" type="button" data-action="edit" data-task-id="${task.id}" ${hasPermission("task.create") ? "" : "disabled"}>
+        <i data-lucide="square-pen"></i>
+        <span>编辑任务</span>
+      </button>
+      <button class="primary-button" type="button" data-action="run" data-task-id="${task.id}" ${hasPermission("task.deploy") ? "" : "disabled"}>
+        <i data-lucide="rocket"></i>
+        <span>发布</span>
+      </button>
+      <button class="ghost-button" type="button" data-action="schedule" data-task-id="${task.id}" ${hasPermission("task.deploy") ? "" : "disabled"}>
+        <i data-lucide="clock"></i>
+        <span>定时</span>
+      </button>
+      ${
+        latestExecution
+          ? `<button class="ghost-button danger-action" type="button" data-execution-cancel="${latestExecution.id}" ${hasPermission("task.deploy") ? "" : "disabled"}>
+              <i data-lucide="circle-stop"></i>
+              <span>取消发布</span>
+            </button>`
+          : `<button class="ghost-button danger-action" type="button" data-action="delete" data-task-id="${task.id}" ${hasPermission("task.create") ? "" : "disabled"}>
+              <i data-lucide="trash-2"></i>
+              <span>删除</span>
+            </button>`
+      }
+    </div>
+  `;
+}
+
+function renderDetailTabs() {
+  const tabs = [
+    ["overview", "概览", "layout-dashboard"],
+    ["logs", "构建日志", "scroll-text"],
+    ["config", "配置", "settings-2"],
+    ["clusters", "集群", "network"],
+    ["history", "执行历史", "history"],
+  ];
+  return `
+    <div class="detail-tabs" role="tablist" aria-label="任务详情标签">
+      ${tabs
+        .map(
+          ([key, label, icon]) => `
+          <button class="detail-tab ${state.detailTab === key ? "active" : ""}" type="button" data-detail-tab="${key}" role="tab" aria-selected="${state.detailTab === key}">
+            <i data-lucide="${icon}"></i>
+            <span>${label}</span>
+          </button>
+        `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderTaskDetailPage() {
+  if (!taskDetailBody) return;
+  const task = tasks.find((item) => String(item.id) === String(state.selectedId));
+  if (!task) {
+    taskDetailBody.innerHTML = `
+      <section class="task-detail-shell">
+        <div class="empty-state compact">
+          <strong>没有选中的任务</strong>
+          <span>从任务列表点击详情后，会进入独立任务详情页。</span>
+          <button class="ghost-button" type="button" data-detail-back>
+            <i data-lucide="arrow-left"></i>
+            <span>返回任务列表</span>
+          </button>
+        </div>
+      </section>
+    `;
+    return;
+  }
+
+  const latestExecution = selectedExecutionForTask(task.id);
+  const focusedExecution = detailExecutionForTask(task.id);
+  const history = taskExecutionHistory(task.id);
+  const activeSchedule = activeScheduleForTask(task.id);
+  const tab = state.detailTab || "overview";
+
+  taskDetailBody.innerHTML = `
+    <section class="task-detail-shell">
+      <div class="task-detail-hero">
+        <div class="task-detail-identity">
+          <button class="icon-button" type="button" data-detail-back title="返回任务列表">
+            <i data-lucide="arrow-left"></i>
+          </button>
+          <div>
+            <div class="detail-eyebrow">
+              <span>${task.env}</span>
+              <span>${task.owner || "未设置负责人"}</span>
+              <span>${task.tag || "未设置标签"}</span>
+            </div>
+            <h2>${task.name}</h2>
+            <p>${task.repo}</p>
+          </div>
+        </div>
+        <div class="task-detail-status">
+          <span class="status-chip ${task.status}">${statusLabel(task.status)}</span>
+          <span>${task.lastBranch ? `最近发布 ${task.lastBranch}` : "发布时选择分支"}</span>
+        </div>
+      </div>
+
+      ${taskActionButtons(task)}
+      ${renderDetailTabs()}
+
+      <div class="detail-tab-panel">
+        ${tab === "overview" ? renderTaskOverviewTab(task, latestExecution, activeSchedule) : ""}
+        ${tab === "logs" ? renderTaskLogsTab(focusedExecution) : ""}
+        ${tab === "config" ? renderTaskConfigTab(task, activeSchedule) : ""}
+        ${tab === "clusters" ? renderTaskClustersTab(task, focusedExecution) : ""}
+        ${tab === "history" ? renderTaskHistoryTab(history) : ""}
+      </div>
+    </section>
+  `;
+}
+
+function renderTaskOverviewTab(task, latestExecution, activeSchedule) {
+  return `
+    <div class="detail-dashboard">
+      <section class="detail-section detail-card execution-focus">
+        <div class="section-title-row">
+          <h3>最近执行</h3>
+          <span class="status-chip ${latestExecution?.status || "pending"}">${latestExecution ? statusLabel(latestExecution.status) : "暂无执行"}</span>
+        </div>
+        ${
+          latestExecution
+            ? `
+              <div class="execution-head wide">
+                <div><span>执行 ID</span><strong>${latestExecution.id}</strong></div>
+                <div><span>分支</span><strong>${latestExecution.branch || "未记录"}</strong></div>
+                <div><span>阶段</span><strong>${latestExecution.stage || statusLabel(latestExecution.status)}</strong></div>
+                <div><span>镜像</span><strong>${latestExecution.image || "未生成"}</strong></div>
+              </div>
+              <div class="execution-snapshot">
+                <div><span>集群回执</span><strong>${clusterResultSummary(latestExecution)}</strong></div>
+                <div><span>最新日志</span><strong>${latestLogMessage(latestExecution)}</strong></div>
+              </div>
+              ${renderProgress(latestExecution)}
+              ${renderExecutionTimeline(latestExecution)}
+              ${renderExecutionSummary(latestExecution)}
+            `
+            : `<div class="empty-state compact"><strong>暂无执行记录</strong><span>点击发布后会显示构建和部署进度。</span></div>`
+        }
+      </section>
+
+      <section class="detail-section detail-card">
+        <h3>任务摘要</h3>
+        <div class="summary-cards">
+          <div><span>语言 / SDK</span><strong>${languageLabel(task.language)} / ${task.sdk}</strong></div>
+          <div><span>容器端口</span><strong>${task.containerPort}</strong></div>
+          <div><span>部署集群</span><strong>${task.clusters.length} 个</strong></div>
+          <div><span>定时发布</span><strong>${activeSchedule ? activeSchedule.scheduledAt : "未设置"}</strong></div>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderTaskLogsTab(latestExecution) {
+  return `
+    <section class="detail-section detail-card log-detail-card">
+      <div class="section-title-row">
+        <h3>构建与部署日志</h3>
+        <span class="muted">${latestExecution ? latestExecution.id : "暂无执行"}</span>
+      </div>
+      ${
+        latestExecution
+          ? renderLogViewer(latestExecution)
+          : `<div class="empty-state compact"><strong>暂无日志</strong><span>发布任务后，这里会展示拉代码、编译、打镜像、推送和 Agent 部署日志。</span></div>`
+      }
+    </section>
+  `;
+}
+
+function renderTaskConfigTab(task, activeSchedule) {
+  return `
+    <div class="config-detail-grid">
+      <section class="detail-section detail-card">
+        <h3>构建配置</h3>
+        <div class="kv-grid roomy">
+          <span>仓库</span><strong>${task.repo}</strong>
+          <span>最近分支</span><strong>${task.lastBranch || "未发布"}</strong>
+          <span>编译路径</span><strong>${task.workdir}</strong>
+          <span>制品路径</span><strong>${task.artifactPath || "自动识别"}</strong>
+          <span>Git 凭据</span><strong>${secretName(task.gitCredentialId)}</strong>
+          <span>语言</span><strong>${languageLabel(task.language)}</strong>
+          <span>SDK</span><strong>${task.sdk}</strong>
+          <span>命令</span><strong>${task.buildCommand}</strong>
+          <span>环境变量</span><strong>${buildEnvKeys(task.buildEnv).join("、") || "未设置"}</strong>
+          ${
+            task.language === "java"
+              ? `<span>Maven 私库</span><strong>${task.mavenRepoUrl || "未设置"}</strong>
+                 <span>覆盖仓库</span><strong>${task.mavenMirrorOf || "maven-public"}</strong>`
+              : ""
+          }
+        </div>
+      </section>
+
+      <section class="detail-section detail-card">
+        <h3>运行与通知</h3>
+        <div class="kv-grid roomy">
+          <span>容器端口</span><strong>${task.containerPort}</strong>
+          <span>Service</span><strong>${task.servicePort}</strong>
+          <span>副本</span><strong>${task.replicas}</strong>
+          <span>健康检查</span><strong>${task.healthPath || "未设置"}</strong>
+          <span>通知渠道</span><strong>${task.notify.channel}</strong>
+          <span>通知目标</span><strong>${task.notify.target || "未设置"}</strong>
+          <span>通知事件</span><strong>${task.notify.events.join("、") || "未设置"}</strong>
+          <span>定时发布</span><strong>${activeSchedule ? `${activeSchedule.scheduledAt} / ${activeSchedule.branch}` : "暂无待执行计划"}</strong>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderTaskClustersTab(task, latestExecution) {
+  const resultByCluster = new Map((latestExecution?.clusterResults || []).map((item) => [item.cluster, item]));
+  return `
+    <section class="detail-section detail-card">
+      <div class="section-title-row">
+        <h3>部署目标</h3>
+        <span class="muted">${task.clusters.length} 个集群</span>
+      </div>
+      <div class="cluster-list roomy">
+        ${
+          task.clusters.length
+            ? task.clusters
+                .map((cluster) => {
+                  const result = resultByCluster.get(cluster.name);
+                  const clusterConfig = clusters.find((item) => item.name === cluster.name);
+                  const pullSecretId = cluster.imagePullSecretId || clusterConfig?.imagePullSecretId;
+                  return `
+                    <div class="cluster-item detailed">
+                      <div>
+                        <strong>${cluster.name}</strong>
+                        <span>${cluster.namespace || "default"} · ${cluster.replicas} replicas · ${cluster.ingress || "未设置 Ingress"}</span>
+                        <span>镜像拉取秘钥：${secretName(pullSecretId)}</span>
+                        ${result?.message ? `<span>最近回执：${result.message}</span>` : ""}
+                      </div>
+                      <span class="status-chip ${result?.status || cluster.status || "pending"}">${statusLabel(result?.status || cluster.status || "pending")}</span>
+                    </div>
+                  `;
+                })
+                .join("")
+            : `<div class="empty-state compact"><strong>未绑定集群</strong><span>编辑任务后选择部署目标，发布时 Agent 才会收到部署指令。</span></div>`
+        }
+      </div>
+    </section>
+  `;
+}
+
+function renderTaskHistoryTab(history) {
+  return `
+    <section class="detail-section detail-card">
+      <div class="section-title-row">
+        <h3>执行历史</h3>
+        <span class="muted">${history.length} 条记录</span>
+      </div>
+      <div class="history-list">
+        ${
+          history.length
+            ? history
+                .map(
+                  (execution) => `
+                    <button class="history-item ${String(state.detailExecutionId) === String(execution.id) ? "active" : ""}" type="button" data-history-execution="${execution.id}">
+                      <div>
+                        <strong>${execution.branch || "未记录分支"}</strong>
+                        <span>${execution.id} · ${execution.stage || statusLabel(execution.status)} · ${clusterResultSummary(execution)}</span>
+                      </div>
+                      <span class="status-chip ${execution.status}">${statusLabel(execution.status)}</span>
+                    </button>
+                  `,
+                )
+                .join("")
+            : `<div class="empty-state compact"><strong>暂无执行历史</strong><span>任务发布后会保留最近执行记录，便于对比排查。</span></div>`
+        }
+      </div>
+    </section>
   `;
 }
 
@@ -2027,6 +2331,7 @@ function saveEditedUser(event) {
 
 const viewConfig = {
   tasks: { title: "发布任务", subtitle: "任务、集群、权限与审计" },
+  taskDetail: { title: "任务详情", subtitle: "发布进度、日志、配置、集群与历史" },
   clusters: { title: "集群管理", subtitle: "Agent 接入与部署目标", permission: "cluster.view" },
   templates: { title: "构建模板", subtitle: "语言、SDK 与默认构建命令", permission: "template.view" },
   channels: { title: "通知渠道", subtitle: "告警机器人、邮件与 Webhook", permission: "channel.view" },
@@ -2035,6 +2340,14 @@ const viewConfig = {
   access: { title: "角色权限", subtitle: "用户、角色与操作边界", permission: "rbac.view" },
   audit: { title: "权限审计", subtitle: "登录、发布与权限变更", permission: "audit.view" },
 };
+
+function openTaskDetail(taskId, tab = "overview") {
+  state.selectedId = taskId;
+  state.detailTab = tab;
+  state.detailLogQuery = "";
+  state.detailExecutionId = "";
+  setView("taskDetail");
+}
 
 function setView(view) {
   const config = viewConfig[view] || viewConfig.tasks;
@@ -2045,6 +2358,7 @@ function setView(view) {
 
   state.view = view;
   taskView.hidden = view !== "tasks";
+  taskDetailView.hidden = view !== "taskDetail";
   clusterView.hidden = view !== "clusters";
   templateView.hidden = view !== "templates";
   channelView.hidden = view !== "channels";
@@ -2053,7 +2367,7 @@ function setView(view) {
   accessView.hidden = view !== "access";
   auditView.hidden = view !== "audit";
 
-  const nextConfig = viewConfig[view];
+  const nextConfig = viewConfig[view] || viewConfig.tasks;
   pageTitle.textContent = nextConfig.title;
   pageSubtitle.textContent = nextConfig.subtitle;
   taskSearch.hidden = view !== "tasks";
@@ -2061,7 +2375,7 @@ function setView(view) {
   document.getElementById("openCreate").hidden = view !== "tasks";
 
   document.querySelectorAll(".nav-item").forEach((item) => {
-    item.classList.toggle("active", item.dataset.view === view);
+    item.classList.toggle("active", item.dataset.view === (view === "taskDetail" ? "tasks" : view));
   });
   render();
 }
@@ -2093,6 +2407,7 @@ function render() {
   renderMetrics();
   renderRows();
   renderDetail();
+  renderTaskDetailPage();
   renderClusterView();
   renderTemplateView();
   renderChannelView();
@@ -2198,9 +2513,11 @@ document.addEventListener("input", (event) => {
   if (logQuery) {
     state.detailLogQuery = logQuery.value;
     renderDetail();
+    renderTaskDetailPage();
     lucide.createIcons();
     window.setTimeout(() => {
-      const nextInput = detailPanel.querySelector("[data-log-query]");
+      const logScope = state.view === "taskDetail" ? taskDetailBody : detailPanel;
+      const nextInput = logScope?.querySelector("[data-log-query]");
       if (nextInput) {
         nextInput.focus();
         nextInput.setSelectionRange(nextInput.value.length, nextInput.value.length);
@@ -2269,6 +2586,33 @@ document.addEventListener("change", (event) => {
 });
 
 document.addEventListener("click", (event) => {
+  const detailBackButton = event.target.closest("[data-detail-back]");
+  if (detailBackButton) {
+    setView("tasks");
+    return;
+  }
+
+  const detailTabButton = event.target.closest("[data-detail-tab]");
+  if (detailTabButton) {
+    state.detailTab = detailTabButton.dataset.detailTab;
+    renderTaskDetailPage();
+    lucide.createIcons();
+    return;
+  }
+
+  const historyButton = event.target.closest("[data-history-execution]");
+  if (historyButton) {
+    const execution = executions.find((item) => String(item.id) === String(historyButton.dataset.historyExecution));
+    if (execution) {
+      state.selectedId = execution.taskId;
+      state.detailExecutionId = execution.id;
+      state.detailTab = "logs";
+      renderTaskDetailPage();
+      lucide.createIcons();
+    }
+    return;
+  }
+
   const userButton = event.target.closest("[data-user-action]");
   if (userButton) {
     openUserDialog(userButton.dataset.username, userButton.dataset.userAction);
@@ -2311,6 +2655,7 @@ document.addEventListener("click", (event) => {
   if (logFilterButton) {
     state.detailLogFilter = logFilterButton.dataset.logFilter;
     renderDetail();
+    renderTaskDetailPage();
     lucide.createIcons();
     return;
   }
@@ -2326,7 +2671,8 @@ document.addEventListener("click", (event) => {
 
   const logScrollButton = event.target.closest("[data-log-scroll]");
   if (logScrollButton) {
-    const logBox = detailPanel.querySelector(".rich-log");
+    const logScope = state.view === "taskDetail" ? taskDetailBody : detailPanel;
+    const logBox = logScope?.querySelector(".rich-log");
     if (logBox) logBox.scrollTop = logBox.scrollHeight;
     return;
   }
@@ -2337,6 +2683,10 @@ document.addEventListener("click", (event) => {
     const action = actionButton.dataset.action;
     const task = tasks.find((item) => String(item.id) === String(taskId));
     state.selectedId = task?.id || taskId;
+    if (action === "detail") {
+      openTaskDetail(taskId);
+      return;
+    }
     if (action === "edit") {
       openTaskEditor(taskId);
       return;

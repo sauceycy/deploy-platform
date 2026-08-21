@@ -135,7 +135,7 @@
             </div>
           </section>
 
-          <section class="content-grid">
+          <section class="content-grid task-list-grid">
             <div class="table-panel">
               <div class="panel-header">
                 <div class="segmented" role="tablist" aria-label="任务状态筛选">
@@ -168,8 +168,12 @@
               </div>
             </div>
 
-            <aside class="detail-panel" id="detailPanel" aria-label="任务详情"></aside>
+            <aside class="detail-panel list-detail-panel" id="detailPanel" aria-label="任务详情" hidden></aside>
           </section>
+        </section>
+
+        <section class="management-view" id="taskDetailView" hidden>
+          <div id="taskDetailBody"></div>
         </section>
 
         <section class="management-view" id="accessView" hidden>
