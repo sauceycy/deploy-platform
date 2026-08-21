@@ -232,14 +232,53 @@ async function loadPersistedState() {
     hydrateState(await response.json());
     return;
   } catch (error) {
-    const localState = window.localStorage.getItem(APP_STATE_KEY);
-    if (localState) hydrateState(JSON.parse(localState));
+    try {
+      const localState = window.localStorage.getItem(APP_STATE_KEY);
+      if (localState) hydrateState(JSON.parse(localState));
+    } catch {
+      window.localStorage.removeItem(APP_STATE_KEY);
+    }
+  }
+}
+
+function slimStateSnapshot(source = exportState()) {
+  return {
+    ...source,
+    auditLogs: (source.auditLogs || []).slice(0, 100),
+    executions: (source.executions || []).slice(0, 20).map((execution) => ({
+      ...execution,
+      logs: (execution.logs || []).slice(-5).map((log) => ({
+        time: log.time,
+        message: String(log.message || "").slice(0, 1000),
+      })),
+    })),
+    agentTasks: (source.agentTasks || []).slice(-50).map((task) => ({
+      id: task.id,
+      executionId: task.executionId,
+      taskId: task.taskId,
+      clusterName: task.clusterName,
+      status: task.status,
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
+      logs: (task.logs || []).slice(-3),
+    })),
+  };
+}
+
+function writeLocalState(nextState = exportState()) {
+  try {
+    window.localStorage.removeItem(APP_STATE_KEY);
+    window.localStorage.setItem(APP_STATE_KEY, JSON.stringify(slimStateSnapshot(nextState)));
+  } catch {
+    try {
+      window.localStorage.removeItem(APP_STATE_KEY);
+    } catch {}
   }
 }
 
 function persistState() {
   const payload = exportState();
-  window.localStorage.setItem(APP_STATE_KEY, JSON.stringify(payload));
+  writeLocalState(payload);
   fetch("/api/state", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -248,7 +287,7 @@ function persistState() {
 }
 
 function cacheStateSnapshot(nextState = exportState()) {
-  window.localStorage.setItem(APP_STATE_KEY, JSON.stringify(nextState));
+  writeLocalState(nextState);
 }
 
 function statusLabel(status) {
