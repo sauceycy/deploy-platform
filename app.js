@@ -91,6 +91,7 @@ const clusterDrafts = [];
 const clusterNodeDrafts = [];
 const APP_STATE_KEY = "deploy-platform-state";
 let refreshTimer = null;
+let stateLoadError = "";
 
 const state = {
   currentUser: null,
@@ -388,12 +389,14 @@ function hydrateState(nextState) {
 }
 
 async function loadPersistedState() {
+  stateLoadError = "";
   try {
     const response = await fetch("/api/state", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     hydrateState(await response.json());
     return;
   } catch (error) {
+    stateLoadError = error.message || "状态加载失败";
     try {
       const localState = window.localStorage.getItem(APP_STATE_KEY);
       if (localState) hydrateState(JSON.parse(localState));
@@ -1833,6 +1836,7 @@ function openDrawer() {
   if (!requirePermission("task.create")) return;
   drawerTitle.textContent = "创建发布任务";
   resetTaskForm();
+  drawer.inert = false;
   backdrop.hidden = false;
   drawer.classList.add("open");
   drawer.setAttribute("aria-hidden", "false");
@@ -1878,14 +1882,19 @@ function openTaskEditor(taskId) {
   taskForm.elements.notifySuccess.checked = task.notify?.events?.includes("发布成功") ?? false;
   clusterDrafts.splice(0, clusterDrafts.length, ...(task.clusters || []).map((cluster) => ({ ...cluster })));
   renderClusters();
+  drawer.inert = false;
   backdrop.hidden = false;
   drawer.classList.add("open");
   drawer.setAttribute("aria-hidden", "false");
 }
 
 function closeDrawer() {
+  if (drawer.contains(document.activeElement)) {
+    document.activeElement.blur();
+  }
   drawer.classList.remove("open");
   drawer.setAttribute("aria-hidden", "true");
+  drawer.inert = true;
   window.setTimeout(() => {
     backdrop.hidden = true;
   }, 180);
@@ -2898,17 +2907,40 @@ function syncAutoRefresh() {
   }
 }
 
-function login(event) {
+function localLogin(username, password) {
+  const user = users.find((item) => item.username === username && item.password === password);
+  if (!user) {
+    if (stateLoadError) return { error: `无法连接后端状态接口：${stateLoadError}` };
+    return { error: username === "admin" && password === "admin123" ? "默认 admin 密码可能已被修改，请使用当前密码" : "账号或密码不正确" };
+  }
+  return { user: { username: user.username, name: user.name, role: user.role } };
+}
+
+async function login(event) {
   event.preventDefault();
   const formData = new FormData(loginForm);
   const username = String(formData.get("username") || "").trim();
   const password = String(formData.get("password") || "");
-  const user = users.find((item) => item.username === username && item.password === password);
-  if (!user) {
-    loginError.textContent = username === "admin" && password === "admin123" ? "默认密码可能已被修改，请使用当前 admin 密码" : "账号或密码不正确";
+  let loginResult;
+  try {
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "登录失败");
+    hydrateState(result.state);
+    loginResult = { user: result.user };
+  } catch (error) {
+    loginResult = error.message === "Failed to fetch" ? localLogin(username, password) : { error: error.message };
+  }
+  if (!loginResult.user) {
+    loginError.textContent = loginResult.error || "登录失败";
     loginError.hidden = false;
     return;
   }
+  const user = loginResult.user;
   state.currentUser = { username: user.username, name: user.name, role: user.role };
   window.localStorage.setItem("deploy-platform-user", JSON.stringify(state.currentUser));
   loginError.hidden = true;

@@ -33,6 +33,7 @@ REGISTRY_URL = os.environ.get("REGISTRY_URL", "").rstrip("/")
 IMAGE_NAMESPACE = os.environ.get("IMAGE_NAMESPACE", "deploy-platform")
 REGISTRY_USERNAME = os.environ.get("REGISTRY_USERNAME", "")
 REGISTRY_PASSWORD = os.environ.get("REGISTRY_PASSWORD", "")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 AGENT_SHARED_TOKEN = os.environ.get("AGENT_SHARED_TOKEN", "dev-agent-token")
 AGENT_TASK_RETRY_SECONDS = int(os.environ.get("AGENT_TASK_RETRY_SECONDS", "300"))
 ACTIVE_STATUSES = {"queued", "building", "deploying", "running"}
@@ -186,6 +187,8 @@ def normalize_group_state(state):
         if not isinstance(user.get("organizationIds"), list) or not user.get("organizationIds"):
             user["organizationIds"] = ["default"]
         user["globalAccess"] = bool(user.get("globalAccess") or user.get("role") == "platform_admin")
+        if ADMIN_PASSWORD and user.get("username") == "admin":
+            user["password"] = ADMIN_PASSWORD
     for key in ("tasks", "clusters", "secrets"):
         for item in state.setdefault(key, []):
             item["organizationId"] = item.get("organizationId") or "default"
@@ -233,6 +236,9 @@ def preserve_existing_user_passwords(next_state):
     default_passwords = default_user_passwords()
     for user in next_state.get("users", []):
         username = user.get("username")
+        if ADMIN_PASSWORD and username == "admin":
+            user["password"] = ADMIN_PASSWORD
+            continue
         incoming_password = user.get("password")
         current_password = current_passwords.get(username)
         default_password = default_passwords.get(username)
@@ -338,6 +344,32 @@ def find_by_id(items, item_id):
 
 def find_user(state, username):
     return next((user for user in state.get("users", []) if user.get("username") == (username or "system")), None)
+
+
+def public_user(user):
+    return {
+        "username": user.get("username"),
+        "name": user.get("name") or user.get("username"),
+        "role": user.get("role") or "viewer",
+        "globalAccess": bool(user.get("globalAccess")),
+        "organizationIds": user_org_ids(user),
+    }
+
+
+def authenticate_user(username, password):
+    username = str(username or "").strip()
+    password = str(password or "")
+    if not username or not password:
+        raise ValueError("请输入账号和密码")
+    state = read_state()
+    user = find_user(state, username)
+    if not user:
+        raise ValueError("账号不存在")
+    if str(user.get("password") or "") != password:
+        if username == "admin" and password == "admin123":
+            raise ValueError("默认 admin 密码已不是 admin123，请使用当前密码；如需恢复可设置环境变量 ADMIN_PASSWORD=新密码 后重启")
+        raise ValueError("账号或密码不正确")
+    return public_user(user), state
 
 
 def user_groups(state, user):
@@ -1669,6 +1701,15 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/auth/login":
+            body = self.read_json_body()
+            try:
+                user, state = authenticate_user(body.get("username"), body.get("password"))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=401)
+                return
+            self.send_json({"user": user, "state": state})
+            return
         if parsed.path == "/api/tasks":
             body = self.read_json_body()
             try:
