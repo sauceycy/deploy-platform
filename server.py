@@ -911,6 +911,11 @@ def java_artifact_candidates(task, src_dir, app_dir):
     return sorted(set(candidates), key=sort_key)
 
 
+def dockerfile_env_value(value):
+    value = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
+
+
 def generate_dockerfile(task, app_dir, src_dir):
     existing = app_dir / "Dockerfile"
     if existing.exists():
@@ -925,8 +930,10 @@ def generate_dockerfile(task, app_dir, src_dir):
             target = task.get("artifactPath") or "target/*.jar 或 **/target/*.jar"
             raise RuntimeError(f"未找到 Java 构建产物: {target}")
         jar = jars[0].relative_to(src_dir).as_posix()
+        jvm_options = str(task.get("jvmOptions") or "").strip()
+        java_opts_line = f"ENV JAVA_OPTS={dockerfile_env_value(jvm_options)}\n" if jvm_options else "ENV JAVA_OPTS=\"\"\n"
         generated.write_text(
-            f"FROM {runtime_base(task)}\nWORKDIR /app\nCOPY {jar} app.jar\nEXPOSE {port}\nENTRYPOINT [\"java\",\"-jar\",\"/app/app.jar\"]\n",
+            f"FROM {runtime_base(task)}\nWORKDIR /app\nCOPY {jar} app.jar\n{java_opts_line}EXPOSE {port}\nENTRYPOINT [\"sh\",\"-c\",\"exec java $JAVA_OPTS -jar /app/app.jar\"]\n",
             encoding="utf-8",
         )
     elif language == "golang":
@@ -961,6 +968,13 @@ def create_manifest(task, target, image, pull_secret=None):
     health_path = task.get("healthPath") or "/"
     ingress_host = target.get("ingress") or ""
     image_pull_secret_block = ""
+    jvm_options = str(task.get("jvmOptions") or "").strip()
+    jvm_env_block = ""
+    if task.get("language") == "java" and jvm_options:
+        jvm_env_block = f"""          env:
+            - name: JAVA_OPTS
+              value: {json.dumps(jvm_options, ensure_ascii=False)}
+"""
     docs = []
     if pull_secret:
         secret_name = safe_name(f"{app}-{pull_secret.get('name') or 'registry'}-pull")
@@ -1004,7 +1018,7 @@ spec:
         - name: {app}
           image: {image}
           imagePullPolicy: Always
-          ports:
+{jvm_env_block}          ports:
             - containerPort: {container_port}
           readinessProbe:
             httpGet:
@@ -1384,6 +1398,7 @@ def normalize_task_payload(payload):
         "servicePort": int(payload.get("servicePort") or 80),
         "replicas": int(payload.get("replicas") or 1),
         "healthPath": str(payload.get("healthPath") or "").strip(),
+        "jvmOptions": str(payload.get("jvmOptions") or "").replace("\r", " ").replace("\n", " ").strip(),
         "clusters": normalized_clusters,
         "notify": {
             "channel": notify.get("channel") or "企业微信",

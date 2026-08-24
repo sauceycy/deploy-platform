@@ -1075,6 +1075,7 @@ function renderDetail() {
         <span>Service</span><strong>${task.servicePort}</strong>
         <span>副本</span><strong>${task.replicas}</strong>
         <span>健康检查</span><strong>${task.healthPath || "未设置"}</strong>
+        ${task.language === "java" ? `<span>JVM 参数</span><strong>${task.jvmOptions || "未设置"}</strong>` : ""}
       </div>
     </section>
 
@@ -1381,6 +1382,7 @@ function renderTaskConfigTab(task, activeSchedule) {
           <span>Service</span><strong>${task.servicePort}</strong>
           <span>副本</span><strong>${task.replicas}</strong>
           <span>健康检查</span><strong>${task.healthPath || "未设置"}</strong>
+          ${task.language === "java" ? `<span>JVM 参数</span><strong>${task.jvmOptions || "未设置"}</strong>` : ""}
           <span>通知渠道</span><strong>${task.notify.channel}</strong>
           <span>通知目标</span><strong>${task.notify.target || "未设置"}</strong>
           <span>通知事件</span><strong>${task.notify.events.join("、") || "未设置"}</strong>
@@ -1851,6 +1853,7 @@ function resetTaskForm() {
   taskForm.elements.buildEnv.value = "";
   taskForm.elements.mavenRepoUrl.value = "";
   taskForm.elements.mavenMirrorOf.value = "maven-public";
+  taskForm.elements.jvmOptions.value = "";
   renderGitCredentialOptions("");
   clusterDrafts.splice(0, clusterDrafts.length);
   updateSdkOptions("java", true);
@@ -1895,6 +1898,7 @@ function openTaskEditor(taskId) {
   taskForm.elements.buildEnv.value = task.buildEnv || "";
   taskForm.elements.mavenRepoUrl.value = task.mavenRepoUrl || "";
   taskForm.elements.mavenMirrorOf.value = task.mavenMirrorOf || "maven-public";
+  taskForm.elements.jvmOptions.value = task.jvmOptions || "";
   taskForm.elements.containerPort.value = task.containerPort || "";
   taskForm.elements.servicePort.value = task.servicePort || "";
   taskForm.elements.replicas.value = task.replicas || "";
@@ -2004,6 +2008,7 @@ function buildPreviewObject() {
       servicePort: Number(formValue("servicePort")),
       replicas: Number(formValue("replicas") || 1),
       healthPath: formValue("healthPath"),
+      jvmOptions: formValue("language") === "java" ? formValue("jvmOptions") : "",
     },
     clusters: clusterDrafts,
     notify: {
@@ -2043,6 +2048,7 @@ async function saveTask(event) {
     servicePort: preview.runtime.servicePort,
     replicas: preview.runtime.replicas,
     healthPath: preview.runtime.healthPath,
+    jvmOptions: preview.runtime.jvmOptions,
     clusters: preview.clusters.map((cluster) => ({ ...cluster, status: cluster.status || "success" })),
     notify: preview.notify,
   };

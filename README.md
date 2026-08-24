@@ -218,6 +218,14 @@ Git 凭据：选择 Git HTTPS Token
 
 Java 任务编译时会使用 Maven + Temurin JDK 构建镜像，例如 `jdk17` 会使用 `maven:3-eclipse-temurin-17` 执行 `mvn clean package -DskipTests`；最终运行镜像仍使用 Temurin JRE。
 
+Java 任务可以在「运行配置」填写「JVM 启动参数」，例如：
+
+```text
+-Xms512m -Xmx1024m -Dspring.profiles.active=test
+```
+
+平台自动生成 Java Dockerfile 时会把它写入 `JAVA_OPTS`，并用 `java $JAVA_OPTS -jar /app/app.jar` 启动；发布到 Kubernetes 时也会在 Pod 环境变量里注入同样的 `JAVA_OPTS`。
+
 「编译工作路径」只决定编译命令在哪里执行；「JAR 包路径」决定自动生成 Dockerfile 时复制哪个产物，路径相对仓库根目录，支持通配符。多模块 Maven 项目可以这样配置：
 
 ```text
