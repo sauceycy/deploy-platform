@@ -92,6 +92,7 @@ const clusterNodeDrafts = [];
 const APP_STATE_KEY = "deploy-platform-state";
 const APP_USER_KEY = "deploy-platform-user";
 const APP_VIEW_KEY = "deploy-platform-view";
+const STATE_SAVE_TIMEOUT_MS = 20000;
 let refreshTimer = null;
 let stateLoadError = "";
 let pendingStateWrites = 0;
