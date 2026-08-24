@@ -90,6 +90,8 @@ const platformSettings = { registrySecretId: "", imageNamespace: "deploy-platfor
 const clusterDrafts = [];
 const clusterNodeDrafts = [];
 const APP_STATE_KEY = "deploy-platform-state";
+const APP_USER_KEY = "deploy-platform-user";
+const APP_VIEW_KEY = "deploy-platform-view";
 let refreshTimer = null;
 let stateLoadError = "";
 
@@ -441,22 +443,40 @@ function writeLocalState(nextState = exportState()) {
   }
 }
 
-function persistState() {
+async function persistState() {
   const payload = exportState();
   writeLocalState(payload);
-  fetch("/api/state", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ actor: state.currentUser?.username || "system", state: payload }),
-  })
-    .then(async (response) => {
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error || "配置保存失败");
-    })
-    .catch((error) => {
-      window.alert(error.message);
-      refreshRemoteState();
+  try {
+    const response = await fetch("/api/state", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ actor: state.currentUser?.username || "system", state: payload }),
     });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "配置保存失败");
+    return true;
+  } catch (error) {
+    window.alert(error.message);
+    await refreshRemoteState();
+    return false;
+  }
+}
+
+async function saveStateAndRender() {
+  const saved = await persistState();
+  if (saved) render();
+  return saved;
+}
+
+async function postJson(url, payload, method = "POST") {
+  const response = await fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || "请求失败");
+  return result;
 }
 
 function cacheStateSnapshot(nextState = exportState()) {
@@ -1710,6 +1730,16 @@ function renderPlatformSettings() {
 function renderUserView() {
   const userBody = document.getElementById("userBody");
   const visibleUsers = hasGlobalAccess() ? users : users.filter((user) => (user.organizationIds || []).some((id) => currentUserOrgIds().includes(String(id))));
+  const roleSelect = document.getElementById("newUserRole");
+  if (!userCreateDialog.open) {
+    roleSelect.innerHTML = roleOptions("developer");
+    renderUserGroupChecks(newUserOrgList, ["default"]);
+  }
+  if (!userDialog.open) document.getElementById("editUserRole").innerHTML = roleOptions();
+  if (visibleUsers.length === 0) {
+    userBody.innerHTML = emptyState("暂无用户");
+    return;
+  }
   userBody.innerHTML = visibleUsers
     .map(
       (user) => `
@@ -1719,7 +1749,7 @@ function renderUserView() {
           <span>${user.username} · ${(user.organizationIds || ["default"]).map(organizationName).join("、")} ${user.globalAccess ? "· 全局组" : ""}</span>
         </div>
         <div class="row-actions">
-          <span class="role-chip">${roles[user.role].label}</span>
+          <span class="role-chip">${roles[user.role]?.label || user.role || "未分配角色"}</span>
           <button class="ghost-button" type="button" data-user-action="edit" data-username="${user.username}" ${hasPermission("user.manage") ? "" : "disabled"}>
             <i data-lucide="square-pen"></i>
             <span>编辑</span>
@@ -1733,11 +1763,6 @@ function renderUserView() {
     `,
     )
     .join("");
-
-  const roleSelect = document.getElementById("newUserRole");
-  roleSelect.innerHTML = roleOptions("developer");
-  document.getElementById("editUserRole").innerHTML = roleOptions();
-  renderUserGroupChecks(newUserOrgList, ["default"]);
 }
 
 function renderAuditView() {
@@ -2653,39 +2678,53 @@ function deleteSecret(secretId) {
   persistState();
 }
 
-function saveUser(event) {
+async function saveUser(event) {
   event.preventDefault();
   if (!requirePermission("user.manage")) return;
   const form = event.currentTarget;
+  const submitter = event.submitter;
+  if (submitter) submitter.disabled = true;
   const formData = new FormData(form);
-  const username = formData.get("username");
+  const username = String(formData.get("username") || "").trim();
+  const password = String(formData.get("password") || "");
+  const displayName = String(formData.get("name") || "").trim();
+  if (!username || !password || !displayName) {
+    window.alert("请填写账号、姓名和初始密码");
+    if (submitter) submitter.disabled = false;
+    return;
+  }
   if (users.some((user) => user.username === username)) {
     window.alert("账号已存在");
+    if (submitter) submitter.disabled = false;
     return;
   }
   const globalAccess = hasGlobalAccess() && Boolean(formData.get("globalAccess"));
   const organizationIds = collectUserGroupIds(newUserOrgList);
   if (!canAssignUserAccess(globalAccess, organizationIds)) {
     window.alert("当前用户组无权为该用户分配这些访问范围");
+    if (submitter) submitter.disabled = false;
     return;
   }
   const user = {
     username,
-    name: formData.get("name"),
-    password: formData.get("password"),
+    name: displayName,
+    password,
     role: formData.get("role"),
     globalAccess,
     organizationIds,
   };
   users.push(user);
   addAudit("添加用户", username);
-  form.reset();
-  render();
-  persistState();
-  closeCreateDialog(userCreateDialog, form);
+  const saved = await persistState();
+  if (saved) {
+    form.reset();
+    closeCreateDialog(userCreateDialog, form);
+    render();
+  }
+  if (submitter) submitter.disabled = false;
 }
 
-function saveOrganization(event) {
+async function saveOrganization(event) {
   event.preventDefault();
   if (!requirePermission("org.manage")) return;
   if (!hasGlobalAccess()) {
@@ -2708,9 +2747,11 @@ function saveOrganization(event) {
     globalAccess: false,
   });
   addAudit("添加用户组", name);
-  event.currentTarget.reset();
-  render();
-  persistState();
+  const saved = await persistState();
+  if (saved) {
+    event.currentTarget.reset();
+    render();
+  }
 }
 
 function openUserDialog(username, mode = "edit") {
@@ -2744,16 +2785,22 @@ function closeUserDialog() {
   editUserForm.reset();
 }
 
-function saveEditedUser(event) {
+async function saveEditedUser(event) {
   event.preventDefault();
   if (!requirePermission("user.manage")) return;
+  const submitter = event.submitter;
+  if (submitter) submitter.disabled = true;
 
   const formData = new FormData(editUserForm);
   const username = formData.get("username");
   const user = users.find((item) => item.username === username);
-  if (!user) return;
+  if (!user) {
+    if (submitter) submitter.disabled = false;
+    return;
+  }
   if (!canAccessUser(user)) {
     window.alert("当前用户组无权编辑该用户");
+    if (submitter) submitter.disabled = false;
     return;
   }
 
@@ -2761,6 +2808,7 @@ function saveEditedUser(event) {
   const platformAdminCount = users.filter((item) => item.role === "platform_admin").length;
   if (user.role === "platform_admin" && nextRole !== "platform_admin" && platformAdminCount === 1) {
     window.alert("至少需要保留一个平台管理员");
+    if (submitter) submitter.disabled = false;
     return;
   }
 
@@ -2770,6 +2818,7 @@ function saveEditedUser(event) {
   const nextOrganizationIds = collectUserGroupIds(editUserOrgList);
   if (!canAssignUserAccess(nextGlobalAccess, nextOrganizationIds)) {
     window.alert("当前用户组无权为该用户分配这些访问范围");
+    if (submitter) submitter.disabled = false;
     return;
   }
   const changedRole = user.role !== nextRole;
@@ -2786,15 +2835,18 @@ function saveEditedUser(event) {
   if (state.currentUser.username === user.username) {
     state.currentUser.name = user.name;
     state.currentUser.role = user.role;
-    window.localStorage.setItem("deploy-platform-user", JSON.stringify(state.currentUser));
+    window.localStorage.setItem(APP_USER_KEY, JSON.stringify(state.currentUser));
   }
 
   if (changedName || changedRole || changedAccess) addAudit("编辑用户", username);
   if (changedPassword) addAudit("重置密码", username);
 
-  closeUserDialog();
-  render();
-  persistState();
+  const saved = await persistState();
+  if (saved) {
+    closeUserDialog();
+    render();
+  }
+  if (submitter) submitter.disabled = false;
 }
 
 const viewConfig = {
@@ -2826,6 +2878,7 @@ function setView(view) {
   }
 
   state.view = view;
+  window.localStorage.setItem(APP_VIEW_KEY, view);
   taskView.hidden = view !== "tasks";
   taskDetailView.hidden = view !== "taskDetail";
   clusterView.hidden = view !== "clusters";
@@ -2942,13 +2995,33 @@ async function login(event) {
   }
   const user = loginResult.user;
   state.currentUser = { username: user.username, name: user.name, role: user.role };
-  window.localStorage.setItem("deploy-platform-user", JSON.stringify(state.currentUser));
+  window.localStorage.setItem(APP_USER_KEY, JSON.stringify(state.currentUser));
   loginError.hidden = true;
-  setView("tasks");
+  setView(window.localStorage.getItem(APP_VIEW_KEY) || "tasks");
+}
+
+async function restoreSession(savedUser) {
+  if (!savedUser?.username) return false;
+  try {
+    const result = await postJson("/api/auth/session", { username: savedUser.username });
+    hydrateState(result.state);
+    const user = result.user;
+    state.currentUser = { username: user.username, name: user.name, role: user.role };
+    window.localStorage.setItem(APP_USER_KEY, JSON.stringify(state.currentUser));
+    return true;
+  } catch {
+    const user = users.find((item) => item.username === savedUser.username);
+    if (!user) {
+      window.localStorage.removeItem(APP_USER_KEY);
+      return false;
+    }
+    state.currentUser = { username: user.username, name: user.name, role: user.role };
+    return true;
+  }
 }
 
 function logout() {
-  window.localStorage.removeItem("deploy-platform-user");
+  window.localStorage.removeItem(APP_USER_KEY);
   state.currentUser = null;
   closeDrawer();
   renderAuth();
@@ -3290,18 +3363,17 @@ document.getElementById("addCluster").addEventListener("click", () => {
 
 async function init() {
   await loadPersistedState();
-  const savedUser = window.localStorage.getItem("deploy-platform-user");
+  const savedUser = window.localStorage.getItem(APP_USER_KEY);
+  let restored = false;
   if (savedUser) {
-    const parsedUser = JSON.parse(savedUser);
-    const user = users.find((item) => item.username === parsedUser.username);
-    if (user) {
-      state.currentUser = { username: user.username, name: user.name, role: user.role };
-    } else {
-      window.localStorage.removeItem("deploy-platform-user");
+    try {
+      restored = await restoreSession(JSON.parse(savedUser));
+    } catch {
+      window.localStorage.removeItem(APP_USER_KEY);
     }
   }
   updateSdkOptions(languageSelect.value);
-  setView("tasks");
+  setView(restored ? window.localStorage.getItem(APP_VIEW_KEY) || "tasks" : "tasks");
   render();
 }
 

@@ -372,6 +372,17 @@ def authenticate_user(username, password):
     return public_user(user), state
 
 
+def session_user(username):
+    username = str(username or "").strip()
+    if not username:
+        raise ValueError("登录状态已失效")
+    state = read_state()
+    user = find_user(state, username)
+    if not user:
+        raise ValueError("用户不存在，请重新登录")
+    return public_user(user), state
+
+
 def user_groups(state, user):
     ids = [str(item) for item in (user or {}).get("organizationIds", ["default"])]
     return [group for group in state.get("organizations", []) if str(group.get("id")) in ids]
@@ -1705,6 +1716,15 @@ class Handler(SimpleHTTPRequestHandler):
             body = self.read_json_body()
             try:
                 user, state = authenticate_user(body.get("username"), body.get("password"))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=401)
+                return
+            self.send_json({"user": user, "state": state})
+            return
+        if parsed.path == "/api/auth/session":
+            body = self.read_json_body()
+            try:
+                user, state = session_user(body.get("username"))
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=401)
                 return
