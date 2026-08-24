@@ -37,6 +37,7 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 RESET_ADMIN_PASSWORD = os.environ.get("RESET_ADMIN_PASSWORD", "false").lower() == "true"
 AGENT_SHARED_TOKEN = os.environ.get("AGENT_SHARED_TOKEN", "dev-agent-token")
 AGENT_TASK_RETRY_SECONDS = int(os.environ.get("AGENT_TASK_RETRY_SECONDS", "300"))
+WAITING_DEPLOY_RECOVERY_SECONDS = int(os.environ.get("WAITING_DEPLOY_RECOVERY_SECONDS", "45"))
 ACTIVE_STATUSES = {"queued", "building", "deploying", "running"}
 CLEAN_WORKSPACE_AFTER_BUILD = os.environ.get("CLEAN_WORKSPACE_AFTER_BUILD", "true").lower() != "false"
 CLEAN_LOCAL_IMAGE_AFTER_BUILD = os.environ.get("CLEAN_LOCAL_IMAGE_AFTER_BUILD", "true").lower() != "false"
@@ -1261,6 +1262,7 @@ def build_and_dispatch(execution_id):
         if not task.get("clusters"):
             raise RuntimeError("任务未绑定部署集群")
         ensure_execution_active(execution_id)
+        set_execution_status(execution_id, "building", "准备下发 Agent 发布任务", image=image, stage="等待部署", progress=86)
         dispatch_agent_tasks(execution_id, task, image)
         send_notification(task, "BUILD_SUCCESS", f"镜像已构建: {image}")
     except Exception as exc:
@@ -1609,10 +1611,44 @@ def trigger_due_schedules():
         threading.Thread(target=build_and_dispatch, args=(execution_id,), daemon=True).start()
 
 
+def execution_has_agent_tasks(state, execution_id):
+    return any(str(item.get("executionId")) == str(execution_id) for item in state.get("agentTasks", []))
+
+
+def recover_waiting_deployments():
+    recovery_items = []
+
+    def collect(state):
+        now = datetime.now()
+        for execution in state.get("executions", []):
+            if execution.get("status") != "building":
+                continue
+            if execution.get("stage") != "等待部署" or int(execution.get("progress") or 0) < 84:
+                continue
+            if not execution.get("image") or execution_has_agent_tasks(state, execution.get("id")):
+                continue
+            updated_at = parse_time_text(execution.get("updatedAt") or execution.get("createdAt"))
+            if updated_at and (now - updated_at).total_seconds() < WAITING_DEPLOY_RECOVERY_SECONDS:
+                continue
+            task = find_by_id(state.get("tasks", []), execution.get("taskId"))
+            if task:
+                recovery_items.append((execution.get("id"), copy.deepcopy(task), execution.get("image")))
+        return None
+
+    mutate_state(collect)
+    for execution_id, task, image in recovery_items:
+        try:
+            append_log(execution_id, "检测到等待部署阶段未创建 Agent 任务，自动补发")
+            dispatch_agent_tasks(execution_id, task, image)
+        except Exception as exc:
+            set_execution_status(execution_id, "failed", f"Agent 发布任务补发失败: {exc}", stage="部署异常", progress=100)
+
+
 def scheduler_loop():
     while True:
         try:
             trigger_due_schedules()
+            recover_waiting_deployments()
         except Exception as exc:
             print(f"schedule loop error: {exc}", flush=True)
         time.sleep(15)
