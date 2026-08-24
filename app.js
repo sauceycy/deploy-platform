@@ -821,7 +821,7 @@ function secretTypeLabel(type) {
 function secretNamePlaceholder(type) {
   return {
     git_https_token: "例如 trade-github-readonly",
-    git_ssh_key: "例如 trade-git-ssh-key",
+    git_ssh_key: "例如 trade-gitlab-ssh-key",
     registry: "例如 aliyun-acr-pull",
     agent_token: "例如 trade-test-agent-token",
     webhook: "例如 deploy-alert-webhook",
@@ -833,8 +833,37 @@ function secretNameExists(name, excludeId = "") {
   return secrets.some((item) => String(item.id) !== String(excludeId) && String(item.name || "").trim().toLowerCase() === normalized);
 }
 
+function syncSecretFieldHints(form, type) {
+  if (!form?.elements) return;
+  const hints = {
+    git_https_token: {
+      target: "github.com / gitlab.example.com",
+      username: "GitLab 可填 oauth2 或用户名",
+      secret: "粘贴 GitLab Project Access Token / Personal Access Token",
+      knownHosts: "HTTPS Token 不需要填写",
+    },
+    git_ssh_key: {
+      target: "gitlab.example.com 或 gitlab.example.com:2222",
+      username: "通常填 git",
+      secret: "粘贴完整私钥，例如 -----BEGIN OPENSSH PRIVATE KEY-----",
+      knownHosts: "ssh-keyscan gitlab.example.com 或 ssh-keyscan -p 2222 gitlab.example.com",
+    },
+    registry: {
+      target: "harbor.example.com / registry.example.com",
+      username: "镜像仓库用户名或机器人账号",
+      secret: "镜像仓库密码或访问令牌",
+      knownHosts: "镜像仓库不需要填写",
+    },
+  }[type] || {};
+  if (form.elements.target) form.elements.target.placeholder = hints.target || "地址或用途";
+  if (form.elements.username) form.elements.username.placeholder = hints.username || "用户名";
+  if (form.elements.secret) form.elements.secret.placeholder = hints.secret || "Token、私钥或密码";
+  if (form.elements.knownHosts) form.elements.knownHosts.placeholder = hints.knownHosts || "";
+}
+
 function syncSecretNamePlaceholder() {
   if (secretNameInput) secretNameInput.placeholder = secretNamePlaceholder(secretTypeSelect.value);
+  syncSecretFieldHints(secretForm, secretTypeSelect.value);
 }
 
 function gitCredentialOptions(selectedId = "") {
@@ -2581,19 +2610,23 @@ function savePlatformSettings(event) {
   persistState();
 }
 
-function saveSecret(event) {
+async function saveSecret(event) {
   event.preventDefault();
   if (!requirePermission("secret.manage")) return;
   const form = event.currentTarget;
+  const submitter = event.submitter;
+  if (submitter) submitter.disabled = true;
   const formData = new FormData(form);
   const name = String(formData.get("name") || "").trim();
   const organizationId = formData.get("organizationId") || visibleOrganizations()[0]?.id || "default";
   if (!canAccessOrg(organizationId)) {
     window.alert("当前用户组无权添加该秘钥到目标用户组");
+    if (submitter) submitter.disabled = false;
     return;
   }
   if (secretNameExists(name)) {
     window.alert(`秘钥名称 ${name} 已存在，请换一个更明确的名称`);
+    if (submitter) submitter.disabled = false;
     return;
   }
   const secret = {
@@ -2609,10 +2642,13 @@ function saveSecret(event) {
   };
   secrets.unshift(secret);
   addAudit("添加秘钥", `${secret.name} / ${secretTypeLabel(secret.type)}`);
-  form.reset();
-  render();
-  persistState();
-  closeCreateDialog(secretCreateDialog, form);
+  const saved = await persistState();
+  if (saved) {
+    form.reset();
+    render();
+    closeCreateDialog(secretCreateDialog, form);
+  }
+  if (submitter) submitter.disabled = false;
 }
 
 function openSecretDialog(secretId) {
@@ -2633,6 +2669,7 @@ function openSecretDialog(secretId) {
   editSecretForm.elements.secret.value = "";
   editSecretForm.elements.knownHosts.value = secret.knownHosts || "";
   editSecretForm.elements.name.placeholder = secretNamePlaceholder(secret.type);
+  syncSecretFieldHints(editSecretForm, secret.type || "git_https_token");
   secretDialog.showModal();
 }
 
@@ -2641,22 +2678,30 @@ function closeSecretDialog() {
   editSecretForm.reset();
 }
 
-function saveEditedSecret(event) {
+async function saveEditedSecret(event) {
   event.preventDefault();
   if (!requirePermission("secret.manage")) return;
+  const submitter = event.submitter;
+  if (submitter) submitter.disabled = true;
   const secret = secrets.find((item) => String(item.id) === String(editSecretForm.elements.id.value));
-  if (!secret) return;
+  if (!secret) {
+    if (submitter) submitter.disabled = false;
+    return;
+  }
   if (!canOperateAsset("secret.manage", secret)) {
     window.alert("当前用户组无权保存该秘钥");
+    if (submitter) submitter.disabled = false;
     return;
   }
   if (!canAccessOrg(editSecretForm.elements.organizationId.value || "default")) {
     window.alert("当前用户组无权移动该秘钥到目标用户组");
+    if (submitter) submitter.disabled = false;
     return;
   }
   const nextName = editSecretForm.elements.name.value.trim();
   if (secretNameExists(nextName, secret.id)) {
     window.alert(`秘钥名称 ${nextName} 已存在，请换一个更明确的名称`);
+    if (submitter) submitter.disabled = false;
     return;
   }
   Object.assign(secret, {
@@ -2672,9 +2717,12 @@ function saveEditedSecret(event) {
     secret.secret = editSecretForm.elements.secret.value;
   }
   addAudit("编辑秘钥", `${secret.name} / ${secretTypeLabel(secret.type)}`);
-  render();
-  persistState();
-  closeSecretDialog();
+  const saved = await persistState();
+  if (saved) {
+    render();
+    closeSecretDialog();
+  }
+  if (submitter) submitter.disabled = false;
 }
 
 function deleteSecret(secretId) {
@@ -3183,6 +3231,7 @@ languageSelect.addEventListener("change", (event) => {
 secretTypeSelect.addEventListener("change", syncSecretNamePlaceholder);
 document.getElementById("editSecretType").addEventListener("change", (event) => {
   editSecretForm.elements.name.placeholder = secretNamePlaceholder(event.target.value);
+  syncSecretFieldHints(editSecretForm, event.target.value);
 });
 
 taskSearch.addEventListener("input", (event) => {

@@ -213,6 +213,31 @@ dev-agent-token
 ssh-keyscan github.com
 ```
 
+自建 GitLab SSH 私钥配置方法：
+
+1. 在 GitLab 项目或用户里添加 Deploy Key / SSH Key，并确认有 `read_repository` 权限。
+2. 在「秘钥管理」新增 `Git SSH 私钥`。
+3. `地址 / 用途` 填 GitLab 主机，例如 `gitlab.example.com`；非 22 端口可填 `gitlab.example.com:2222`。
+4. `用户名` 通常填 `git`。
+5. `秘钥内容` 粘贴完整私钥，包括 `-----BEGIN OPENSSH PRIVATE KEY-----` 和 `-----END OPENSSH PRIVATE KEY-----`。
+6. `known_hosts` 填目标 GitLab 主机指纹：
+
+```bash
+ssh-keyscan gitlab.example.com
+# 非 22 端口：
+ssh-keyscan -p 2222 gitlab.example.com
+```
+
+任务里的仓库地址建议这样填：
+
+```text
+git@gitlab.example.com:group/project.git
+# 非 22 端口：
+ssh://git@gitlab.example.com:2222/group/project.git
+```
+
+如果保存任务时报 `Git 凭据不存在`，通常是任务绑定的秘钥被删除、没有保存成功，或该秘钥属于其他用户组导致当前用户不可见。请回到「秘钥管理」确认秘钥存在，然后重新编辑任务，在 `Git 凭据` 下拉框重新选择。
+
 GitHub HTTPS Token 示例：
 
 ```text

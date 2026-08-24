@@ -731,11 +731,11 @@
           </label>
           <label>
             <span>地址 / 用途</span>
-            <input name="target" placeholder="github.com / harbor.example.com / 镜像拉取域名" />
+            <input name="target" placeholder="GitLab 主机、github.com、镜像仓库域名" />
           </label>
           <label>
             <span>用户名</span>
-            <input name="username" placeholder="HTTPS Token 可填 oauth2 或用户名" />
+            <input name="username" placeholder="HTTPS Token 填用户名；SSH 通常填 git" />
           </label>
           <label class="wide-field">
             <span>秘钥内容</span>
@@ -743,8 +743,9 @@
           </label>
           <label class="wide-field">
             <span>known_hosts</span>
-            <textarea name="knownHosts" rows="4" placeholder="SSH 私钥可选，建议填 ssh-keyscan github.com 的输出"></textarea>
+            <textarea name="knownHosts" rows="4" placeholder="自建 GitLab 建议填：ssh-keyscan -p 22 gitlab.example.com 的输出"></textarea>
           </label>
+          <p class="form-hint wide-field">自建 GitLab SSH 仓库地址通常是 git@gitlab.example.com:group/project.git；非 22 端口建议使用 ssh://git@gitlab.example.com:2222/group/project.git。</p>
         </div>
         <div class="drawer-actions">
           <button class="ghost-button" type="button" data-dialog-close="secretCreateDialog">
@@ -889,11 +890,11 @@
         </label>
         <label>
           <span>地址 / 用途</span>
-          <input name="target" />
+          <input name="target" placeholder="GitLab 主机、github.com、镜像仓库域名" />
         </label>
         <label>
           <span>用户名</span>
-          <input name="username" />
+          <input name="username" placeholder="HTTPS Token 填用户名；SSH 通常填 git" />
         </label>
         <label>
           <span>秘钥内容</span>
@@ -901,8 +902,9 @@
         </label>
         <label>
           <span>known_hosts</span>
-          <textarea name="knownHosts" rows="4"></textarea>
+          <textarea name="knownHosts" rows="4" placeholder="自建 GitLab 建议填：ssh-keyscan -p 22 gitlab.example.com 的输出"></textarea>
         </label>
+        <p class="form-hint">自建 GitLab SSH 仓库地址通常是 git@gitlab.example.com:group/project.git；非 22 端口建议使用 ssh://git@gitlab.example.com:2222/group/project.git。</p>
         <div class="drawer-actions">
           <button class="ghost-button" type="button" id="cancelSecretEdit">
             <span>取消</span>

@@ -915,6 +915,20 @@ def secret_by_id(state, secret_id):
     return find_by_id(state.get("secrets", []), secret_id)
 
 
+def git_secret_by_id(state, secret_id):
+    secret_id = str(secret_id or "").strip()
+    if not secret_id:
+        return None
+    secret = secret_by_id(state, secret_id)
+    if not secret:
+        raise RuntimeError(f"Git 凭据不存在或已被删除: {secret_id}。请到秘钥管理确认已保存，并在任务的 Git 凭据下拉框重新选择。")
+    if secret.get("type") not in {"git_https_token", "git_ssh_key"}:
+        raise RuntimeError(f"Git 凭据类型不正确: {secret.get('name') or secret_id}，请选择 Git HTTPS Token 或 Git SSH 私钥。")
+    if not secret.get("secret"):
+        raise RuntimeError(f"Git 凭据 {secret.get('name') or secret_id} 缺少秘钥内容。")
+    return secret
+
+
 def authenticated_repo_url(repo, secret):
     if not secret or secret.get("type") != "git_https_token":
         return repo
@@ -960,7 +974,7 @@ def clone_environment(work_dir, secret):
 
 def list_repository_branches(repo, secret_id=None):
     state = read_state()
-    secret = secret_by_id(state, secret_id)
+    secret = git_secret_by_id(state, secret_id) if secret_id else None
     work_dir = WORKSPACE_DIR / f"branch-check-{uuid.uuid4().hex[:8]}"
     work_dir.parent.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -1283,7 +1297,7 @@ def build_and_dispatch(execution_id):
         if not branch:
             raise RuntimeError("未选择发布分支")
         ensure_execution_active(execution_id)
-        git_secret = secret_by_id(state, task.get("gitCredentialId"))
+        git_secret = git_secret_by_id(state, task.get("gitCredentialId")) if task.get("gitCredentialId") else None
         clone_repo = authenticated_repo_url(task["repo"], git_secret)
         clone_env = clone_environment(work_dir, git_secret)
         clone_cmd = ["git", "clone", "--depth", "1", "--branch", branch, clone_repo, str(src_dir)]
@@ -1547,11 +1561,9 @@ def save_task_config(task_id, payload, actor):
         if not user_can_access_asset(state, actor_user, task_payload):
             raise ValueError("当前用户组无权保存该任务")
         if task_payload.get("gitCredentialId"):
-            secret = find_by_id(state.get("secrets", []), task_payload.get("gitCredentialId"))
-            if not secret:
-                raise ValueError("Git 凭据不存在")
+            secret = git_secret_by_id(state, task_payload.get("gitCredentialId"))
             if not user_can_access_asset(state, actor_user, secret):
-                raise ValueError("当前用户组无权绑定该 Git 凭据")
+                raise ValueError(f"当前用户组无权绑定该 Git 凭据: {secret.get('name')}")
         for target in task_payload.get("clusters", []):
             cluster = next((item for item in state.get("clusters", []) if item.get("name") == target.get("name")), None)
             if cluster and not user_can_access_asset(state, actor_user, cluster):
