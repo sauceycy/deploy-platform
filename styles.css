@@ -112,12 +112,56 @@ svg {
   display: block;
 }
 
-.login-screen {
+.login-screen,
+.boot-screen {
   display: grid;
   min-height: 100vh;
   place-items: center;
   padding: 24px;
   background: var(--bg);
+}
+
+.boot-panel {
+  display: grid;
+  gap: 18px;
+  width: min(360px, 100%);
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.boot-panel .brand {
+  color: var(--text);
+}
+
+.boot-progress {
+  position: relative;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.boot-progress::after {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 42%;
+  border-radius: inherit;
+  background: var(--primary);
+  animation: boot-progress 1.15s ease-in-out infinite;
+  content: "";
+}
+
+@keyframes boot-progress {
+  0% {
+    transform: translateX(-120%);
+  }
+
+  100% {
+    transform: translateX(260%);
+  }
 }
 
 .login-panel {
@@ -2325,12 +2369,14 @@ pre {
 }
 
 @media (max-width: 540px) {
-  .login-screen {
+  .login-screen,
+  .boot-screen {
     padding: 12px;
   }
 
   .login-form,
-  .login-brand {
+  .login-brand,
+  .boot-panel {
     padding: 22px;
   }
 

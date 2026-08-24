@@ -110,6 +110,7 @@ const state = {
 };
 
 const loginScreen = document.getElementById("loginScreen");
+const bootScreen = document.getElementById("bootScreen");
 const loginForm = document.getElementById("loginForm");
 const loginError = document.getElementById("loginError");
 const appShell = document.getElementById("appShell");
@@ -2984,6 +2985,7 @@ function setView(view, options = {}) {
 
 function renderAuth() {
   const isAuthed = Boolean(state.currentUser);
+  if (bootScreen) bootScreen.hidden = true;
   loginScreen.hidden = isAuthed;
   appShell.hidden = !isAuthed;
   if (!isAuthed) return;

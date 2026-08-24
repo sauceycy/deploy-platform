@@ -8,7 +8,20 @@
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
   </head>
   <body>
-    <section class="login-screen" id="loginScreen">
+    <section class="boot-screen" id="bootScreen">
+      <div class="boot-panel">
+        <div class="brand">
+          <div class="brand-mark">CD</div>
+          <div>
+            <strong>Deploy Console</strong>
+            <span>正在恢复登录状态</span>
+          </div>
+        </div>
+        <div class="boot-progress" aria-hidden="true"></div>
+      </div>
+    </section>
+
+    <section class="login-screen" id="loginScreen" hidden>
       <div class="login-panel">
         <div class="brand login-brand">
           <div class="brand-mark">CD</div>
