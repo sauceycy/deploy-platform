@@ -21,21 +21,18 @@
           <h1>登录控制台</h1>
           <label>
             <span>账号</span>
-            <input name="username" autocomplete="username" value="admin" required />
+            <input name="username" autocomplete="username" required />
           </label>
           <label>
             <span>密码</span>
-            <input name="password" type="password" autocomplete="current-password" value="admin123" required />
+            <input name="password" type="password" autocomplete="current-password" required />
           </label>
           <p class="login-error" id="loginError" hidden>账号或密码不正确</p>
           <button class="primary-button" type="submit">
             <i data-lucide="log-in"></i>
             <span>登录</span>
           </button>
-          <div class="demo-accounts">
-            <strong>初始账号</strong>
-            <span>admin / admin123</span>
-          </div>
+          <p class="login-note">请使用平台管理员分配的账号登录。</p>
         </form>
       </div>
     </section>

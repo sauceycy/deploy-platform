@@ -34,6 +34,7 @@ IMAGE_NAMESPACE = os.environ.get("IMAGE_NAMESPACE", "deploy-platform")
 REGISTRY_USERNAME = os.environ.get("REGISTRY_USERNAME", "")
 REGISTRY_PASSWORD = os.environ.get("REGISTRY_PASSWORD", "")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+RESET_ADMIN_PASSWORD = os.environ.get("RESET_ADMIN_PASSWORD", "false").lower() == "true"
 AGENT_SHARED_TOKEN = os.environ.get("AGENT_SHARED_TOKEN", "dev-agent-token")
 AGENT_TASK_RETRY_SECONDS = int(os.environ.get("AGENT_TASK_RETRY_SECONDS", "300"))
 ACTIVE_STATUSES = {"queued", "building", "deploying", "running"}
@@ -134,6 +135,13 @@ def default_user_passwords():
     return {user.get("username"): user.get("password") for user in DEFAULT_STATE.get("users", [])}
 
 
+def seeded_admin_user():
+    user = copy.deepcopy(DEFAULT_STATE["users"][0])
+    if ADMIN_PASSWORD:
+        user["password"] = ADMIN_PASSWORD
+    return user
+
+
 def normalize_roles_state(state):
     roles = state.get("roles")
     if not isinstance(roles, dict):
@@ -175,19 +183,19 @@ def normalize_group_state(state):
     if not isinstance(users, list):
         state["users"] = users = []
     if not users:
-        users.append(copy.deepcopy(DEFAULT_STATE["users"][0]))
+        users.append(seeded_admin_user())
     if not any(user.get("role") == "platform_admin" for user in users):
         admin = next((user for user in users if user.get("username") == "admin"), None)
         if admin:
             admin["role"] = "platform_admin"
             admin["globalAccess"] = True
         else:
-            users.insert(0, copy.deepcopy(DEFAULT_STATE["users"][0]))
+            users.insert(0, seeded_admin_user())
     for user in users:
         if not isinstance(user.get("organizationIds"), list) or not user.get("organizationIds"):
             user["organizationIds"] = ["default"]
         user["globalAccess"] = bool(user.get("globalAccess") or user.get("role") == "platform_admin")
-        if ADMIN_PASSWORD and user.get("username") == "admin":
+        if RESET_ADMIN_PASSWORD and ADMIN_PASSWORD and user.get("username") == "admin":
             user["password"] = ADMIN_PASSWORD
     for key in ("tasks", "clusters", "secrets"):
         for item in state.setdefault(key, []):
@@ -225,7 +233,12 @@ def read_raw_state():
 
 
 def default_state_copy():
-    return merge_defaults(json.loads(json.dumps(DEFAULT_STATE, ensure_ascii=False)))
+    state = json.loads(json.dumps(DEFAULT_STATE, ensure_ascii=False))
+    if ADMIN_PASSWORD:
+        for user in state.get("users", []):
+            if user.get("username") == "admin":
+                user["password"] = ADMIN_PASSWORD
+    return merge_defaults(state)
 
 
 def preserve_existing_user_passwords(next_state):
@@ -236,7 +249,7 @@ def preserve_existing_user_passwords(next_state):
     default_passwords = default_user_passwords()
     for user in next_state.get("users", []):
         username = user.get("username")
-        if ADMIN_PASSWORD and username == "admin":
+        if RESET_ADMIN_PASSWORD and ADMIN_PASSWORD and username == "admin":
             user["password"] = ADMIN_PASSWORD
             continue
         incoming_password = user.get("password")
@@ -367,7 +380,7 @@ def authenticate_user(username, password):
         raise ValueError("账号不存在")
     if str(user.get("password") or "") != password:
         if username == "admin" and password == "admin123":
-            raise ValueError("默认 admin 密码已不是 admin123，请使用当前密码；如需恢复可设置环境变量 ADMIN_PASSWORD=新密码 后重启")
+            raise ValueError("默认 admin 密码已不是 admin123，请使用当前密码；如需强制恢复可设置 ADMIN_PASSWORD=新密码 和 RESET_ADMIN_PASSWORD=true 后重启")
         raise ValueError("账号或密码不正确")
     return public_user(user), state
 
@@ -1664,10 +1677,29 @@ class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(APP_DIR), **kwargs)
 
+    def is_spa_route(self, parsed):
+        if parsed.path.startswith("/api/"):
+            return False
+        name = Path(parsed.path).name
+        return "." not in name
+
+    def serve_index(self):
+        index_path = APP_DIR / "index.html"
+        try:
+            data = index_path.read_bytes()
+        except OSError:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def end_headers(self):
         parsed = urlparse(self.path)
         no_cache_exts = (".html", ".js", ".css")
-        if parsed.path.startswith("/api/") or parsed.path == "/" or parsed.path.endswith(no_cache_exts):
+        if parsed.path.startswith("/api/") or parsed.path == "/" or self.is_spa_route(parsed) or parsed.path.endswith(no_cache_exts):
             self.send_header("Cache-Control", "no-store")
         else:
             self.send_header("Cache-Control", "public, max-age=60")
@@ -1707,6 +1739,9 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             mark_agent_task_running(task)
             self.send_json({"task": task})
+            return
+        if self.is_spa_route(parsed):
+            self.serve_index()
             return
         super().do_GET()
 

@@ -2862,6 +2862,74 @@ const viewConfig = {
   audit: { title: "权限审计", subtitle: "登录、发布与权限变更", permission: "audit.view" },
 };
 
+const viewRoutes = {
+  tasks: "/tasks",
+  clusters: "/clusters",
+  templates: "/templates",
+  channels: "/channels",
+  secrets: "/secrets",
+  users: "/users",
+  orgs: "/groups",
+  access: "/access",
+  audit: "/audit",
+};
+const detailRouteTabs = new Set(["overview", "logs", "config", "clusters", "history"]);
+
+function safeDecodePathPart(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function routeFromPath(pathname = window.location.pathname) {
+  const path = pathname.replace(/\/+$/, "") || "/";
+  if (path === "/" || path === "/index.html" || path === "/login") return null;
+  const taskMatch = path.match(/^\/tasks\/([^/]+)(?:\/([^/]+))?$/);
+  if (taskMatch) {
+    const tab = detailRouteTabs.has(taskMatch[2]) ? taskMatch[2] : "overview";
+    return { view: "taskDetail", taskId: safeDecodePathPart(taskMatch[1]), tab };
+  }
+  const entry = Object.entries(viewRoutes).find(([, route]) => route === path);
+  return entry ? { view: entry[0] } : null;
+}
+
+function applyRouteState(route) {
+  if (!route) return;
+  if (route.taskId) state.selectedId = route.taskId;
+  if (route.tab) state.detailTab = route.tab;
+}
+
+function preferredViewFromRoute(defaultView = "tasks") {
+  const route = routeFromPath();
+  if (route) {
+    applyRouteState(route);
+    return route.view;
+  }
+  const savedView = window.localStorage.getItem(APP_VIEW_KEY);
+  return viewConfig[savedView] ? savedView : defaultView;
+}
+
+function pathForView(view) {
+  if (view === "taskDetail") {
+    if (!state.selectedId) return viewRoutes.tasks;
+    const taskId = encodeURIComponent(String(state.selectedId));
+    const tab = detailRouteTabs.has(state.detailTab) ? state.detailTab : "overview";
+    return `/tasks/${taskId}${tab === "overview" ? "" : `/${tab}`}`;
+  }
+  return viewRoutes[view] || viewRoutes.tasks;
+}
+
+function syncRouteForView(view, replace = false) {
+  if (!state.currentUser) return;
+  const nextPath = pathForView(view);
+  const currentPath = window.location.pathname.replace(/\/+$/, "") || "/";
+  if (currentPath === nextPath) return;
+  const method = replace ? "replaceState" : "pushState";
+  window.history[method]({ view }, "", nextPath);
+}
+
 function openTaskDetail(taskId, tab = "overview") {
   state.selectedId = taskId;
   state.detailTab = tab;
@@ -2870,15 +2938,20 @@ function openTaskDetail(taskId, tab = "overview") {
   setView("taskDetail");
 }
 
-function setView(view) {
+function setView(view, options = {}) {
+  const updateRoute = options.updateRoute !== false;
+  if (!viewConfig[view]) view = "tasks";
   const config = viewConfig[view] || viewConfig.tasks;
-  if (config.permission && !hasPermission(config.permission)) {
+  if (config.permission && state.currentUser && !hasPermission(config.permission)) {
     window.alert("当前角色没有访问该页面权限");
     view = "tasks";
   }
 
   state.view = view;
-  window.localStorage.setItem(APP_VIEW_KEY, view);
+  if (state.currentUser) {
+    window.localStorage.setItem(APP_VIEW_KEY, view);
+    if (updateRoute) syncRouteForView(view, Boolean(options.replace));
+  }
   taskView.hidden = view !== "tasks";
   taskDetailView.hidden = view !== "taskDetail";
   clusterView.hidden = view !== "clusters";
@@ -2960,13 +3033,14 @@ function syncAutoRefresh() {
   }
 }
 
-function localLogin(username, password) {
-  const user = users.find((item) => item.username === username && item.password === password);
-  if (!user) {
-    if (stateLoadError) return { error: `无法连接后端状态接口：${stateLoadError}` };
-    return { error: username === "admin" && password === "admin123" ? "默认 admin 密码可能已被修改，请使用当前密码" : "账号或密码不正确" };
-  }
-  return { user: { username: user.username, name: user.name, role: user.role } };
+function authUserSnapshot(user) {
+  return {
+    username: user.username,
+    name: user.name || user.username,
+    role: user.role || "viewer",
+    globalAccess: Boolean(user.globalAccess),
+    organizationIds: Array.isArray(user.organizationIds) && user.organizationIds.length ? user.organizationIds : ["default"],
+  };
 }
 
 async function login(event) {
@@ -2983,10 +3057,11 @@ async function login(event) {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "登录失败");
-    hydrateState(result.state);
-    loginResult = { user: result.user };
+    loginResult = { user: result.user, remoteState: result.state };
   } catch (error) {
-    loginResult = error.message === "Failed to fetch" ? localLogin(username, password) : { error: error.message };
+    loginResult = {
+      error: error.message === "Failed to fetch" ? "无法连接后端登录接口，请检查服务是否正常运行" : error.message,
+    };
   }
   if (!loginResult.user) {
     loginError.textContent = loginResult.error || "登录失败";
@@ -2994,29 +3069,25 @@ async function login(event) {
     return;
   }
   const user = loginResult.user;
-  state.currentUser = { username: user.username, name: user.name, role: user.role };
+  state.currentUser = authUserSnapshot(user);
+  if (loginResult.remoteState) hydrateState(loginResult.remoteState);
   window.localStorage.setItem(APP_USER_KEY, JSON.stringify(state.currentUser));
   loginError.hidden = true;
-  setView(window.localStorage.getItem(APP_VIEW_KEY) || "tasks");
+  setView(preferredViewFromRoute("tasks"), { replace: !routeFromPath() });
 }
 
 async function restoreSession(savedUser) {
   if (!savedUser?.username) return false;
   try {
     const result = await postJson("/api/auth/session", { username: savedUser.username });
-    hydrateState(result.state);
     const user = result.user;
-    state.currentUser = { username: user.username, name: user.name, role: user.role };
+    state.currentUser = authUserSnapshot(user);
+    hydrateState(result.state);
     window.localStorage.setItem(APP_USER_KEY, JSON.stringify(state.currentUser));
     return true;
   } catch {
-    const user = users.find((item) => item.username === savedUser.username);
-    if (!user) {
-      window.localStorage.removeItem(APP_USER_KEY);
-      return false;
-    }
-    state.currentUser = { username: user.username, name: user.name, role: user.role };
-    return true;
+    window.localStorage.removeItem(APP_USER_KEY);
+    return false;
   }
 }
 
@@ -3206,6 +3277,7 @@ document.addEventListener("click", (event) => {
   const detailTabButton = event.target.closest("[data-detail-tab]");
   if (detailTabButton) {
     state.detailTab = detailTabButton.dataset.detailTab;
+    syncRouteForView("taskDetail");
     renderTaskDetailPage();
     lucide.createIcons();
     return;
@@ -3218,6 +3290,7 @@ document.addEventListener("click", (event) => {
       state.selectedId = execution.taskId;
       state.detailExecutionId = execution.id;
       state.detailTab = "logs";
+      syncRouteForView("taskDetail");
       renderTaskDetailPage();
       lucide.createIcons();
     }
@@ -3373,8 +3446,23 @@ async function init() {
     }
   }
   updateSdkOptions(languageSelect.value);
-  setView(restored ? window.localStorage.getItem(APP_VIEW_KEY) || "tasks" : "tasks");
+  if (restored) {
+    setView(preferredViewFromRoute("tasks"), { replace: !routeFromPath() });
+  } else {
+    applyRouteState(routeFromPath());
+    setView("tasks", { updateRoute: false });
+  }
   render();
 }
+
+window.addEventListener("popstate", () => {
+  const route = routeFromPath();
+  if (route) {
+    applyRouteState(route);
+    setView(route.view, { updateRoute: false });
+  } else {
+    setView("tasks", { updateRoute: false });
+  }
+});
 
 init();

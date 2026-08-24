@@ -178,7 +178,7 @@ svg {
 .login-form input,
 .login-form button,
 .login-error,
-.demo-accounts {
+.login-note {
   width: 100%;
 }
 
@@ -196,28 +196,12 @@ svg {
   line-height: 1.35;
 }
 
-.demo-accounts {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  align-items: center;
-  gap: 8px 12px;
-  margin-top: 2px;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-2);
+.login-note {
+  margin: 2px 0 0;
   color: var(--muted);
   font-size: 12px;
-}
-
-.demo-accounts strong {
-  color: var(--text);
-}
-
-.demo-accounts span {
-  justify-self: end;
-  color: var(--text);
-  font-weight: 700;
+  line-height: 1.5;
+  text-align: center;
 }
 
 .app-shell {
@@ -2350,13 +2334,8 @@ pre {
     padding: 22px;
   }
 
-  .demo-accounts,
   .summary-strip {
     grid-template-columns: 1fr;
-  }
-
-  .demo-accounts span {
-    justify-self: start;
   }
 
   .primary-button span,
