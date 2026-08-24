@@ -94,6 +94,7 @@ const APP_USER_KEY = "deploy-platform-user";
 const APP_VIEW_KEY = "deploy-platform-view";
 let refreshTimer = null;
 let stateLoadError = "";
+const loadingExecutionLogs = new Set();
 
 const state = {
   currentUser: null,
@@ -1285,6 +1286,7 @@ function renderTaskDetailPage() {
       </div>
     </section>
   `;
+  if (tab === "logs") ensureFullExecutionLogs(focusedExecution);
 }
 
 function renderTaskOverviewTab(task, latestExecution, activeSchedule) {
@@ -1350,6 +1352,31 @@ function renderTaskLogsTab(latestExecution) {
       }
     </section>
   `;
+}
+
+async function ensureFullExecutionLogs(execution) {
+  if (!execution?.id || !Number.isFinite(Number(execution.logCount))) return;
+  if ((execution.logs || []).length >= Number(execution.logCount)) return;
+  if (loadingExecutionLogs.has(String(execution.id))) return;
+  loadingExecutionLogs.add(String(execution.id));
+  try {
+    const response = await fetch(`/api/executions/${execution.id}/logs`, { cache: "no-store" });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "日志加载失败");
+    const target = executions.find((item) => String(item.id) === String(execution.id));
+    if (target) {
+      target.logs = Array.isArray(result.logs) ? result.logs : [];
+      target.logCount = target.logs.length;
+      if (state.view === "taskDetail" && state.detailTab === "logs") {
+        renderTaskDetailPage();
+        lucide.createIcons();
+      }
+    }
+  } catch {
+    // Log loading is opportunistic; the compact tail remains visible if the request fails.
+  } finally {
+    loadingExecutionLogs.delete(String(execution.id));
+  }
 }
 
 function renderTaskConfigTab(task, activeSchedule) {
@@ -3091,7 +3118,6 @@ async function restoreSession(savedUser) {
     const result = await postJson("/api/auth/session", { token, username: savedUser?.username || "" });
     const user = result.user;
     state.currentUser = authUserSnapshot({ ...user, token: user.token || token });
-    hydrateState(result.state);
     window.localStorage.setItem(APP_USER_KEY, JSON.stringify(state.currentUser));
     return true;
   } catch {
@@ -3445,7 +3471,6 @@ document.getElementById("addCluster").addEventListener("click", () => {
 });
 
 async function init() {
-  await loadPersistedState();
   const savedUser = window.localStorage.getItem(APP_USER_KEY);
   let restored = false;
   if (savedUser) {
@@ -3456,6 +3481,9 @@ async function init() {
     }
   } else {
     restored = await restoreSession({});
+  }
+  if (restored) {
+    await loadPersistedState();
   }
   updateSdkOptions(languageSelect.value);
   if (restored) {

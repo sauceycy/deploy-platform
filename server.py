@@ -45,6 +45,7 @@ ACTIVE_STATUSES = {"queued", "building", "deploying", "running"}
 CLEAN_WORKSPACE_AFTER_BUILD = os.environ.get("CLEAN_WORKSPACE_AFTER_BUILD", "true").lower() != "false"
 CLEAN_LOCAL_IMAGE_AFTER_BUILD = os.environ.get("CLEAN_LOCAL_IMAGE_AFTER_BUILD", "true").lower() != "false"
 DOCKER_PRUNE_AFTER_BUILD = os.environ.get("DOCKER_PRUNE_AFTER_BUILD", "false").lower() == "true"
+CLIENT_LOG_TAIL = int(os.environ.get("CLIENT_LOG_TAIL", "30"))
 
 DEFAULT_STATE = {
     "roles": {
@@ -245,8 +246,8 @@ def default_state_copy():
     return merge_defaults(state)
 
 
-def preserve_existing_user_passwords(next_state):
-    current_state = read_raw_state()
+def preserve_existing_user_passwords(next_state, current_state=None):
+    current_state = current_state if current_state is not None else read_raw_state()
     if not current_state:
         return next_state
     current_passwords = {user.get("username"): user.get("password") for user in current_state.get("users", [])}
@@ -262,6 +263,57 @@ def preserve_existing_user_passwords(next_state):
         if current_password and default_password and incoming_password == default_password and current_password != incoming_password:
             user["password"] = current_password
     return next_state
+
+
+def preserve_runtime_fields(next_state, current_state=None):
+    current_state = current_state if current_state is not None else read_raw_state()
+    if not current_state:
+        return next_state
+    current_executions = {str(item.get("id")): item for item in current_state.get("executions", [])}
+    for execution in next_state.get("executions", []):
+        current = current_executions.get(str(execution.get("id")))
+        if not current:
+            continue
+        if len(execution.get("logs") or []) < len(current.get("logs") or []):
+            execution["logs"] = current.get("logs") or []
+        execution.pop("logCount", None)
+
+    current_agent_tasks = {str(item.get("id")): item for item in current_state.get("agentTasks", [])}
+    for agent_task in next_state.get("agentTasks", []):
+        current = current_agent_tasks.get(str(agent_task.get("id")))
+        if not current:
+            continue
+        if not agent_task.get("payload") and current.get("payload"):
+            agent_task["payload"] = current.get("payload")
+        if len(agent_task.get("logs") or []) < len(current.get("logs") or []):
+            agent_task["logs"] = current.get("logs") or []
+        agent_task.pop("logCount", None)
+    return next_state
+
+
+def client_state(state):
+    data = {}
+    for key, value in state.items():
+        if key in {"executions", "agentTasks"}:
+            continue
+        data[key] = copy.deepcopy(value)
+
+    data["executions"] = []
+    for execution in state.get("executions", []):
+        logs = execution.get("logs") if isinstance(execution.get("logs"), list) else []
+        item = {key: copy.deepcopy(value) for key, value in execution.items() if key != "logs"}
+        item["logCount"] = len(logs)
+        item["logs"] = copy.deepcopy(logs[-CLIENT_LOG_TAIL:])
+        data["executions"].append(item)
+
+    data["agentTasks"] = []
+    for agent_task in state.get("agentTasks", []):
+        logs = agent_task.get("logs") if isinstance(agent_task.get("logs"), list) else []
+        item = {key: copy.deepcopy(value) for key, value in agent_task.items() if key not in {"logs", "payload"}}
+        item["logCount"] = len(logs)
+        item["logs"] = copy.deepcopy(logs[-5:])
+        data["agentTasks"].append(item)
+    return data
 
 
 def read_state():
@@ -293,7 +345,10 @@ def read_state():
 
 
 def write_state(state):
-    state = preserve_existing_user_passwords(merge_defaults(state))
+    current_state = read_raw_state()
+    state = merge_defaults(state)
+    state = preserve_existing_user_passwords(state, current_state)
+    state = preserve_runtime_fields(state, current_state)
     payload = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
     with STATE_LOCK:
         if use_postgres():
@@ -1850,7 +1905,16 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"status": "ok", "database": "postgres" if use_postgres() else "sqlite"})
             return
         if parsed.path == "/api/state":
-            self.send_json(read_state())
+            self.send_json(client_state(read_state()))
+            return
+        match = re.match(r"^/api/executions/([^/]+)/logs$", parsed.path)
+        if match:
+            state = read_state()
+            execution = find_by_id(state.get("executions", []), match.group(1))
+            if not execution:
+                self.send_json({"error": "执行记录不存在"}, status=404)
+                return
+            self.send_json({"executionId": execution.get("id"), "logs": execution.get("logs") or []})
             return
         if parsed.path == "/api/agent/tasks":
             query = parse_qs(parsed.query)
@@ -1880,7 +1944,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, status=401)
                 return
             cookie = f"deploy_platform_session={user.get('token')}; Path=/; SameSite=Lax; HttpOnly"
-            self.send_json({"user": user, "state": state}, headers={"Set-Cookie": cookie})
+            self.send_json({"user": user, "state": client_state(state)}, headers={"Set-Cookie": cookie})
             return
         if parsed.path == "/api/auth/session":
             body = self.read_json_body()
@@ -1890,7 +1954,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, status=401)
                 return
             cookie = f"deploy_platform_session={user.get('token')}; Path=/; SameSite=Lax; HttpOnly"
-            self.send_json({"user": user, "state": state}, headers={"Set-Cookie": cookie})
+            self.send_json({"user": user}, headers={"Set-Cookie": cookie})
             return
         if parsed.path == "/api/auth/logout":
             self.send_json({"ok": True}, headers={"Set-Cookie": "deploy_platform_session=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly"})
@@ -1902,7 +1966,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"task": task, "state": state})
+            self.send_json({"task": task, "state": client_state(state)})
             return
         if parsed.path == "/api/tasks/batch-run":
             body = self.read_json_body()
@@ -1911,7 +1975,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"executions": executions, "state": state})
+            self.send_json({"executions": executions, "state": client_state(state)})
             return
         match = re.match(r"^/api/tasks/([^/]+)/run$", parsed.path)
         if match:
@@ -1921,7 +1985,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"execution": execution, "state": state})
+            self.send_json({"execution": execution, "state": client_state(state)})
             return
         match = re.match(r"^/api/tasks/([^/]+)/schedule$", parsed.path)
         if match:
@@ -1931,7 +1995,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"schedule": schedule, "state": state})
+            self.send_json({"schedule": schedule, "state": client_state(state)})
             return
         match = re.match(r"^/api/executions/([^/]+)/cancel$", parsed.path)
         if match:
@@ -1941,7 +2005,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"execution": execution, "state": state})
+            self.send_json({"execution": execution, "state": client_state(state)})
             return
         match = re.match(r"^/api/schedules/([^/]+)/cancel$", parsed.path)
         if match:
@@ -1951,7 +2015,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"schedule": schedule, "state": state})
+            self.send_json({"schedule": schedule, "state": client_state(state)})
             return
         if parsed.path == "/api/repositories/branches":
             body = self.read_json_body()
@@ -2001,7 +2065,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"task": task, "state": state})
+            self.send_json({"task": task, "state": client_state(state)})
             return
         self.send_error(404)
 
@@ -2015,7 +2079,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"task": task, "state": state})
+            self.send_json({"task": task, "state": client_state(state)})
             return
         if parsed.path != "/api/state":
             self.send_error(404)

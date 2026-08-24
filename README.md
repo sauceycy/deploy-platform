@@ -131,6 +131,16 @@ export HOST_DATA_DIR=/absolute/path/to/deploy-platform/data
 docker compose up -d --build
 ```
 
+## 接口性能
+
+平台默认接口会返回轻量状态：执行日志只带最近 30 条，Agent 发布任务不会把完整 manifest payload 下发到浏览器。打开任务详情的「构建日志」标签时，前端会单独请求该执行记录的完整日志。
+
+可以通过环境变量调整默认日志尾部数量：
+
+```text
+CLIENT_LOG_TAIL=30
+```
+
 ## Agent 部署
 
 1. 先在平台「集群管理」里添加集群，例如：
