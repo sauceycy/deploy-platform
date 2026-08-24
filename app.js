@@ -145,12 +145,16 @@ const clusterOrganizationSelect = document.getElementById("clusterOrganizationSe
 const secretOrganizationSelect = document.getElementById("secretOrganizationSelect");
 const newUserOrgList = document.getElementById("newUserOrgList");
 const editUserOrgList = document.getElementById("editUserOrgList");
+const notifyTargetList = document.getElementById("notifyTargetList");
 const gitCredentialSelect = document.getElementById("gitCredentialSelect");
 const clusterEditor = document.getElementById("clusterEditor");
 const configDialog = document.getElementById("configDialog");
 const configPreview = document.getElementById("configPreview");
 const userDialog = document.getElementById("userDialog");
 const editUserForm = document.getElementById("editUserForm");
+const channelForm = document.getElementById("channelForm");
+const channelDialogTitle = document.getElementById("channelDialogTitle");
+const channelSubmitText = document.getElementById("channelSubmitText");
 const secretForm = document.getElementById("secretForm");
 const secretNameInput = document.getElementById("secretNameInput");
 const secretTypeSelect = document.getElementById("secretType");
@@ -823,7 +827,59 @@ function channelLabel(type) {
     feishu: "飞书",
     email: "邮件",
     webhook: "Webhook",
-  }[type];
+  }[type] || type || "通知渠道";
+}
+
+function channelMatches(channel, value) {
+  const key = String(value || "");
+  return key && [channel.id, channel.name, channel.target, channel.type, channelLabel(channel.type)].some((item) => String(item || "") === key);
+}
+
+function selectedNotifyChannel() {
+  const value = taskForm.elements.notifyChannel?.value || "";
+  return notifyChannels.find((channel) => channelMatches(channel, value));
+}
+
+function renderNotifyChannelOptions(selectedValue = "", forceDefault = false) {
+  const select = taskForm.elements.notifyChannel;
+  if (!select) return;
+  const visibleChannels = notifyChannels.filter(canAccessAsset);
+  const selectedChannel = visibleChannels.find((channel) => channelMatches(channel, selectedValue));
+  const selected = selectedChannel ? String(selectedChannel.id) : String(selectedValue || "");
+  const legacyOption = selected && !selectedChannel ? `<option value="${selected}">${selected}</option>` : "";
+  select.innerHTML = [
+    `<option value="">不发送通知</option>`,
+    ...visibleChannels.map((channel) => `<option value="${channel.id}">${channel.name} / ${channelLabel(channel.type)}</option>`),
+    legacyOption,
+  ].join("");
+  if (selected) {
+    select.value = selected;
+  } else if (forceDefault && visibleChannels.length) {
+    select.value = String(visibleChannels[0].id);
+  }
+  syncNotifyTargetOptions();
+}
+
+function syncNotifyTargetOptions(forceDefault = false) {
+  const selectedChannel = selectedNotifyChannel();
+  const items = notifyChannels.filter((channel) => canAccessAsset(channel));
+  if (notifyTargetList) {
+    notifyTargetList.innerHTML = items
+      .map((channel) => `<option value="${channel.name}" label="${channelLabel(channel.type)} · ${channel.target}"></option>`)
+      .join("");
+  }
+  const targetInput = taskForm.elements.notifyTarget;
+  if (!targetInput) return;
+  targetInput.placeholder = items.length ? "自动使用所选通知渠道，也可填写 Webhook 地址" : "未配置通知渠道，可填写 Webhook 地址";
+  if (selectedChannel) {
+    targetInput.value = selectedChannel.name;
+    return;
+  }
+  const current = targetInput.value;
+  const currentStillValid = items.some((channel) => channel.name === current || channel.target === current);
+  if ((forceDefault || !current || !currentStillValid) && items.length) {
+    targetInput.value = items[0].name;
+  }
 }
 
 function secretTypeLabel(type) {
@@ -1741,11 +1797,12 @@ function renderTemplateView() {
 
 function renderChannelView() {
   const body = document.getElementById("channelBody");
-  if (notifyChannels.length === 0) {
+  const visibleChannels = notifyChannels.filter(canAccessAsset);
+  if (visibleChannels.length === 0) {
     body.innerHTML = emptyState("暂无通知渠道");
     return;
   }
-  body.innerHTML = notifyChannels
+  body.innerHTML = visibleChannels
     .map(
       (channel) => `
       <div class="simple-row">
@@ -1753,7 +1810,15 @@ function renderChannelView() {
           <strong>${channel.name}</strong>
           <span>${channelLabel(channel.type)} · ${channel.target} · ${channel.secret ? "已配置密钥" : "未配置密钥"}</span>
         </div>
-        <span class="role-chip">${channelLabel(channel.type)}</span>
+        <div class="row-actions">
+          <span class="role-chip">${channelLabel(channel.type)}</span>
+          <button class="icon-button" type="button" title="编辑渠道" data-channel-action="edit" data-channel-id="${channel.id}">
+            <i data-lucide="pencil"></i>
+          </button>
+          <button class="icon-button danger" type="button" title="删除渠道" data-channel-action="delete" data-channel-id="${channel.id}">
+            <i data-lucide="trash-2"></i>
+          </button>
+        </div>
       </div>
     `,
     )
@@ -1937,6 +2002,7 @@ function resetTaskForm() {
   taskForm.elements.mavenRepoUrl.value = "";
   taskForm.elements.mavenMirrorOf.value = "maven-public";
   taskForm.elements.jvmOptions.value = "";
+  renderNotifyChannelOptions("", true);
   renderGitCredentialOptions("");
   clusterDrafts.splice(0, clusterDrafts.length);
   updateSdkOptions("java", true);
@@ -1986,8 +2052,8 @@ function openTaskEditor(taskId) {
   taskForm.elements.servicePort.value = task.servicePort || "";
   taskForm.elements.replicas.value = task.replicas || "";
   taskForm.elements.healthPath.value = task.healthPath || "";
-  taskForm.elements.notifyChannel.value = task.notify?.channel || "企业微信";
   taskForm.elements.notifyTarget.value = task.notify?.target || "";
+  renderNotifyChannelOptions(task.notify?.target || task.notify?.channel || "", !task.notify?.target);
   taskForm.elements.notifyBuildFail.checked = task.notify?.events?.includes("构建失败") ?? true;
   taskForm.elements.notifyDeployFail.checked = task.notify?.events?.includes("部署失败") ?? true;
   taskForm.elements.notifyHealthFail.checked = task.notify?.events?.includes("健康检查失败") ?? true;
@@ -2095,8 +2161,8 @@ function buildPreviewObject() {
     },
     clusters: clusterDrafts,
     notify: {
-      channel: formValue("notifyChannel"),
-      target: formValue("notifyTarget"),
+      channel: selectedNotifyChannel()?.name || formValue("notifyChannel"),
+      target: selectedNotifyChannel()?.name || formValue("notifyTarget"),
       events: selectedEvents(),
     },
   };
@@ -2634,15 +2700,37 @@ async function saveChannel(event) {
   const submitter = event.submitter;
   if (submitter) submitter.disabled = true;
   const formData = new FormData(form);
-  const channel = {
-    id: Date.now(),
+  const channelId = formData.get("id");
+  const channelPayload = {
     name: formData.get("name"),
     type: formData.get("type"),
     target: formData.get("target"),
     secret: formData.get("secret"),
   };
-  notifyChannels.unshift(channel);
-  addAudit("添加通知渠道", channel.name);
+  if (channelId) {
+    const channel = notifyChannels.find((item) => String(item.id) === String(channelId));
+    if (!channel) {
+      window.alert("通知渠道不存在或已被删除");
+      if (submitter) submitter.disabled = false;
+      return;
+    }
+    if (!canOperateAsset("channel.manage", channel)) {
+      window.alert("当前用户组无权编辑该通知渠道");
+      if (submitter) submitter.disabled = false;
+      return;
+    }
+    Object.assign(channel, channelPayload, { updatedAt: nowText() });
+    addAudit("编辑通知渠道", channel.name);
+  } else {
+    const channel = {
+      id: Date.now(),
+      ...channelPayload,
+      organizationId: visibleOrganizations()[0]?.id || "default",
+      createdAt: nowText(),
+    };
+    notifyChannels.unshift(channel);
+    addAudit("添加通知渠道", channel.name);
+  }
   const saved = await persistState();
   if (saved) {
     form.reset();
@@ -2650,6 +2738,51 @@ async function saveChannel(event) {
     closeCreateDialog(channelCreateDialog, form);
   }
   if (submitter) submitter.disabled = false;
+}
+
+function openChannelCreateDialog() {
+  if (channelDialogTitle) channelDialogTitle.textContent = "添加渠道";
+  if (channelSubmitText) channelSubmitText.textContent = "添加渠道";
+  openCreateDialog(channelCreateDialog, "channel.manage", channelForm);
+  if (channelForm?.elements?.id) channelForm.elements.id.value = "";
+}
+
+function openChannelDialog(channelId) {
+  if (!requirePermission("channel.manage")) return;
+  const channel = notifyChannels.find((item) => String(item.id) === String(channelId));
+  if (!channel) return;
+  if (!canOperateAsset("channel.manage", channel)) {
+    window.alert("当前用户组无权编辑该通知渠道");
+    return;
+  }
+  if (channelDialogTitle) channelDialogTitle.textContent = "编辑渠道";
+  if (channelSubmitText) channelSubmitText.textContent = "保存渠道";
+  channelForm.elements.id.value = channel.id;
+  channelForm.elements.name.value = channel.name || "";
+  channelForm.elements.type.value = channel.type || "feishu";
+  channelForm.elements.target.value = channel.target || "";
+  channelForm.elements.secret.value = channel.secret || "";
+  channelCreateDialog.showModal();
+  window.setTimeout(() => channelForm.elements.name.focus(), 0);
+}
+
+async function deleteChannel(channelId) {
+  if (!requirePermission("channel.manage")) return;
+  const channel = notifyChannels.find((item) => String(item.id) === String(channelId));
+  if (!channel) return;
+  if (!canOperateAsset("channel.manage", channel)) {
+    window.alert("当前用户组无权删除该通知渠道");
+    return;
+  }
+  const usedByTask = tasks.find((task) => channelMatches(channel, task.notify?.channel) || channelMatches(channel, task.notify?.target));
+  if (usedByTask) {
+    window.alert(`任务 ${usedByTask.name} 正在使用该通知渠道，请先编辑任务取消绑定`);
+    return;
+  }
+  if (!window.confirm(`确认删除通知渠道 ${channel.name}？`)) return;
+  notifyChannels.splice(notifyChannels.findIndex((item) => String(item.id) === String(channelId)), 1);
+  addAudit("删除通知渠道", channel.name);
+  await saveStateAndRender();
 }
 
 async function savePlatformSettings(event) {
@@ -3153,6 +3286,7 @@ function render() {
   renderOrganizationView();
   renderAccessView();
   renderAuditView();
+  renderNotifyChannelOptions(taskForm.elements.notifyChannel?.value || taskForm.elements.notifyTarget?.value || "");
   renderClusters();
   renderGitCredentialOptions();
   renderImagePullSecretOptions();
@@ -3247,7 +3381,7 @@ document.getElementById("closeCreate").addEventListener("click", closeDrawer);
 backdrop.addEventListener("click", closeDrawer);
 document.getElementById("openClusterCreate").addEventListener("click", () => openCreateDialog(clusterCreateDialog, "cluster.manage", document.getElementById("clusterForm")));
 document.getElementById("openTemplateCreate").addEventListener("click", () => openCreateDialog(templateCreateDialog, "template.manage", document.getElementById("templateForm")));
-document.getElementById("openChannelCreate").addEventListener("click", () => openCreateDialog(channelCreateDialog, "channel.manage", document.getElementById("channelForm")));
+document.getElementById("openChannelCreate").addEventListener("click", openChannelCreateDialog);
 document.getElementById("openSecretCreate").addEventListener("click", () => openCreateDialog(secretCreateDialog, "secret.manage", secretForm));
 document.getElementById("openUserCreate").addEventListener("click", () => openCreateDialog(userCreateDialog, "user.manage", document.getElementById("userForm")));
 document.getElementById("previewYaml").addEventListener("click", renderConfigPreview);
@@ -3361,6 +3495,11 @@ document.addEventListener("change", async (event) => {
     return;
   }
 
+  if (event.target === taskForm.elements.notifyChannel) {
+    syncNotifyTargetOptions();
+    return;
+  }
+
   const groupPermissionInput = event.target.closest("[data-group][data-group-permission]");
   if (groupPermissionInput) {
     if (!hasPermission("org.manage")) return;
@@ -3440,6 +3579,17 @@ document.addEventListener("click", (event) => {
   const userButton = event.target.closest("[data-user-action]");
   if (userButton) {
     openUserDialog(userButton.dataset.username, userButton.dataset.userAction);
+    return;
+  }
+
+  const channelButton = event.target.closest("[data-channel-action]");
+  if (channelButton) {
+    if (channelButton.dataset.channelAction === "edit") {
+      openChannelDialog(channelButton.dataset.channelId);
+    }
+    if (channelButton.dataset.channelAction === "delete") {
+      deleteChannel(channelButton.dataset.channelId);
+    }
     return;
   }
 

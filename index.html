@@ -513,17 +513,12 @@
           <div class="form-grid">
             <label>
               <span>通知渠道</span>
-              <select name="notifyChannel">
-                <option>企业微信</option>
-                <option>钉钉</option>
-                <option>飞书</option>
-                <option>邮件</option>
-                <option>Webhook</option>
-              </select>
+              <select name="notifyChannel" id="notifyChannelSelect"></select>
             </label>
             <label class="wide-field">
               <span>通知目标</span>
-              <input name="notifyTarget" placeholder="选择或填写通知目标" />
+              <input name="notifyTarget" list="notifyTargetList" placeholder="选择或填写通知目标" />
+              <datalist id="notifyTargetList"></datalist>
             </label>
           </div>
         </section>
@@ -655,7 +650,7 @@
     <dialog class="config-dialog form-dialog wide-dialog" id="channelCreateDialog">
       <div class="dialog-header">
         <div>
-          <h2>添加渠道</h2>
+          <h2 id="channelDialogTitle">添加渠道</h2>
           <span>配置发布结果和异常告警通知目标</span>
         </div>
         <button class="icon-button" data-dialog-close="channelCreateDialog" type="button" title="关闭">
@@ -663,6 +658,7 @@
         </button>
       </div>
       <form class="dialog-form" id="channelForm">
+        <input type="hidden" name="id" />
         <div class="form-grid compact-grid">
           <label>
             <span>渠道名称</span>
@@ -693,7 +689,7 @@
           </button>
           <button class="primary-button" type="submit" data-permission-required="channel.manage">
             <i data-lucide="plus"></i>
-            <span>添加渠道</span>
+            <span id="channelSubmitText">添加渠道</span>
           </button>
         </div>
       </form>

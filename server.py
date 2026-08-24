@@ -1270,13 +1270,31 @@ def dispatch_agent_tasks(execution_id, task, image):
 
 
 def send_notification(task, event, message):
+    event_labels = {
+        "BUILD_SUCCESS": "发布成功",
+        "BUILD_FAILED": "构建失败",
+        "DEPLOY_FAILED": "部署失败",
+        "HEALTH_FAILED": "健康检查失败",
+    }
+    event_label = event_labels.get(event, event)
+    enabled_events = task.get("notify", {}).get("events") or []
+    if enabled_events and event_label not in enabled_events:
+        return
     channels = read_state().get("notifyChannels", [])
     target = task.get("notify", {}).get("target") or ""
-    channel = next((item for item in channels if item.get("name") == target or item.get("target") == target), None)
+    channel_key = task.get("notify", {}).get("channel") or ""
+    channel = next((item for item in channels if str(item.get("id")) in {str(target), str(channel_key)} or item.get("name") in {target, channel_key} or item.get("target") in {target, channel_key}), None)
     url = (channel or {}).get("target") or target
     if not url.startswith("http"):
         return
-    payload = {"task": task.get("name"), "event": event, "message": message, "time": now_text()}
+    text = f"【{event_label}】{task.get('name')}\n{message}\n时间: {now_text()}"
+    channel_type = (channel or {}).get("type") or "webhook"
+    if channel_type == "feishu":
+        payload = {"msg_type": "text", "content": {"text": text}}
+    elif channel_type in {"wecom", "dingtalk"}:
+        payload = {"msgtype": "text", "text": {"content": text}}
+    else:
+        payload = {"task": task.get("name"), "event": event, "eventLabel": event_label, "message": message, "time": now_text(), "text": text}
     try:
         req = Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json"})
         urlopen(req, timeout=5).read()
@@ -1410,7 +1428,6 @@ def build_and_dispatch(execution_id):
         ensure_execution_active(execution_id)
         set_execution_status(execution_id, "building", "准备下发 Agent 发布任务", image=image, stage="等待部署", progress=86)
         dispatch_agent_tasks(execution_id, task, image)
-        send_notification(task, "BUILD_SUCCESS", f"镜像已构建: {image}")
     except Exception as exc:
         if str(exc) == "发布已取消":
             return
@@ -1925,7 +1942,10 @@ def next_agent_task_for_cluster(agent_tasks, cluster):
 
 
 def update_agent_result(agent_task_id, status, logs):
+    notification = None
+
     def update(state):
+        nonlocal notification
         item = find_by_id(state["agentTasks"], agent_task_id)
         if not item:
             return None
@@ -1948,6 +1968,7 @@ def update_agent_result(agent_task_id, status, logs):
                     task["status"] = "success"
                     task["stage"] = "发布完成"
                     task["progress"] = 100
+                    notification = (copy.deepcopy(task), "BUILD_SUCCESS", f"集群 {item['clusterName']} 部署完成")
             elif any(value == "failed" for value in statuses):
                 execution["status"] = "partial" if any(value == "success" for value in statuses) else "failed"
                 execution["stage"] = "部署异常"
@@ -1957,9 +1978,12 @@ def update_agent_result(agent_task_id, status, logs):
                     task["status"] = execution["status"]
                     task["stage"] = execution["stage"]
                     task["progress"] = execution["progress"]
+                    notification = (copy.deepcopy(task), "DEPLOY_FAILED", logs or f"集群 {item['clusterName']} 部署失败")
         return item
 
     item, state = mutate_state(update)
+    if notification:
+        send_notification(*notification)
     return item, state
 
 
