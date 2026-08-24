@@ -1601,6 +1601,99 @@ def save_task_config(task_id, payload, actor):
     return task, state
 
 
+def normalize_secret_payload(payload, keep_existing_secret=False):
+    if not isinstance(payload, dict):
+        raise ValueError("秘钥配置格式不正确")
+    name = str(payload.get("name") or "").strip()
+    secret_type = str(payload.get("type") or "git_https_token").strip()
+    if not name:
+        raise ValueError("秘钥名称不能为空")
+    if secret_type not in {"git_https_token", "git_ssh_key", "registry", "agent_token", "webhook"}:
+        raise ValueError("秘钥类型不正确")
+    normalized = {
+        "name": name,
+        "type": secret_type,
+        "organizationId": str(payload.get("organizationId") or "default").strip() or "default",
+        "target": str(payload.get("target") or "").strip(),
+        "username": str(payload.get("username") or "").strip(),
+        "knownHosts": str(payload.get("knownHosts") or ""),
+    }
+    secret_value = str(payload.get("secret") or "")
+    if secret_value or not keep_existing_secret:
+        normalized["secret"] = secret_value
+    if not keep_existing_secret and not normalized.get("secret"):
+        raise ValueError("秘钥内容不能为空")
+    return normalized
+
+
+def secret_name_exists(state, name, ignore_id=None):
+    normalized_name = str(name or "").strip().lower()
+    return any(str(item.get("name") or "").strip().lower() == normalized_name and str(item.get("id")) != str(ignore_id or "") for item in state.get("secrets", []))
+
+
+def save_secret_config(secret_id, payload, actor):
+    secret_payload = normalize_secret_payload(payload, keep_existing_secret=bool(secret_id))
+
+    def update(state):
+        actor_user = find_user(state, actor)
+        if not actor_user:
+            raise ValueError("操作用户不存在")
+        if not user_has_permission(state, actor_user, "secret.manage"):
+            raise ValueError("当前用户没有保存秘钥权限")
+        if not user_can_access_asset(state, actor_user, secret_payload):
+            raise ValueError("当前用户组无权保存该秘钥")
+        if secret_name_exists(state, secret_payload["name"], secret_id):
+            raise ValueError(f"秘钥名称 {secret_payload['name']} 已存在")
+
+        if secret_id:
+            secret = find_by_id(state["secrets"], secret_id)
+            if not secret:
+                raise ValueError("秘钥不存在或已被删除")
+            require_actor_asset_access(state, actor, "secret.manage", secret, "编辑")
+            secret.update(secret_payload)
+            secret["updatedAt"] = now_text()
+            state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "编辑秘钥", "target": f"{secret.get('name')} / {secret.get('type')}", "result": "成功"})
+            return secret
+
+        secret = {
+            "id": int(time.time() * 1000),
+            **secret_payload,
+            "createdAt": now_text(),
+        }
+        state["secrets"].insert(0, secret)
+        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "添加秘钥", "target": f"{secret.get('name')} / {secret.get('type')}", "result": "成功"})
+        return secret
+
+    secret, state = mutate_state(update)
+    return secret, state
+
+
+def delete_secret_config(secret_id, actor):
+    def update(state):
+        secret = find_by_id(state["secrets"], secret_id)
+        if not secret:
+            raise ValueError("秘钥不存在或已被删除")
+        require_actor_asset_access(state, actor, "secret.manage", secret, "删除")
+        task_with_git = next((task for task in state.get("tasks", []) if str(task.get("gitCredentialId")) == str(secret_id)), None)
+        if task_with_git:
+            raise ValueError(f"任务 {task_with_git.get('name')} 正在使用该 Git 凭据，请先取消绑定")
+        task_with_pull_secret = next((task for task in state.get("tasks", []) if any(str(cluster.get("imagePullSecretId")) == str(secret_id) for cluster in task.get("clusters", []))), None)
+        if task_with_pull_secret:
+            raise ValueError(f"任务 {task_with_pull_secret.get('name')} 正在使用该镜像拉取秘钥，请先取消绑定")
+        cluster_with_secret = next((cluster for cluster in state.get("clusters", []) if str(cluster.get("imagePullSecretId")) == str(secret_id)), None)
+        if cluster_with_secret:
+            raise ValueError(f"集群 {cluster_with_secret.get('name')} 正在使用该默认镜像拉取秘钥，请先取消绑定")
+        settings = state.get("platformSettings") if isinstance(state.get("platformSettings"), dict) else {}
+        if str(settings.get("registrySecretId")) == str(secret_id):
+            raise ValueError("平台默认推送镜像仓库正在使用该秘钥，请先切换仓库配置")
+        state["secrets"] = [item for item in state.get("secrets", []) if str(item.get("id")) != str(secret_id)]
+        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "删除秘钥", "target": f"{secret.get('name')} / {secret.get('type')}", "result": "成功"})
+        return secret
+
+    secret, state = mutate_state(update)
+    return secret, state
+
+
 def create_execution(task_id, actor, branch):
     def update(state):
         task = find_by_id(state["tasks"], task_id)
@@ -1980,6 +2073,15 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             self.send_json({"task": task, "state": client_state(state)})
             return
+        if parsed.path == "/api/secrets":
+            body = self.read_json_body()
+            try:
+                secret, state = save_secret_config(None, body.get("secret") or {}, body.get("actor"))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"secret": secret, "state": client_state(state)})
+            return
         if parsed.path == "/api/tasks/batch-run":
             body = self.read_json_body()
             try:
@@ -2079,6 +2181,16 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             self.send_json({"task": task, "state": client_state(state)})
             return
+        match = re.match(r"^/api/secrets/([^/]+)$", parsed.path)
+        if match:
+            query = parse_qs(parsed.query)
+            try:
+                secret, state = delete_secret_config(match.group(1), query.get("actor", ["system"])[0])
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"secret": secret, "state": client_state(state)})
+            return
         self.send_error(404)
 
     def do_PUT(self):
@@ -2092,6 +2204,16 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, status=400)
                 return
             self.send_json({"task": task, "state": client_state(state)})
+            return
+        match = re.match(r"^/api/secrets/([^/]+)$", parsed.path)
+        if match:
+            body = self.read_json_body()
+            try:
+                secret, state = save_secret_config(match.group(1), body.get("secret") or {}, body.get("actor"))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"secret": secret, "state": client_state(state)})
             return
         if parsed.path != "/api/state":
             self.send_error(404)

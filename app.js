@@ -479,14 +479,23 @@ async function saveStateAndRender() {
 }
 
 async function postJson(url, payload, method = "POST") {
-  const response = await fetch(url, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.error || "请求失败");
-  return result;
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), STATE_SAVE_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "请求失败");
+    return result;
+  } catch (error) {
+    throw new Error(error.name === "AbortError" ? "请求超时，请检查后端服务或数据库连接是否正常" : error.message);
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 }
 
 function cacheStateSnapshot(nextState = exportState()) {
@@ -2652,39 +2661,38 @@ async function saveSecret(event) {
   const form = event.currentTarget;
   const submitter = event.submitter;
   if (submitter) submitter.disabled = true;
-  const formData = new FormData(form);
-  const name = String(formData.get("name") || "").trim();
-  const organizationId = formData.get("organizationId") || visibleOrganizations()[0]?.id || "default";
-  if (!canAccessOrg(organizationId)) {
-    window.alert("当前用户组无权添加该秘钥到目标用户组");
-    if (submitter) submitter.disabled = false;
-    return;
-  }
-  if (secretNameExists(name)) {
-    window.alert(`秘钥名称 ${name} 已存在，请换一个更明确的名称`);
-    if (submitter) submitter.disabled = false;
-    return;
-  }
-  const secret = {
-    id: Date.now(),
-    name,
-    type: formData.get("type"),
-    organizationId,
-    target: formData.get("target"),
-    username: formData.get("username"),
-    secret: formData.get("secret"),
-    knownHosts: formData.get("knownHosts"),
-    createdAt: nowText(),
-  };
-  secrets.unshift(secret);
-  addAudit("添加秘钥", `${secret.name} / ${secretTypeLabel(secret.type)}`);
-  const saved = await persistState();
-  if (saved) {
+  try {
+    const formData = new FormData(form);
+    const name = String(formData.get("name") || "").trim();
+    const organizationId = formData.get("organizationId") || visibleOrganizations()[0]?.id || "default";
+    if (!canAccessOrg(organizationId)) {
+      window.alert("当前用户组无权添加该秘钥到目标用户组");
+      return;
+    }
+    if (secretNameExists(name)) {
+      window.alert(`秘钥名称 ${name} 已存在，请换一个更明确的名称`);
+      return;
+    }
+    const payload = {
+      name,
+      type: formData.get("type"),
+      organizationId,
+      target: formData.get("target"),
+      username: formData.get("username"),
+      secret: formData.get("secret"),
+      knownHosts: formData.get("knownHosts"),
+    };
+    const result = await postJson("/api/secrets", { actor: state.currentUser?.username || "system", secret: payload });
+    hydrateState(result.state);
+    cacheStateSnapshot(result.state);
     form.reset();
     render();
     closeCreateDialog(secretCreateDialog, form);
+  } catch (error) {
+    window.alert(error.message);
+  } finally {
+    if (submitter) submitter.disabled = false;
   }
-  if (submitter) submitter.disabled = false;
 }
 
 function openSecretDialog(secretId) {
@@ -2719,46 +2727,41 @@ async function saveEditedSecret(event) {
   if (!requirePermission("secret.manage")) return;
   const submitter = event.submitter;
   if (submitter) submitter.disabled = true;
-  const secret = secrets.find((item) => String(item.id) === String(editSecretForm.elements.id.value));
-  if (!secret) {
-    if (submitter) submitter.disabled = false;
-    return;
-  }
-  if (!canOperateAsset("secret.manage", secret)) {
-    window.alert("当前用户组无权保存该秘钥");
-    if (submitter) submitter.disabled = false;
-    return;
-  }
-  if (!canAccessOrg(editSecretForm.elements.organizationId.value || "default")) {
-    window.alert("当前用户组无权移动该秘钥到目标用户组");
-    if (submitter) submitter.disabled = false;
-    return;
-  }
-  const nextName = editSecretForm.elements.name.value.trim();
-  if (secretNameExists(nextName, secret.id)) {
-    window.alert(`秘钥名称 ${nextName} 已存在，请换一个更明确的名称`);
-    if (submitter) submitter.disabled = false;
-    return;
-  }
-  Object.assign(secret, {
-    name: nextName,
-    type: editSecretForm.elements.type.value,
-    organizationId: editSecretForm.elements.organizationId.value || "default",
-    target: editSecretForm.elements.target.value,
-    username: editSecretForm.elements.username.value,
-    knownHosts: editSecretForm.elements.knownHosts.value,
-    updatedAt: nowText(),
-  });
-  if (editSecretForm.elements.secret.value) {
-    secret.secret = editSecretForm.elements.secret.value;
-  }
-  addAudit("编辑秘钥", `${secret.name} / ${secretTypeLabel(secret.type)}`);
-  const saved = await persistState();
-  if (saved) {
+  try {
+    const secret = secrets.find((item) => String(item.id) === String(editSecretForm.elements.id.value));
+    if (!secret) return;
+    if (!canOperateAsset("secret.manage", secret)) {
+      window.alert("当前用户组无权保存该秘钥");
+      return;
+    }
+    if (!canAccessOrg(editSecretForm.elements.organizationId.value || "default")) {
+      window.alert("当前用户组无权移动该秘钥到目标用户组");
+      return;
+    }
+    const nextName = editSecretForm.elements.name.value.trim();
+    if (secretNameExists(nextName, secret.id)) {
+      window.alert(`秘钥名称 ${nextName} 已存在，请换一个更明确的名称`);
+      return;
+    }
+    const payload = {
+      name: nextName,
+      type: editSecretForm.elements.type.value,
+      organizationId: editSecretForm.elements.organizationId.value || "default",
+      target: editSecretForm.elements.target.value,
+      username: editSecretForm.elements.username.value,
+      secret: editSecretForm.elements.secret.value,
+      knownHosts: editSecretForm.elements.knownHosts.value,
+    };
+    const result = await postJson(`/api/secrets/${secret.id}`, { actor: state.currentUser?.username || "system", secret: payload }, "PUT");
+    hydrateState(result.state);
+    cacheStateSnapshot(result.state);
     render();
     closeSecretDialog();
+  } catch (error) {
+    window.alert(error.message);
+  } finally {
+    if (submitter) submitter.disabled = false;
   }
-  if (submitter) submitter.disabled = false;
 }
 
 async function deleteSecret(secretId) {
@@ -2789,10 +2792,21 @@ async function deleteSecret(secretId) {
     window.alert("平台默认推送镜像仓库正在使用该秘钥，请先在秘钥管理中切换仓库配置");
     return;
   }
-  const index = secrets.findIndex((item) => String(item.id) === String(secretId));
-  secrets.splice(index, 1);
-  addAudit("删除秘钥", `${secret.name} / ${secretTypeLabel(secret.type)}`);
-  await saveStateAndRender();
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), STATE_SAVE_TIMEOUT_MS);
+  try {
+    const actor = encodeURIComponent(state.currentUser?.username || "system");
+    const response = await fetch(`/api/secrets/${secretId}?actor=${actor}`, { method: "DELETE", signal: controller.signal });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "删除秘钥失败");
+    hydrateState(result.state);
+    cacheStateSnapshot(result.state);
+    render();
+  } catch (error) {
+    window.alert(error.name === "AbortError" ? "请求超时，请检查后端服务或数据库连接是否正常" : error.message);
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 }
 
 async function saveUser(event) {
