@@ -828,6 +828,7 @@ function channelLabel(type) {
 function secretTypeLabel(type) {
   return {
     git_https_token: "Git HTTPS Token",
+    git_http_password: "GitLab 账号密码",
     git_ssh_key: "Git SSH 私钥",
     registry: "镜像仓库账号",
     agent_token: "Agent Token 记录",
@@ -838,6 +839,7 @@ function secretTypeLabel(type) {
 function secretNamePlaceholder(type) {
   return {
     git_https_token: "例如 trade-github-readonly",
+    git_http_password: "例如 trade-gitlab-password",
     git_ssh_key: "例如 trade-gitlab-ssh-key",
     registry: "例如 aliyun-acr-pull",
     agent_token: "例如 trade-test-agent-token",
@@ -858,6 +860,12 @@ function syncSecretFieldHints(form, type) {
       username: "GitLab 可填 oauth2 或用户名",
       secret: "粘贴 GitLab Project Access Token / Personal Access Token",
       knownHosts: "HTTPS Token 不需要填写",
+    },
+    git_http_password: {
+      target: "code.lt.local / gitlab.example.com",
+      username: "GitLab 登录用户名",
+      secret: "GitLab 登录密码",
+      knownHosts: "HTTP/HTTPS 账号密码不需要填写",
     },
     git_ssh_key: {
       target: "gitlab.example.com 或 gitlab.example.com:2222",
@@ -884,7 +892,7 @@ function syncSecretNamePlaceholder() {
 }
 
 function gitCredentialOptions(selectedId = "") {
-  const gitSecrets = secrets.filter((item) => ["git_https_token", "git_ssh_key"].includes(item.type) && (canAccessAsset(item) || String(item.id) === String(selectedId)));
+  const gitSecrets = secrets.filter((item) => ["git_https_token", "git_http_password", "git_ssh_key"].includes(item.type) && (canAccessAsset(item) || String(item.id) === String(selectedId)));
   return [
     `<option value="">不使用凭据</option>`,
     ...gitSecrets.map((item) => `<option value="${item.id}" ${String(item.id) === String(selectedId) ? "selected" : ""}>${item.name} / ${secretTypeLabel(item.type)}</option>`),

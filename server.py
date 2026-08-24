@@ -922,23 +922,24 @@ def git_secret_by_id(state, secret_id):
     secret = secret_by_id(state, secret_id)
     if not secret:
         raise RuntimeError(f"Git 凭据不存在或已被删除: {secret_id}。请到秘钥管理确认已保存，并在任务的 Git 凭据下拉框重新选择。")
-    if secret.get("type") not in {"git_https_token", "git_ssh_key"}:
-        raise RuntimeError(f"Git 凭据类型不正确: {secret.get('name') or secret_id}，请选择 Git HTTPS Token 或 Git SSH 私钥。")
+    if secret.get("type") not in {"git_https_token", "git_http_password", "git_ssh_key"}:
+        raise RuntimeError(f"Git 凭据类型不正确: {secret.get('name') or secret_id}，请选择 Git HTTPS Token、GitLab 账号密码或 Git SSH 私钥。")
     if not secret.get("secret"):
         raise RuntimeError(f"Git 凭据 {secret.get('name') or secret_id} 缺少秘钥内容。")
     return secret
 
 
 def authenticated_repo_url(repo, secret):
-    if not secret or secret.get("type") != "git_https_token":
+    if not secret or secret.get("type") not in {"git_https_token", "git_http_password"}:
         return repo
-    if not repo.startswith("https://"):
+    if not re.match(r"^https?://", repo, flags=re.IGNORECASE):
         return repo
     token = secret.get("secret") or ""
-    username = secret.get("username") or "x-access-token"
+    username = secret.get("username") or ("x-access-token" if secret.get("type") == "git_https_token" else "")
     if not token or "@" in repo.split("://", 1)[1].split("/", 1)[0]:
         return repo
-    return repo.replace("https://", f"https://{quote(username, safe='')}:{quote(token, safe='')}@", 1)
+    scheme, rest = repo.split("://", 1)
+    return f"{scheme}://{quote(username, safe='')}:{quote(token, safe='')}@{rest}"
 
 
 def redact_secret_text(text, secret=None):
@@ -952,8 +953,20 @@ def redact_secret_text(text, secret=None):
     return re.sub(r"https://[^\s/:]+:[^\s@]+@", "https://***:***@", redacted)
 
 
+def git_error_message(output, secret=None):
+    message = redact_secret_text((output or "").strip(), secret)
+    if "could not read Username" in message:
+        return "Git HTTP 仓库需要账号认证。请在秘钥管理添加 Git HTTPS Token 或 GitLab 账号密码，并在任务编辑页的 Git 凭据中选择该秘钥。"
+    if "Authentication failed" in message or "HTTP Basic: Access denied" in message:
+        return "Git 认证失败，请检查任务绑定的 Git HTTPS Token 或 GitLab 账号密码是否正确。"
+    if "terminal prompts disabled" in message:
+        return "Git 需要交互式输入账号密码，但平台不支持交互输入。请绑定 Git HTTPS Token、GitLab 账号密码或改用 Git SSH 私钥。"
+    return message
+
+
 def clone_environment(work_dir, secret):
     env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
     if not secret or secret.get("type") != "git_ssh_key":
         return env
     ssh_dir = work_dir / ".ssh"
@@ -983,7 +996,7 @@ def list_repository_branches(repo, secret_id=None):
     code, output = run_command(["git", "ls-remote", "--heads", repo_url], env=env)
     shutil.rmtree(work_dir, ignore_errors=True)
     if code != 0:
-        raise RuntimeError(redact_secret_text(output.strip(), secret) or "读取仓库分支失败")
+        raise RuntimeError(git_error_message(output, secret) or "读取仓库分支失败")
     branches = []
     for line in output.splitlines():
         if "refs/heads/" not in line:
@@ -1608,7 +1621,7 @@ def normalize_secret_payload(payload, keep_existing_secret=False):
     secret_type = str(payload.get("type") or "git_https_token").strip()
     if not name:
         raise ValueError("秘钥名称不能为空")
-    if secret_type not in {"git_https_token", "git_ssh_key", "registry", "agent_token", "webhook"}:
+    if secret_type not in {"git_https_token", "git_http_password", "git_ssh_key", "registry", "agent_token", "webhook"}:
         raise ValueError("秘钥类型不正确")
     normalized = {
         "name": name,
@@ -1623,6 +1636,8 @@ def normalize_secret_payload(payload, keep_existing_secret=False):
         normalized["secret"] = secret_value
     if not keep_existing_secret and not normalized.get("secret"):
         raise ValueError("秘钥内容不能为空")
+    if secret_type == "git_http_password" and not normalized.get("username"):
+        raise ValueError("GitLab 账号密码类型必须填写用户名")
     return normalized
 
 

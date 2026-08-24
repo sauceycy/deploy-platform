@@ -20,7 +20,7 @@
 - 配置多集群部署目标
 - 集群管理支持查看 Agent 心跳、编辑集群和维护节点信息
 - 配置告警通知事件与通知渠道
-- 配置 Git HTTPS Token、Git SSH 私钥等秘钥，并在任务中选择 Git 凭据
+- 配置 Git HTTPS Token、GitLab 账号密码、Git SSH 私钥等秘钥，并在任务中选择 Git 凭据
 - Worker 拉代码、编译、构建镜像、推送镜像
 - Agent 拉取部署任务并创建 Deployment / Service / Ingress
 - 服务端调度线程扫描定时发布计划并触发 Worker
@@ -195,6 +195,7 @@ dev-agent-token
 进入「秘钥管理」可以新增并持久化以下类型：
 
 - Git HTTPS Token
+- GitLab 账号密码
 - Git SSH 私钥
 - 镜像仓库账号
 - Agent Token 记录
@@ -202,7 +203,7 @@ dev-agent-token
 
 私有 Git 仓库建议这样配置：
 
-1. 在「秘钥管理」添加 `Git HTTPS Token` 或 `Git SSH 私钥`
+1. 在「秘钥管理」添加 `Git HTTPS Token`、`GitLab 账号密码` 或 `Git SSH 私钥`
 2. 编辑发布任务
 3. 在「仓库与构建」里的 `Git 凭据` 下拉框选择刚才创建的秘钥
 4. 发布时平台会用该凭据读取分支并拉取代码
@@ -246,6 +247,17 @@ Git 凭据：选择 Git HTTPS Token
 用户名：可填 oauth2 或 GitHub 用户名
 秘钥内容：GitHub Personal Access Token
 ```
+
+GitLab HTTP 账号密码示例：
+
+```text
+仓库地址：http://code.lt.local/group/project.git
+Git 凭据：选择 GitLab 账号密码
+用户名：GitLab 登录账号
+秘钥内容：GitLab 登录密码
+```
+
+如果 GitLab 开启了双因素认证，账号密码通常不能直接用于 Git HTTP 拉取，请改用 Project Access Token / Personal Access Token，并选择 `Git HTTPS Token`。
 
 ## 发布流程
 
