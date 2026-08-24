@@ -756,6 +756,24 @@ def dockerconfigjson_for_secret(secret, image):
     return base64.b64encode(json.dumps(config, separators=(",", ":")).encode("utf-8")).decode("utf-8")
 
 
+def image_repository_path(image):
+    image = str(image or "").strip()
+    if not image:
+        return ""
+    parts = image.split("/", 1)
+    if len(parts) == 2 and registry_server_from_image(image) == parts[0]:
+        return parts[1]
+    return image
+
+
+def image_for_pull(image, pull_secret=None):
+    pull_registry = normalize_registry_server((pull_secret or {}).get("target"))
+    if not pull_registry:
+        return image
+    repo = image_repository_path(image)
+    return f"{pull_registry}/{repo}" if repo else image
+
+
 def run_command(args, cwd=None, input_text=None, env=None):
     process = subprocess.run(
         args,
@@ -1084,11 +1102,13 @@ def dispatch_agent_tasks(execution_id, task, image):
             pull_secret = secret_by_id(state, pull_secret_id)
             if pull_secret_id and (not pull_secret or pull_secret.get("type") != "registry"):
                 raise ValueError(f"集群 {cluster_name} 绑定的镜像拉取秘钥不存在或类型不正确")
+            pull_image = image_for_pull(image, pull_secret)
             payload = {
                 "appName": task["name"],
                 "namespace": target.get("namespace") or "default",
-                "image": image,
-                "manifest": create_manifest(task, target, image, pull_secret),
+                "image": pull_image,
+                "pushImage": image,
+                "manifest": create_manifest(task, target, pull_image, pull_secret),
                 "deployment": safe_name(task["name"]),
             }
             state["agentTasks"].append(
@@ -1105,6 +1125,8 @@ def dispatch_agent_tasks(execution_id, task, image):
                 }
             )
             execution.setdefault("clusterResults", {})[cluster_name] = "pending"
+            if pull_image != image:
+                execution.setdefault("logs", []).append({"time": now_text(), "message": f"集群 {cluster_name} 使用拉取镜像地址: {pull_image}"})
             dispatched_clusters.append(cluster_name)
         if not dispatched_clusters:
             raise ValueError("任务未绑定有效部署集群")

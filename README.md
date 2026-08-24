@@ -104,6 +104,20 @@ docker compose up -d --build
 - 平台推送镜像：通过 `REGISTRY_URL`、`REGISTRY_USERNAME`、`REGISTRY_PASSWORD` 配置在平台容器环境变量里。
 - Pod 拉取镜像：在「秘钥管理」新增 `镜像仓库账号`，地址填镜像仓库域名，用户名和秘钥填拉取账号；然后在「集群管理」设置默认镜像拉取秘钥，或在任务的「多集群部署」里单独选择。
 
+如果推送镜像和 Pod 拉取镜像使用不同域名，例如推送到内网域名：
+
+```text
+deploy-registry-vpc.ap-southeast-1.cr.aliyuncs.com/imageshub/app:tag
+```
+
+业务集群需要从公网或专有拉取域名下载：
+
+```text
+deploy-registry.ap-southeast-1.cr.aliyuncs.com/imageshub/app:tag
+```
+
+平台会在部署到每个集群时，根据该集群绑定的「镜像仓库账号」地址替换镜像的 registry 域名，保留后面的 `namespace/app:tag` 不变。
+
 发布时平台会把该账号生成为 `kubernetes.io/dockerconfigjson` Secret，下发给集群 Agent。Agent 会先创建或更新 Secret，再创建 Deployment，并在 Pod 上自动关联 `imagePullSecrets`。这个拉取秘钥不需要公网访问平台，只需要目标集群能访问镜像仓库。
 
 如果你的 Docker Compose 不是在项目目录启动，显式设置宿主数据目录：
