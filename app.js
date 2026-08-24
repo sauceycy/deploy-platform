@@ -94,6 +94,7 @@ const APP_USER_KEY = "deploy-platform-user";
 const APP_VIEW_KEY = "deploy-platform-view";
 let refreshTimer = null;
 let stateLoadError = "";
+let pendingStateWrites = 0;
 const loadingExecutionLogs = new Set();
 
 const state = {
@@ -448,6 +449,7 @@ function writeLocalState(nextState = exportState()) {
 async function persistState() {
   const payload = exportState();
   writeLocalState(payload);
+  pendingStateWrites += 1;
   try {
     const response = await fetch("/api/state", {
       method: "PUT",
@@ -456,11 +458,17 @@ async function persistState() {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "配置保存失败");
+    if (result.state) {
+      hydrateState(result.state);
+      cacheStateSnapshot(result.state);
+    }
     return true;
   } catch (error) {
     window.alert(error.message);
-    await refreshRemoteState();
+    await refreshRemoteState({ force: true });
     return false;
+  } finally {
+    pendingStateWrites = Math.max(0, pendingStateWrites - 1);
   }
 }
 
@@ -2139,7 +2147,8 @@ function renderConfigPreview() {
   configDialog.showModal();
 }
 
-async function refreshRemoteState() {
+async function refreshRemoteState(options = {}) {
+  if (pendingStateWrites > 0 && !options.force) return;
   await loadPersistedState();
   render();
 }
@@ -2419,14 +2428,17 @@ async function deleteTask(taskId) {
   render();
 }
 
-function saveCluster(event) {
+async function saveCluster(event) {
   event.preventDefault();
   if (!requirePermission("cluster.manage")) return;
   const form = event.currentTarget;
+  const submitter = event.submitter;
+  if (submitter) submitter.disabled = true;
   const formData = new FormData(form);
   const organizationId = formData.get("organizationId") || visibleOrganizations()[0]?.id || "default";
   if (!canAccessOrg(organizationId)) {
     window.alert("当前用户组无权添加该资产到目标用户组");
+    if (submitter) submitter.disabled = false;
     return;
   }
   const cluster = {
@@ -2441,10 +2453,13 @@ function saveCluster(event) {
   };
   clusters.unshift(cluster);
   addAudit("添加集群", cluster.name);
-  form.reset();
-  render();
-  persistState();
-  closeCreateDialog(clusterCreateDialog, form);
+  const saved = await persistState();
+  if (saved) {
+    form.reset();
+    render();
+    closeCreateDialog(clusterCreateDialog, form);
+  }
+  if (submitter) submitter.disabled = false;
 }
 
 function renderClusterNodes() {
@@ -2517,18 +2532,25 @@ function closeClusterDialog() {
   clusterNodeDrafts.splice(0, clusterNodeDrafts.length);
 }
 
-function saveEditedCluster(event) {
+async function saveEditedCluster(event) {
   event.preventDefault();
   if (!requirePermission("cluster.manage")) return;
+  const submitter = event.submitter;
+  if (submitter) submitter.disabled = true;
   collectClusterNodes();
   const cluster = clusters.find((item) => String(item.id) === String(editClusterForm.elements.id.value));
-  if (!cluster) return;
+  if (!cluster) {
+    if (submitter) submitter.disabled = false;
+    return;
+  }
   if (!canOperateAsset("cluster.manage", cluster)) {
     window.alert("当前用户组无权保存该集群");
+    if (submitter) submitter.disabled = false;
     return;
   }
   if (!canAccessOrg(editClusterForm.elements.organizationId.value || "default")) {
     window.alert("当前用户组无权移动该集群到目标用户组");
+    if (submitter) submitter.disabled = false;
     return;
   }
   Object.assign(cluster, {
@@ -2541,12 +2563,15 @@ function saveEditedCluster(event) {
     nodes: clusterNodeDrafts.filter((node) => node.name || node.ip),
   });
   addAudit("编辑集群", cluster.name);
-  render();
-  persistState();
-  closeClusterDialog();
+  const saved = await persistState();
+  if (saved) {
+    render();
+    closeClusterDialog();
+  }
+  if (submitter) submitter.disabled = false;
 }
 
-function updateClusterPullSecret(clusterId, secretId) {
+async function updateClusterPullSecret(clusterId, secretId) {
   if (!requirePermission("cluster.manage")) return;
   const cluster = clusters.find((item) => String(item.id) === String(clusterId));
   if (!cluster) return;
@@ -2556,14 +2581,15 @@ function updateClusterPullSecret(clusterId, secretId) {
   }
   cluster.imagePullSecretId = secretId;
   addAudit("设置镜像拉取秘钥", `${cluster.name} / ${secretName(secretId)}`);
-  render();
-  persistState();
+  await saveStateAndRender();
 }
 
-function saveTemplate(event) {
+async function saveTemplate(event) {
   event.preventDefault();
   if (!requirePermission("template.manage")) return;
   const form = event.currentTarget;
+  const submitter = event.submitter;
+  if (submitter) submitter.disabled = true;
   const formData = new FormData(form);
   const template = {
     id: Date.now(),
@@ -2574,16 +2600,21 @@ function saveTemplate(event) {
   };
   buildTemplates.unshift(template);
   addAudit("添加构建模板", template.name);
-  form.reset();
-  render();
-  persistState();
-  closeCreateDialog(templateCreateDialog, form);
+  const saved = await persistState();
+  if (saved) {
+    form.reset();
+    render();
+    closeCreateDialog(templateCreateDialog, form);
+  }
+  if (submitter) submitter.disabled = false;
 }
 
-function saveChannel(event) {
+async function saveChannel(event) {
   event.preventDefault();
   if (!requirePermission("channel.manage")) return;
   const form = event.currentTarget;
+  const submitter = event.submitter;
+  if (submitter) submitter.disabled = true;
   const formData = new FormData(form);
   const channel = {
     id: Date.now(),
@@ -2594,20 +2625,25 @@ function saveChannel(event) {
   };
   notifyChannels.unshift(channel);
   addAudit("添加通知渠道", channel.name);
-  form.reset();
-  render();
-  persistState();
-  closeCreateDialog(channelCreateDialog, form);
+  const saved = await persistState();
+  if (saved) {
+    form.reset();
+    render();
+    closeCreateDialog(channelCreateDialog, form);
+  }
+  if (submitter) submitter.disabled = false;
 }
 
-function savePlatformSettings(event) {
+async function savePlatformSettings(event) {
   event.preventDefault();
   if (!requirePermission("secret.manage")) return;
+  const submitter = event.submitter;
+  if (submitter) submitter.disabled = true;
   platformSettings.registrySecretId = platformSettingsForm.elements.registrySecretId.value;
   platformSettings.imageNamespace = (platformSettingsForm.elements.imageNamespace.value || "deploy-platform").trim().replace(/^\/+|\/+$/g, "") || "deploy-platform";
   addAudit("保存镜像仓库配置", `${secretName(platformSettings.registrySecretId)} / ${platformSettings.imageNamespace}`);
-  render();
-  persistState();
+  await saveStateAndRender();
+  if (submitter) submitter.disabled = false;
 }
 
 async function saveSecret(event) {
@@ -2725,7 +2761,7 @@ async function saveEditedSecret(event) {
   if (submitter) submitter.disabled = false;
 }
 
-function deleteSecret(secretId) {
+async function deleteSecret(secretId) {
   if (!requirePermission("secret.manage")) return;
   const secret = secrets.find((item) => String(item.id) === String(secretId));
   if (!secret) return;
@@ -2756,8 +2792,7 @@ function deleteSecret(secretId) {
   const index = secrets.findIndex((item) => String(item.id) === String(secretId));
   secrets.splice(index, 1);
   addAudit("删除秘钥", `${secret.name} / ${secretTypeLabel(secret.type)}`);
-  render();
-  persistState();
+  await saveStateAndRender();
 }
 
 async function saveUser(event) {
@@ -3284,7 +3319,7 @@ document.querySelectorAll(".nav-item").forEach((button) => {
   button.addEventListener("click", () => setView(button.dataset.view));
 });
 
-document.addEventListener("change", (event) => {
+document.addEventListener("change", async (event) => {
   const taskCheckbox = event.target.closest("[data-task-select]");
   if (taskCheckbox) {
     const taskId = String(taskCheckbox.dataset.taskSelect);
@@ -3315,8 +3350,7 @@ document.addEventListener("change", (event) => {
       group.permissions = (group.permissions || []).filter((item) => item !== permission);
     }
     addAudit("更新用户组权限", `${group.name} / ${permission}`);
-    render();
-    persistState();
+    await saveStateAndRender();
     return;
   }
 
@@ -3327,8 +3361,7 @@ document.addEventListener("change", (event) => {
     if (!group || group.id === "default") return;
     group.globalAccess = groupGlobalInput.checked;
     addAudit("更新用户组全局权限", `${group.name} / ${group.globalAccess ? "开启" : "关闭"}`);
-    render();
-    persistState();
+    await saveStateAndRender();
     return;
   }
 
@@ -3341,8 +3374,7 @@ document.addEventListener("change", (event) => {
     role.permissions = role.permissions.filter((permission) => permission !== input.dataset.permission);
   }
   addAudit("更新角色", `${role.label} / ${input.dataset.permission}`);
-  render();
-  persistState();
+  await saveStateAndRender();
 });
 
 document.addEventListener("click", (event) => {

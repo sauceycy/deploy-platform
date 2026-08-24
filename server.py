@@ -2110,7 +2110,7 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as exc:
             self.send_json({"error": str(exc)}, status=400)
             return
-        self.send_json({"ok": True})
+        self.send_json({"ok": True, "state": client_state(read_state())})
 
     def send_json(self, payload, status=200, headers=None):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
