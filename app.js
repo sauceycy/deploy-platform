@@ -3046,6 +3046,7 @@ function authUserSnapshot(user) {
     role: user.role || "viewer",
     globalAccess: Boolean(user.globalAccess),
     organizationIds: Array.isArray(user.organizationIds) && user.organizationIds.length ? user.organizationIds : ["default"],
+    token: user.token || "",
   };
 }
 
@@ -3083,11 +3084,11 @@ async function login(event) {
 }
 
 async function restoreSession(savedUser) {
-  if (!savedUser?.username) return false;
+  const token = savedUser?.token || "";
   try {
-    const result = await postJson("/api/auth/session", { username: savedUser.username });
+    const result = await postJson("/api/auth/session", { token, username: savedUser?.username || "" });
     const user = result.user;
-    state.currentUser = authUserSnapshot(user);
+    state.currentUser = authUserSnapshot({ ...user, token: user.token || token });
     hydrateState(result.state);
     window.localStorage.setItem(APP_USER_KEY, JSON.stringify(state.currentUser));
     return true;
@@ -3100,6 +3101,7 @@ async function restoreSession(savedUser) {
 function logout() {
   window.localStorage.removeItem(APP_USER_KEY);
   state.currentUser = null;
+  postJson("/api/auth/logout", {}).catch(() => {});
   closeDrawer();
   renderAuth();
 }
@@ -3450,6 +3452,8 @@ async function init() {
     } catch {
       window.localStorage.removeItem(APP_USER_KEY);
     }
+  } else {
+    restored = await restoreSession({});
   }
   updateSdkOptions(languageSelect.value);
   if (restored) {

@@ -1,5 +1,7 @@
 import base64
 import copy
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -36,6 +38,7 @@ REGISTRY_PASSWORD = os.environ.get("REGISTRY_PASSWORD", "")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 RESET_ADMIN_PASSWORD = os.environ.get("RESET_ADMIN_PASSWORD", "false").lower() == "true"
 AGENT_SHARED_TOKEN = os.environ.get("AGENT_SHARED_TOKEN", "dev-agent-token")
+SESSION_SECRET = os.environ.get("SESSION_SECRET") or AGENT_SHARED_TOKEN or "deploy-platform-session"
 AGENT_TASK_RETRY_SECONDS = int(os.environ.get("AGENT_TASK_RETRY_SECONDS", "300"))
 WAITING_DEPLOY_RECOVERY_SECONDS = int(os.environ.get("WAITING_DEPLOY_RECOVERY_SECONDS", "45"))
 ACTIVE_STATUSES = {"queued", "building", "deploying", "running"}
@@ -370,6 +373,41 @@ def public_user(user):
     }
 
 
+def base64url_encode(data):
+    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
+
+
+def base64url_decode(value):
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode((value + padding).encode("utf-8"))
+
+
+def sign_session_payload(payload):
+    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    body = base64url_encode(data)
+    signature = hmac.new(SESSION_SECRET.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).digest()
+    return f"{body}.{base64url_encode(signature)}"
+
+
+def verify_session_token(token):
+    token = str(token or "").strip()
+    if "." not in token:
+        raise ValueError("登录状态已失效")
+    body, signature = token.rsplit(".", 1)
+    expected = base64url_encode(hmac.new(SESSION_SECRET.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).digest())
+    if not hmac.compare_digest(signature, expected):
+        raise ValueError("登录状态签名无效，请重新登录")
+    payload = json.loads(base64url_decode(body).decode("utf-8"))
+    username = str(payload.get("username") or "").strip()
+    if not username:
+        raise ValueError("登录状态已失效")
+    return username
+
+
+def issue_session_token(user):
+    return sign_session_payload({"username": user.get("username"), "iat": int(time.time())})
+
+
 def authenticate_user(username, password):
     username = str(username or "").strip()
     password = str(password or "")
@@ -383,18 +421,22 @@ def authenticate_user(username, password):
         if username == "admin" and password == "admin123":
             raise ValueError("默认 admin 密码已不是 admin123，请使用当前密码；如需强制恢复可设置 ADMIN_PASSWORD=新密码 和 RESET_ADMIN_PASSWORD=true 后重启")
         raise ValueError("账号或密码不正确")
-    return public_user(user), state
+    public = public_user(user)
+    public["token"] = issue_session_token(user)
+    return public, state
 
 
-def session_user(username):
-    username = str(username or "").strip()
+def session_user(token=None):
+    username = verify_session_token(token)
     if not username:
         raise ValueError("登录状态已失效")
     state = read_state()
     user = find_user(state, username)
     if not user:
         raise ValueError("用户不存在，请重新登录")
-    return public_user(user), state
+    public = public_user(user)
+    public["token"] = issue_session_token(user)
+    return public, state
 
 
 def user_groups(state, user):
@@ -1784,6 +1826,16 @@ class Handler(SimpleHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
+    def cookie_value(self, name):
+        cookies = self.headers.get("Cookie", "")
+        for item in cookies.split(";"):
+            if "=" not in item:
+                continue
+            key, value = item.strip().split("=", 1)
+            if key == name:
+                return value
+        return ""
+
     def require_agent_token(self, parsed):
         query = parse_qs(parsed.query)
         token = query.get("token", [""])[0] or self.headers.get("X-Agent-Token", "")
@@ -1827,16 +1879,21 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=401)
                 return
-            self.send_json({"user": user, "state": state})
+            cookie = f"deploy_platform_session={user.get('token')}; Path=/; SameSite=Lax; HttpOnly"
+            self.send_json({"user": user, "state": state}, headers={"Set-Cookie": cookie})
             return
         if parsed.path == "/api/auth/session":
             body = self.read_json_body()
             try:
-                user, state = session_user(body.get("username"))
+                user, state = session_user(body.get("token") or self.cookie_value("deploy_platform_session"))
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=401)
                 return
-            self.send_json({"user": user, "state": state})
+            cookie = f"deploy_platform_session={user.get('token')}; Path=/; SameSite=Lax; HttpOnly"
+            self.send_json({"user": user, "state": state}, headers={"Set-Cookie": cookie})
+            return
+        if parsed.path == "/api/auth/logout":
+            self.send_json({"ok": True}, headers={"Set-Cookie": "deploy_platform_session=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly"})
             return
         if parsed.path == "/api/tasks":
             body = self.read_json_body()
@@ -1979,11 +2036,13 @@ class Handler(SimpleHTTPRequestHandler):
             return
         self.send_json({"ok": True})
 
-    def send_json(self, payload, status=200):
+    def send_json(self, payload, status=200, headers=None):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(data)
 
