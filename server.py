@@ -1267,6 +1267,10 @@ def dockerfile_env_value(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
 
 
+def normalize_jvm_options(value):
+    return re.sub(r"\s+", " ", str(value or "").replace("\r", " ").replace("\n", " ")).strip()
+
+
 def normalize_http_path(value):
     path = str(value or "").strip()
     if not path:
@@ -1313,10 +1317,10 @@ def generate_dockerfile(task, app_dir, src_dir):
             target = task.get("artifactPath") or "target/*.jar 或 **/target/*.jar"
             raise RuntimeError(f"未找到 Java 构建产物: {target}")
         jar = jars[0].relative_to(src_dir).as_posix()
-        jvm_options = str(task.get("jvmOptions") or "").strip()
-        java_opts_line = f"ENV JAVA_OPTS={dockerfile_env_value(jvm_options)}\n" if jvm_options else "ENV JAVA_OPTS=\"\"\n"
+        jvm_options = normalize_jvm_options(task.get("jvmOptions"))
+        java_opts_line = f"ENV JAVA_TOOL_OPTIONS={dockerfile_env_value(jvm_options)}\n" if jvm_options else "ENV JAVA_TOOL_OPTIONS=\"\"\n"
         generated.write_text(
-            f"FROM {runtime_base(task)}\nWORKDIR /app\nCOPY {jar} app.jar\n{java_opts_line}EXPOSE {port}\nENTRYPOINT [\"sh\",\"-c\",\"exec java $JAVA_OPTS -jar /app/app.jar\"]\n",
+            f"FROM {runtime_base(task)}\nWORKDIR /app\nCOPY {jar} app.jar\n{java_opts_line}EXPOSE {port}\nENTRYPOINT [\"java\",\"-jar\",\"/app/app.jar\"]\n",
             encoding="utf-8",
         )
     elif language == "golang":
@@ -1360,11 +1364,11 @@ def create_manifest(task, target, image, pull_secret=None):
 """
     ingress_host = target.get("ingress") or ""
     image_pull_secret_block = ""
-    jvm_options = str(task.get("jvmOptions") or "").strip()
+    jvm_options = normalize_jvm_options(task.get("jvmOptions"))
     jvm_env_block = ""
     if task.get("language") == "java" and jvm_options:
         jvm_env_block = f"""          env:
-            - name: JAVA_OPTS
+            - name: JAVA_TOOL_OPTIONS
               value: {json.dumps(jvm_options, ensure_ascii=False)}
 """
     docs = []
@@ -1921,7 +1925,7 @@ def normalize_task_payload(payload):
         "servicePort": int(payload.get("servicePort") or 80),
         "replicas": int(payload.get("replicas") or 1),
         "healthPath": str(payload.get("healthPath") or "").strip(),
-        "jvmOptions": str(payload.get("jvmOptions") or "").replace("\r", " ").replace("\n", " ").strip(),
+        "jvmOptions": normalize_jvm_options(payload.get("jvmOptions")),
         "clusters": normalized_clusters,
         "notify": {
             "channel": notify.get("channel") or "企业微信",

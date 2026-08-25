@@ -1295,7 +1295,7 @@ function renderDetail() {
         <span>Service</span><strong>${task.servicePort}</strong>
         <span>副本</span><strong>${task.replicas}</strong>
         <span>健康检查</span><strong>${task.healthPath || "未设置"}</strong>
-        ${task.language === "java" ? `<span>JVM 参数</span><strong>${task.jvmOptions || "未设置"}</strong>` : ""}
+        ${task.language === "java" ? `<span>JAVA_TOOL_OPTIONS</span><strong>${task.jvmOptions || "未设置"}</strong>` : ""}
       </div>
     </section>
 
@@ -1650,7 +1650,7 @@ function renderTaskConfigTab(task, activeSchedule) {
           <span>Service</span><strong>${task.servicePort}</strong>
           <span>副本</span><strong>${task.replicas}</strong>
           <span>健康检查</span><strong>${task.healthPath || "未设置"}</strong>
-          ${task.language === "java" ? `<span>JVM 参数</span><strong>${task.jvmOptions || "未设置"}</strong>` : ""}
+          ${task.language === "java" ? `<span>JAVA_TOOL_OPTIONS</span><strong>${task.jvmOptions || "未设置"}</strong>` : ""}
           <span>通知渠道</span><strong>${task.notify.channel}</strong>
           <span>通知目标</span><strong>${task.notify.target || "未设置"}</strong>
           <span>通知事件</span><strong>${task.notify.events.join("、") || "未设置"}</strong>
