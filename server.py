@@ -1397,6 +1397,7 @@ def dispatch_agent_tasks(execution_id, task, image):
             pull_image = image_for_pull(image, pull_secret)
             payload = {
                 "appName": task["name"],
+                "actor": execution.get("actor") or task.get("lastActor") or "system",
                 "namespace": target.get("namespace") or "default",
                 "image": pull_image,
                 "pushImage": image,
@@ -1474,6 +1475,7 @@ def lark_notification_card(task, event, event_label, message, event_time):
     else:
         cluster_text = str(clusters or "未绑定")
     rule_label = "CF Pages" if task_deploy_rule(task) == "cf_pages" else "K8s 服务"
+    actor = task.get("lastActor") or task.get("actor") or "system"
     return {
         "msg_type": "interactive",
         "card": {
@@ -1489,6 +1491,7 @@ def lark_notification_card(task, event, event_label, message, event_time):
                         lark_field("任务", task.get("name") or "-"),
                         lark_field("状态", event_label),
                         lark_field("部署规则", rule_label),
+                        lark_field("发布人", actor),
                         lark_field("环境", task.get("env") or "-"),
                         lark_field("负责人", task.get("owner") or "-"),
                         lark_field("语言 / SDK", f"{task.get('language') or '-'} / {task.get('sdk') or '-'}"),
@@ -1539,14 +1542,15 @@ def send_notification(task, event, message):
     if not url.startswith("http"):
         return
     event_time = now_text()
-    text = f"【{event_label}】{task.get('name')}\n{message}\n时间: {event_time}"
+    actor = task.get("lastActor") or task.get("actor") or "system"
+    text = f"【{event_label}】{task.get('name')}\n发布人: {actor}\n{message}\n时间: {event_time}"
     channel_type = (channel or {}).get("type") or "webhook"
     if channel_type == "feishu":
         payload = lark_notification_card(task, event, event_label, message, event_time)
     elif channel_type in {"wecom", "dingtalk"}:
         payload = {"msgtype": "text", "text": {"content": text}}
     else:
-        payload = {"task": task.get("name"), "event": event, "eventLabel": event_label, "message": message, "time": event_time, "text": text}
+        payload = {"task": task.get("name"), "actor": actor, "event": event, "eventLabel": event_label, "message": message, "time": event_time, "text": text}
     try:
         req = Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json"})
         urlopen(req, timeout=5).read()
@@ -1695,18 +1699,19 @@ def build_and_dispatch(execution_id):
 
 def create_execution_record(state, task, actor, branch, action="触发发布"):
     execution_id = uuid.uuid4().hex[:12]
+    execution_actor = actor or "system"
     execution = {
         "id": execution_id,
         "taskId": task["id"],
         "taskName": task["name"],
         "deployRule": task_deploy_rule(task),
         "branch": branch,
-        "actor": actor or "system",
+        "actor": execution_actor,
         "status": "queued",
         "stage": "等待执行",
         "progress": 5,
         "image": "",
-        "logs": [{"time": now_text(), "message": "执行已进入队列"}],
+        "logs": [{"time": now_text(), "message": f"执行已进入队列，发布人: {execution_actor}"}],
         "clusterResults": {},
         "createdAt": now_text(),
         "updatedAt": now_text(),
@@ -1717,11 +1722,12 @@ def create_execution_record(state, task, actor, branch, action="触发发布"):
     task["progress"] = 5
     task["lastRun"] = now_text()
     task["lastBranch"] = branch
+    task["lastActor"] = execution_actor
     state["auditLogs"].insert(
         0,
         {
             "time": now_text(),
-            "actor": actor or "system",
+            "actor": execution_actor,
             "action": action,
             "target": f"{task['name']} / {branch}",
             "result": "已入队",

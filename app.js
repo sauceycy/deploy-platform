@@ -654,6 +654,10 @@ function latestLogMessage(execution) {
   return last ? last.message.trim() : "暂无日志";
 }
 
+function publishActor(task, execution = selectedExecutionForTask(task?.id)) {
+  return execution?.actor || task?.lastActor || "system";
+}
+
 function clusterResultEntries(execution) {
   const raw = execution?.clusterResults;
   if (Array.isArray(raw)) {
@@ -1055,6 +1059,7 @@ function filteredTasks() {
         task.env,
         task.language,
         task.sdk,
+        publishActor(task),
         deployRuleLabel(task.deployRule),
         task.workdir,
         task.artifactPath,
@@ -1101,7 +1106,7 @@ function renderRows() {
         </div>
         <div class="task-main">
           <strong>${task.name}</strong>
-          <span>${organizationName(task.organizationId)} · ${task.env} · ${task.owner || "未设置负责人"} · ${task.lastRun}</span>
+          <span>${organizationName(task.organizationId)} · ${task.env} · ${task.owner || "未设置负责人"} · 发布人 ${publishActor(task)} · ${task.lastRun}</span>
         </div>
         <div>
           <span class="language-chip ${task.language}">${languageLabel(task.language)} / ${task.sdk}</span>
@@ -1211,6 +1216,10 @@ function renderDetail() {
                 <strong>${latestExecution.branch || "未记录"}</strong>
               </div>
               <div>
+                <span>发布人</span>
+                <strong>${publishActor(task, latestExecution)}</strong>
+              </div>
+              <div>
                 <span>阶段</span>
                 <strong>${latestExecution.stage || statusLabel(latestExecution.status)}</strong>
               </div>
@@ -1248,6 +1257,7 @@ function renderDetail() {
       <div class="kv-grid">
         <span>仓库</span><strong>${task.repo}</strong>
         <span>最近分支</span><strong>${task.lastBranch || "未发布"}</strong>
+        <span>最近发布人</span><strong>${publishActor(task)}</strong>
         <span>部署规则</span><strong>${deployRuleLabel(task.deployRule)}</strong>
         <span>编译路径</span><strong>${task.workdir}</strong>
         <span>${normalizeDeployRule(task.deployRule) === "cf_pages" ? "部署命令" : "制品路径"}</span><strong>${
@@ -1383,6 +1393,10 @@ function renderDetailMeta(task, latestExecution, activeSchedule) {
         <strong>${deployRuleLabel(task.deployRule)}</strong>
       </div>
       <div>
+        <span>发布人</span>
+        <strong>${publishActor(task, latestExecution)}</strong>
+      </div>
+      <div>
         <span>SDK</span>
         <strong>${languageLabel(task.language)} / ${task.sdk}</strong>
       </div>
@@ -1456,6 +1470,7 @@ function renderTaskDetailPage() {
             <div class="detail-eyebrow">
               <span>${task.env}</span>
               <span>${task.owner || "未设置负责人"}</span>
+              <span>发布人 ${publishActor(task, latestExecution)}</span>
               <span>${task.tag || "未设置标签"}</span>
             </div>
             <h2>${task.name}</h2>
@@ -1502,6 +1517,7 @@ function renderTaskOverviewTab(task, latestExecution, activeSchedule) {
               <div class="execution-head wide">
                 <div><span>执行 ID</span><strong>${latestExecution.id}</strong></div>
                 <div><span>分支</span><strong>${latestExecution.branch || "未记录"}</strong></div>
+                <div><span>发布人</span><strong>${publishActor(task, latestExecution)}</strong></div>
                 <div><span>阶段</span><strong>${latestExecution.stage || statusLabel(latestExecution.status)}</strong></div>
                 <div><span>镜像</span><strong>${latestExecution.image || "未生成"}</strong></div>
               </div>
@@ -1590,6 +1606,7 @@ function renderTaskConfigTab(task, activeSchedule) {
         <div class="kv-grid roomy">
           <span>仓库</span><strong>${task.repo}</strong>
           <span>最近分支</span><strong>${task.lastBranch || "未发布"}</strong>
+          <span>最近发布人</span><strong>${publishActor(task)}</strong>
           <span>部署规则</span><strong>${deployRuleLabel(task.deployRule)}</strong>
           <span>编译路径</span><strong>${task.workdir}</strong>
           <span>${normalizeDeployRule(task.deployRule) === "cf_pages" ? "部署命令" : "制品路径"}</span><strong>${
@@ -1679,7 +1696,7 @@ function renderTaskHistoryTab(history) {
                     <button class="history-item ${String(state.detailExecutionId) === String(execution.id) ? "active" : ""}" type="button" data-history-execution="${execution.id}">
                       <div>
                         <strong>${execution.branch || "未记录分支"}</strong>
-                        <span>${execution.id} · ${execution.stage || statusLabel(execution.status)} · ${clusterResultSummary(execution)}</span>
+                        <span>${execution.id} · 发布人 ${execution.actor || "system"} · ${execution.stage || statusLabel(execution.status)} · ${clusterResultSummary(execution)}</span>
                       </div>
                       <span class="status-chip ${execution.status}">${statusLabel(execution.status)}</span>
                     </button>
