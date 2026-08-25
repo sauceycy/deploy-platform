@@ -42,6 +42,7 @@ SESSION_SECRET = os.environ.get("SESSION_SECRET") or AGENT_SHARED_TOKEN or "depl
 AGENT_TASK_RETRY_SECONDS = int(os.environ.get("AGENT_TASK_RETRY_SECONDS", "300"))
 AGENT_TASK_TAKEOVER_SECONDS = int(os.environ.get("AGENT_TASK_TAKEOVER_SECONDS", "45"))
 WAITING_DEPLOY_RECOVERY_SECONDS = int(os.environ.get("WAITING_DEPLOY_RECOVERY_SECONDS", "45"))
+AUTO_CREATE_NAMESPACE = os.environ.get("AUTO_CREATE_NAMESPACE", "false").lower() == "true"
 ACTIVE_STATUSES = {"queued", "building", "deploying", "running"}
 CLEAN_WORKSPACE_AFTER_BUILD = os.environ.get("CLEAN_WORKSPACE_AFTER_BUILD", "true").lower() != "false"
 CLEAN_LOCAL_IMAGE_AFTER_BUILD = os.environ.get("CLEAN_LOCAL_IMAGE_AFTER_BUILD", "true").lower() != "false"
@@ -1153,15 +1154,17 @@ def create_manifest(task, target, image, pull_secret=None):
             - name: JAVA_OPTS
               value: {json.dumps(jvm_options, ensure_ascii=False)}
 """
-    docs = [
-        f"""apiVersion: v1
+    docs = []
+    if AUTO_CREATE_NAMESPACE:
+        docs.append(
+            f"""apiVersion: v1
 kind: Namespace
 metadata:
   name: {namespace}
   labels:
     managed-by: deploy-platform
 """
-    ]
+        )
     if pull_secret:
         secret_name = safe_name(f"{app}-{pull_secret.get('name') or 'registry'}-pull")
         dockerconfigjson = dockerconfigjson_for_secret(pull_secret, image)

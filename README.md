@@ -175,6 +175,14 @@ kubectl apply -f manifest
 kubectl rollout status deployment/<app>
 ```
 
+业务命名空间默认需要提前创建，例如：
+
+```bash
+kubectl create namespace trade-test
+```
+
+平台默认不会让 Agent 创建或修改 Namespace，避免扩大集群级权限。如果确实需要自动创建 Namespace，可在平台服务端显式设置 `AUTO_CREATE_NAMESPACE=true`，并由集群管理员额外给 Agent 授权 `namespaces` 的 `get/create/patch` 权限。
+
 Agent Token 有两个设置位置，值必须一致：
 
 ```text
