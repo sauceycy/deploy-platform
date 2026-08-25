@@ -497,6 +497,10 @@
               <span>健康检查路径（选填）</span>
               <input name="healthPath" placeholder="留空不添加，例如 /actuator/health" />
             </label>
+            <label class="wide-field">
+              <span>运行环境变量</span>
+              <textarea name="runtimeEnv" placeholder="SPRING_PROFILES_ACTIVE=test&#10;SPRING_CLOUD_NACOS_USERNAME=nacos&#10;SPRING_CLOUD_NACOS_PASSWORD=xxxx"></textarea>
+            </label>
             <label class="wide-field java-build-field">
               <span>JVM 启动参数</span>
               <textarea name="jvmOptions" placeholder="每个参数用空格或换行分隔，例如：&#10;-Xms512m -Xmx1024m&#10;-Dspring.profiles.active=test"></textarea>

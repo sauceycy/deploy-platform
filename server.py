@@ -783,7 +783,7 @@ def apply_maven_settings_to_command(command, settings_path):
     return f"{prefix}{binary} -s {settings_path}{rest}", True
 
 
-def parse_build_env(value):
+def parse_key_value_env(value, label="环境变量"):
     env = {}
     for line_number, raw_line in enumerate(str(value or "").splitlines(), start=1):
         line = raw_line.strip()
@@ -792,13 +792,21 @@ def parse_build_env(value):
         if line.startswith("export "):
             line = line[7:].strip()
         if "=" not in line:
-            raise RuntimeError(f"构建环境变量第 {line_number} 行格式错误，应为 KEY=VALUE")
+            raise RuntimeError(f"{label}第 {line_number} 行格式错误，应为 KEY=VALUE")
         key, item_value = line.split("=", 1)
         key = key.strip()
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
-            raise RuntimeError(f"构建环境变量名不合法: {key}")
+            raise RuntimeError(f"{label}名不合法: {key}")
         env[key] = item_value
     return env
+
+
+def parse_build_env(value):
+    return parse_key_value_env(value, "构建环境变量")
+
+
+def parse_runtime_env(value):
+    return parse_key_value_env(value, "运行环境变量")
 
 
 def docker_env_args(env):
@@ -1364,13 +1372,17 @@ def create_manifest(task, target, image, pull_secret=None):
 """
     ingress_host = target.get("ingress") or ""
     image_pull_secret_block = ""
+    runtime_env = parse_runtime_env(task.get("runtimeEnv"))
     jvm_options = normalize_jvm_options(task.get("jvmOptions"))
-    jvm_env_block = ""
+    env_block = ""
     if task.get("language") == "java" and jvm_options:
-        jvm_env_block = f"""          env:
-            - name: JAVA_TOOL_OPTIONS
-              value: {json.dumps(jvm_options, ensure_ascii=False)}
-"""
+        runtime_env["JAVA_TOOL_OPTIONS"] = jvm_options
+    if runtime_env:
+        env_lines = ["          env:"]
+        for key, value in runtime_env.items():
+            env_lines.append(f"            - name: {key}")
+            env_lines.append(f"              value: {json.dumps(value, ensure_ascii=False)}")
+        env_block = "\n".join(env_lines) + "\n"
     docs = []
     if AUTO_CREATE_NAMESPACE:
         docs.append(
@@ -1424,7 +1436,7 @@ spec:
         - name: {app}
           image: {image}
           imagePullPolicy: Always
-{jvm_env_block}          ports:
+{env_block}          ports:
             - containerPort: {container_port}
 {readiness_probe_block}
 """,
@@ -1913,7 +1925,7 @@ def normalize_task_payload(payload):
         "workdir": str(payload.get("workdir") or ".").strip() or ".",
         "artifactPath": str(payload.get("artifactPath") or "").strip(),
         "gitCredentialId": str(payload.get("gitCredentialId") or "").strip(),
-        "language": str(payload.get("language") or "java").strip(),
+        "language": str(payload.get("language") or "java").strip().lower(),
         "sdk": str(payload.get("sdk") or "").strip(),
         "buildCommand": str(payload.get("buildCommand") or "").strip(),
         "buildEnv": str(payload.get("buildEnv") or ""),
@@ -1925,6 +1937,7 @@ def normalize_task_payload(payload):
         "servicePort": int(payload.get("servicePort") or 80),
         "replicas": int(payload.get("replicas") or 1),
         "healthPath": str(payload.get("healthPath") or "").strip(),
+        "runtimeEnv": str(payload.get("runtimeEnv") or ""),
         "jvmOptions": normalize_jvm_options(payload.get("jvmOptions")),
         "clusters": normalized_clusters,
         "notify": {
@@ -1942,9 +1955,12 @@ def normalize_task_payload(payload):
         task_payload["jvmOptions"] = ""
     elif task_payload["language"] != "java":
         task_payload["artifactPath"] = ""
+        task_payload["jvmOptions"] = ""
     if deploy_rule == "cf_pages":
         task_payload["clusters"] = []
         task_payload["artifactPath"] = ""
+        task_payload["runtimeEnv"] = ""
+        task_payload["jvmOptions"] = ""
     return task_payload
 
 

@@ -583,7 +583,7 @@ function activeScheduleForTask(taskId) {
   return schedules.find((schedule) => String(schedule.taskId) === String(taskId) && schedule.status === "pending");
 }
 
-function buildEnvKeys(value) {
+function envKeys(value) {
   return String(value || "")
     .split(/\r?\n/)
     .map((line) => line.trim().replace(/^export\s+/, ""))
@@ -1278,7 +1278,7 @@ function renderDetail() {
         <span>语言</span><strong>${languageLabel(task.language)}</strong>
         <span>SDK</span><strong>${task.sdk}</strong>
         <span>命令</span><strong>${normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : task.buildCommand}</strong>
-        <span>环境变量</span><strong>${buildEnvKeys(task.buildEnv).join("、") || "未设置"}</strong>
+        <span>构建环境变量</span><strong>${envKeys(task.buildEnv).join("、") || "未设置"}</strong>
         ${
           task.language === "java"
             ? `<span>Maven 私库</span><strong>${task.mavenRepoUrl || "未设置"}</strong>
@@ -1295,6 +1295,7 @@ function renderDetail() {
         <span>Service</span><strong>${task.servicePort}</strong>
         <span>副本</span><strong>${task.replicas}</strong>
         <span>健康检查</span><strong>${task.healthPath || "未设置"}</strong>
+        <span>运行环境变量</span><strong>${envKeys(task.runtimeEnv).join("、") || "未设置"}</strong>
         ${task.language === "java" ? `<span>JAVA_TOOL_OPTIONS</span><strong>${task.jvmOptions || "未设置"}</strong>` : ""}
       </div>
     </section>
@@ -1633,7 +1634,7 @@ function renderTaskConfigTab(task, activeSchedule) {
           <span>语言</span><strong>${languageLabel(task.language)}</strong>
           <span>SDK</span><strong>${task.sdk}</strong>
           <span>命令</span><strong>${normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : task.buildCommand}</strong>
-          <span>环境变量</span><strong>${buildEnvKeys(task.buildEnv).join("、") || "未设置"}</strong>
+          <span>构建环境变量</span><strong>${envKeys(task.buildEnv).join("、") || "未设置"}</strong>
           ${
             task.language === "java"
               ? `<span>Maven 私库</span><strong>${task.mavenRepoUrl || "未设置"}</strong>
@@ -1650,6 +1651,7 @@ function renderTaskConfigTab(task, activeSchedule) {
           <span>Service</span><strong>${task.servicePort}</strong>
           <span>副本</span><strong>${task.replicas}</strong>
           <span>健康检查</span><strong>${task.healthPath || "未设置"}</strong>
+          <span>运行环境变量</span><strong>${envKeys(task.runtimeEnv).join("、") || "未设置"}</strong>
           ${task.language === "java" ? `<span>JAVA_TOOL_OPTIONS</span><strong>${task.jvmOptions || "未设置"}</strong>` : ""}
           <span>通知渠道</span><strong>${task.notify.channel}</strong>
           <span>通知目标</span><strong>${task.notify.target || "未设置"}</strong>
@@ -2142,7 +2144,7 @@ function syncDeployRuleFields() {
     field.hidden = isPages;
   });
 
-  ["buildCommand", "containerPort", "servicePort", "replicas", "healthPath", "jvmOptions"].forEach((name) => {
+  ["buildCommand", "containerPort", "servicePort", "replicas", "healthPath", "runtimeEnv", "jvmOptions"].forEach((name) => {
     const field = taskForm.elements[name];
     if (field) field.disabled = isPages;
   });
@@ -2199,6 +2201,7 @@ function resetTaskForm() {
   taskForm.elements.pagesDeployCommand.value = defaultPagesDeployCommand("npm");
   taskForm.elements.mavenRepoUrl.value = "";
   taskForm.elements.mavenMirrorOf.value = "maven-public";
+  taskForm.elements.runtimeEnv.value = "";
   taskForm.elements.jvmOptions.value = "";
   renderNotifyChannelOptions("", true);
   renderGitCredentialOptions("");
@@ -2249,6 +2252,7 @@ function openTaskEditor(taskId) {
   taskForm.elements.pagesDeployCommand.value = task.pagesDeployCommand || defaultPagesDeployCommand(task.pagesPackageManager || "npm");
   taskForm.elements.mavenRepoUrl.value = task.mavenRepoUrl || "";
   taskForm.elements.mavenMirrorOf.value = task.mavenMirrorOf || "maven-public";
+  taskForm.elements.runtimeEnv.value = task.runtimeEnv || "";
   taskForm.elements.jvmOptions.value = task.jvmOptions || "";
   taskForm.elements.containerPort.value = task.containerPort || "";
   taskForm.elements.servicePort.value = task.servicePort || "";
@@ -2364,6 +2368,7 @@ function buildPreviewObject() {
       servicePort: Number(formValue("servicePort")),
       replicas: Number(formValue("replicas") || 1),
       healthPath: formValue("healthPath"),
+      env: formValue("runtimeEnv"),
       jvmOptions: formValue("language") === "java" ? formValue("jvmOptions") : "",
     },
     clusters: normalizeDeployRule(formValue("deployRule")) === "cf_pages" ? [] : clusterDrafts,
@@ -2408,6 +2413,7 @@ async function saveTask(event) {
     servicePort: preview.runtime.servicePort,
     replicas: preview.runtime.replicas,
     healthPath: preview.runtime.healthPath,
+    runtimeEnv: preview.runtime.env,
     jvmOptions: preview.runtime.jvmOptions,
     clusters: preview.clusters.map((cluster) => ({ ...cluster, status: cluster.status || "success" })),
     notify: preview.notify,
