@@ -106,6 +106,7 @@ const state = {
   filter: "all",
   detailLogFilter: "all",
   detailLogQuery: "",
+  logAutoFollow: true,
   detailTab: "overview",
   detailExecutionId: "",
   search: "",
@@ -787,7 +788,7 @@ function renderLogViewer(execution) {
           <button class="icon-button" type="button" data-log-copy="${execution.id}" title="复制日志">
             <i data-lucide="copy"></i>
           </button>
-          <button class="icon-button" type="button" data-log-scroll title="跳到底部">
+          <button class="icon-button ${state.logAutoFollow ? "active" : ""}" type="button" data-log-scroll title="${state.logAutoFollow ? "正在跟随最新日志" : "跳到底部并跟随最新"}">
             <i data-lucide="arrow-down-to-line"></i>
           </button>
         </div>
@@ -804,6 +805,39 @@ function renderLogViewer(execution) {
       }</pre>
     </div>
   `;
+}
+
+function currentLogBox() {
+  const logScope = state.view === "taskDetail" ? taskDetailBody : detailPanel;
+  return logScope?.querySelector(".rich-log") || null;
+}
+
+function isNearLogBottom(logBox) {
+  return logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight < 80;
+}
+
+function rememberLogFollowState() {
+  const logBox = currentLogBox();
+  if (!logBox) return;
+  state.logAutoFollow = isNearLogBottom(logBox);
+  syncLogFollowButton();
+}
+
+function followLatestLog(force = false) {
+  const logBox = currentLogBox();
+  if (!logBox || (!force && !state.logAutoFollow)) return;
+  window.requestAnimationFrame(() => {
+    const nextLogBox = currentLogBox();
+    if (nextLogBox) nextLogBox.scrollTop = nextLogBox.scrollHeight;
+  });
+}
+
+function syncLogFollowButton() {
+  const logScope = state.view === "taskDetail" ? taskDetailBody : detailPanel;
+  const button = logScope?.querySelector("[data-log-scroll]");
+  if (!button) return;
+  button.classList.toggle("active", state.logAutoFollow);
+  button.title = state.logAutoFollow ? "正在跟随最新日志" : "跳到底部并跟随最新";
 }
 
 function selectedExecutionForTask(taskId) {
@@ -1488,8 +1522,10 @@ async function ensureFullExecutionLogs(execution) {
       target.logs = Array.isArray(result.logs) ? result.logs : [];
       target.logCount = target.logs.length;
       if (state.view === "taskDetail" && state.detailTab === "logs") {
+        rememberLogFollowState();
         renderTaskDetailPage();
         lucide.createIcons();
+        followLatestLog();
       }
     }
   } catch {
@@ -2243,8 +2279,10 @@ function renderConfigPreview() {
 
 async function refreshRemoteState(options = {}) {
   if (pendingStateWrites > 0 && !options.force) return;
+  rememberLogFollowState();
   await loadPersistedState();
   render();
+  followLatestLog();
 }
 
 async function openBranchDialog(taskId) {
@@ -3475,10 +3513,12 @@ taskSearch.addEventListener("input", (event) => {
 document.addEventListener("input", (event) => {
   const logQuery = event.target.closest("[data-log-query]");
   if (logQuery) {
+    rememberLogFollowState();
     state.detailLogQuery = logQuery.value;
     renderDetail();
     renderTaskDetailPage();
     lucide.createIcons();
+    followLatestLog();
     window.setTimeout(() => {
       const logScope = state.view === "taskDetail" ? taskDetailBody : detailPanel;
       const nextInput = logScope?.querySelector("[data-log-query]");
@@ -3489,6 +3529,16 @@ document.addEventListener("input", (event) => {
     }, 0);
   }
 });
+
+document.addEventListener(
+  "scroll",
+  (event) => {
+    if (!event.target?.classList?.contains("rich-log")) return;
+    state.logAutoFollow = isNearLogBottom(event.target);
+    syncLogFollowButton();
+  },
+  true,
+);
 
 selectAllTasks.addEventListener("change", (event) => {
   const visibleIds = filteredTasks().map((task) => String(task.id));
@@ -3668,10 +3718,12 @@ document.addEventListener("click", (event) => {
 
   const logFilterButton = event.target.closest("[data-log-filter]");
   if (logFilterButton) {
+    rememberLogFollowState();
     state.detailLogFilter = logFilterButton.dataset.logFilter;
     renderDetail();
     renderTaskDetailPage();
     lucide.createIcons();
+    followLatestLog();
     return;
   }
 
@@ -3686,9 +3738,9 @@ document.addEventListener("click", (event) => {
 
   const logScrollButton = event.target.closest("[data-log-scroll]");
   if (logScrollButton) {
-    const logScope = state.view === "taskDetail" ? taskDetailBody : detailPanel;
-    const logBox = logScope?.querySelector(".rich-log");
-    if (logBox) logBox.scrollTop = logBox.scrollHeight;
+    state.logAutoFollow = true;
+    syncLogFollowButton();
+    followLatestLog(true);
     return;
   }
 

@@ -475,6 +475,12 @@ svg {
   color: var(--text);
 }
 
+.icon-button.active {
+  border-color: rgba(17, 100, 80, 0.42);
+  background: rgba(17, 100, 80, 0.1);
+  color: var(--primary-strong);
+}
+
 .ghost-button:hover,
 .mini-button:hover,
 .icon-button:hover {

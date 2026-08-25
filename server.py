@@ -808,6 +808,37 @@ def docker_env_args(env):
     return args
 
 
+def build_cache_config(task):
+    language = str(task.get("language") or "").lower()
+    sdk = str(task.get("sdk") or "").lower()
+    cache_dir = DATA_DIR / "cache"
+    host_cache_dir = HOST_DATA_DIR / "cache"
+    mounts = []
+    env = {}
+    labels = []
+
+    def add_cache(name, container_path, label):
+        (cache_dir / name).mkdir(parents=True, exist_ok=True)
+        mounts.extend(["-v", f"{host_cache_dir / name}:{container_path}"])
+        labels.append(label)
+
+    if language == "java" or sdk.startswith("jdk"):
+        add_cache("maven", "/root/.m2", "Maven")
+    if language == "node" or sdk.startswith("node"):
+        add_cache("npm", "/root/.npm", "npm")
+        env["npm_config_cache"] = "/root/.npm"
+    if language == "golang" or sdk.startswith("go"):
+        add_cache("go-mod", "/go/pkg/mod", "Go modules")
+        add_cache("go-build", "/root/.cache/go-build", "Go build")
+        env["GOMODCACHE"] = "/go/pkg/mod"
+        env["GOCACHE"] = "/root/.cache/go-build"
+    if language == "python" or sdk.startswith("python"):
+        add_cache("pip", "/root/.cache/pip", "pip")
+        env["PIP_CACHE_DIR"] = "/root/.cache/pip"
+
+    return mounts, env, list(dict.fromkeys(labels))
+
+
 def registry_config(state):
     settings = state.get("platformSettings") if isinstance(state.get("platformSettings"), dict) else {}
     registry_secret_id = str(settings.get("registrySecretId") or "").strip()
@@ -898,6 +929,51 @@ def run_command(args, cwd=None, input_text=None, env=None):
         env=env,
     )
     return process.returncode, process.stdout
+
+
+def run_command_stream(args, execution_id, cwd=None, env=None, redact=None):
+    process = subprocess.Popen(
+        args,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+        env=env,
+    )
+    output = []
+    batch = []
+    last_cancel_check = 0
+
+    def flush():
+        nonlocal batch
+        if not batch:
+            return
+        text = "\n".join(batch)
+        append_log(execution_id, redact(text) if redact else text)
+        batch = []
+
+    try:
+        for raw_line in process.stdout or []:
+            line = raw_line.rstrip("\n")
+            output.append(raw_line)
+            batch.append(line)
+            if len(batch) >= 20:
+                flush()
+            current_time = time.time()
+            if current_time - last_cancel_check > 1:
+                last_cancel_check = current_time
+                if is_execution_cancelled(execution_id):
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    raise RuntimeError("发布已取消")
+        flush()
+        return process.wait(), "".join(output)
+    finally:
+        flush()
 
 
 def cleanup_build_artifacts(execution_id, work_dir, image=None, image_built=False):
@@ -1310,6 +1386,87 @@ def dispatch_agent_tasks(execution_id, task, image):
     mutate_state(update)
 
 
+def trim_notice_text(value, limit=1800):
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}...\n已截断，完整内容请到平台执行详情查看。"
+
+
+def lark_field(label, value):
+    return {
+        "is_short": True,
+        "text": {
+            "tag": "lark_md",
+            "content": f"**{label}**\n{trim_notice_text(value or '-', 260)}",
+        },
+    }
+
+
+def lark_notification_card(task, event, event_label, message, event_time):
+    template = {
+        "BUILD_SUCCESS": "green",
+        "BUILD_FAILED": "red",
+        "DEPLOY_FAILED": "red",
+        "HEALTH_FAILED": "orange",
+    }.get(event, "blue")
+    icon = {
+        "BUILD_SUCCESS": "成功",
+        "BUILD_FAILED": "失败",
+        "DEPLOY_FAILED": "失败",
+        "HEALTH_FAILED": "告警",
+    }.get(event, "通知")
+    clusters = task.get("clusters") or []
+    if isinstance(clusters, list):
+        cluster_names = [str(item.get("name") or item) if isinstance(item, dict) else str(item) for item in clusters if item]
+        cluster_text = "、".join(cluster_names) or "未绑定"
+    else:
+        cluster_text = str(clusters or "未绑定")
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": template,
+                "title": {"tag": "plain_text", "content": f"{icon} · {event_label} · {task.get('name') or '未命名任务'}"},
+            },
+            "elements": [
+                {
+                    "tag": "div",
+                    "fields": [
+                        lark_field("任务", task.get("name") or "-"),
+                        lark_field("状态", event_label),
+                        lark_field("环境", task.get("env") or "-"),
+                        lark_field("负责人", task.get("owner") or "-"),
+                        lark_field("语言 / SDK", f"{task.get('language') or '-'} / {task.get('sdk') or '-'}"),
+                        lark_field("通知时间", event_time),
+                    ],
+                },
+                {"tag": "hr"},
+                {
+                    "tag": "div",
+                    "fields": [
+                        lark_field("部署集群", cluster_text),
+                        lark_field("服务端口", f"{task.get('servicePort') or '-'} -> {task.get('containerPort') or '-'}"),
+                    ],
+                },
+                {
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": f"**仓库**\n{trim_notice_text(task.get('repo') or '-', 700)}"},
+                },
+                {
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": f"**详情摘要**\n{trim_notice_text(message, 2400) or '-'}"},
+                },
+                {
+                    "tag": "note",
+                    "elements": [{"tag": "plain_text", "content": "完整构建日志、部署回执和 Kubernetes 诊断请在平台任务详情中查看。"}],
+                },
+            ],
+        },
+    }
+
+
 def send_notification(task, event, message):
     event_labels = {
         "BUILD_SUCCESS": "发布成功",
@@ -1328,14 +1485,15 @@ def send_notification(task, event, message):
     url = (channel or {}).get("target") or target
     if not url.startswith("http"):
         return
-    text = f"【{event_label}】{task.get('name')}\n{message}\n时间: {now_text()}"
+    event_time = now_text()
+    text = f"【{event_label}】{task.get('name')}\n{message}\n时间: {event_time}"
     channel_type = (channel or {}).get("type") or "webhook"
     if channel_type == "feishu":
-        payload = {"msg_type": "text", "content": {"text": text}}
+        payload = lark_notification_card(task, event, event_label, message, event_time)
     elif channel_type in {"wecom", "dingtalk"}:
         payload = {"msgtype": "text", "text": {"content": text}}
     else:
-        payload = {"task": task.get("name"), "event": event, "eventLabel": event_label, "message": message, "time": now_text(), "text": text}
+        payload = {"task": task.get("name"), "event": event, "eventLabel": event_label, "message": message, "time": event_time, "text": text}
     try:
         req = Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json"})
         urlopen(req, timeout=5).read()
@@ -1400,6 +1558,10 @@ def build_and_dispatch(execution_id):
             build_env = parse_build_env(task.get("buildEnv"))
             if build_env:
                 append_log(execution_id, f"已注入构建环境变量: {', '.join(sorted(build_env.keys()))}")
+            cache_mounts, cache_env, cache_labels = build_cache_config(task)
+            effective_build_env = {**cache_env, **build_env}
+            if cache_labels:
+                append_log(execution_id, f"已启用构建缓存: {', '.join(cache_labels)}")
             docker_src_dir = HOST_WORKSPACE_DIR / execution_id / "src"
             docker_cmd = [
                 "docker",
@@ -1407,16 +1569,16 @@ def build_and_dispatch(execution_id):
                 "--rm",
                 "-v",
                 f"{docker_src_dir}:/workspace",
+                *cache_mounts,
                 "-w",
                 f"/workspace/{task.get('workdir') or '.'}",
-                *docker_env_args(build_env),
+                *docker_env_args(effective_build_env),
                 builder_image(task.get("sdk")),
                 "sh",
                 "-lc",
                 command,
             ]
-            code, output = run_command(docker_cmd)
-            append_log(execution_id, output)
+            code, output = run_command_stream(docker_cmd, execution_id)
             if code != 0:
                 raise RuntimeError("编译命令执行失败")
             ensure_execution_active(execution_id)
@@ -1428,8 +1590,7 @@ def build_and_dispatch(execution_id):
         if selected_artifact:
             append_log(execution_id, f"已选择 Java 制品: {selected_artifact}")
         set_execution_status(execution_id, "building", f"开始构建镜像 {image}", stage="构建镜像", progress=65)
-        code, output = run_command(["docker", "build", "-t", image, "-f", str(dockerfile), "."], cwd=docker_context)
-        append_log(execution_id, output)
+        code, output = run_command_stream(["docker", "build", "-t", image, "-f", str(dockerfile), "."], execution_id, cwd=docker_context)
         if code != 0:
             raise RuntimeError("Docker 镜像构建失败")
         image_built = True
@@ -1453,8 +1614,7 @@ def build_and_dispatch(execution_id):
                     raise RuntimeError("镜像仓库登录失败")
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "building", f"推送镜像 {image}", stage="推送镜像", progress=78)
-            code, output = run_command(["docker", "push", image], env=registry_env)
-            append_log(execution_id, output)
+            code, output = run_command_stream(["docker", "push", image], execution_id, env=registry_env)
             if code != 0:
                 raise RuntimeError("镜像推送失败")
             image_pushed = True
