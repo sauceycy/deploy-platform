@@ -40,6 +40,7 @@ RESET_ADMIN_PASSWORD = os.environ.get("RESET_ADMIN_PASSWORD", "false").lower() =
 AGENT_SHARED_TOKEN = os.environ.get("AGENT_SHARED_TOKEN", "dev-agent-token")
 SESSION_SECRET = os.environ.get("SESSION_SECRET") or AGENT_SHARED_TOKEN or "deploy-platform-session"
 AGENT_TASK_RETRY_SECONDS = int(os.environ.get("AGENT_TASK_RETRY_SECONDS", "300"))
+AGENT_TASK_TAKEOVER_SECONDS = int(os.environ.get("AGENT_TASK_TAKEOVER_SECONDS", "45"))
 WAITING_DEPLOY_RECOVERY_SECONDS = int(os.environ.get("WAITING_DEPLOY_RECOVERY_SECONDS", "45"))
 ACTIVE_STATUSES = {"queued", "building", "deploying", "running"}
 CLEAN_WORKSPACE_AFTER_BUILD = os.environ.get("CLEAN_WORKSPACE_AFTER_BUILD", "true").lower() != "false"
@@ -1947,12 +1948,14 @@ def scheduler_loop():
         time.sleep(15)
 
 
-def mark_agent_task_running(agent_task):
+def mark_agent_task_running(agent_task, agent_instance=None):
     def update(state):
         item = find_by_id(state["agentTasks"], agent_task["id"])
         if item and item["status"] in {"pending", "running"}:
             item["status"] = "running"
             item["updatedAt"] = now_text()
+            if agent_instance:
+                item["assignedAgent"] = agent_instance
         execution = find_by_id(state["executions"], agent_task["executionId"])
         if execution:
             execution.setdefault("clusterResults", {})[agent_task["clusterName"]] = "running"
@@ -1971,14 +1974,23 @@ def agent_task_is_stale(item):
     return (datetime.now() - updated_at).total_seconds() >= AGENT_TASK_RETRY_SECONDS
 
 
+def agent_task_can_be_taken_over(item):
+    if item.get("assignedAgent"):
+        return False
+    updated_at = parse_time_text(item.get("updatedAt") or item.get("createdAt"))
+    if not updated_at:
+        return True
+    return (datetime.now() - updated_at).total_seconds() >= AGENT_TASK_TAKEOVER_SECONDS
+
+
 def next_agent_task_for_cluster(agent_tasks, cluster):
     pending = next((item for item in agent_tasks if agent_task_matches_cluster(item, cluster) and item.get("status") == "pending"), None)
     if pending:
         return pending
-    return next((item for item in agent_tasks if agent_task_matches_cluster(item, cluster) and item.get("status") == "running" and agent_task_is_stale(item)), None)
+    return next((item for item in agent_tasks if agent_task_matches_cluster(item, cluster) and item.get("status") == "running" and (agent_task_is_stale(item) or agent_task_can_be_taken_over(item))), None)
 
 
-def update_agent_result(agent_task_id, status, logs):
+def update_agent_result(agent_task_id, status, logs, agent_instance=None):
     notification = None
 
     def update(state):
@@ -1986,6 +1998,10 @@ def update_agent_result(agent_task_id, status, logs):
         item = find_by_id(state["agentTasks"], agent_task_id)
         if not item:
             return None
+        assigned_agent = item.get("assignedAgent")
+        if assigned_agent and agent_instance and assigned_agent != agent_instance:
+            item.setdefault("logs", []).append({"time": now_text(), "message": f"忽略非当前 Agent 实例回报: {agent_instance}"})
+            return item
         item["status"] = status
         item["updatedAt"] = now_text()
         if logs:
@@ -2100,6 +2116,7 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/agent/tasks":
             query = parse_qs(parsed.query)
             cluster = query.get("cluster", [""])[0].strip()
+            agent_instance = query.get("instanceId", [""])[0].strip()
             if not self.require_agent_token(parsed):
                 return
             state = read_state()
@@ -2107,7 +2124,7 @@ class Handler(SimpleHTTPRequestHandler):
             if not task:
                 self.send_json({"task": None})
                 return
-            mark_agent_task_running(task)
+            mark_agent_task_running(task, agent_instance)
             self.send_json({"task": task})
             return
         if self.is_spa_route(parsed):
@@ -2227,7 +2244,7 @@ class Handler(SimpleHTTPRequestHandler):
             if not self.require_agent_token(parsed):
                 return
             body = self.read_json_body()
-            item, state = update_agent_result(match.group(1), body.get("status") or "failed", body.get("logs") or "")
+            item, state = update_agent_result(match.group(1), body.get("status") or "failed", body.get("logs") or "", body.get("instanceId") or "")
             self.send_json({"ok": True, "task": {"id": match.group(1), "status": (item or {}).get("status")}})
             return
         if parsed.path == "/api/agent/heartbeat":
@@ -2238,7 +2255,7 @@ class Handler(SimpleHTTPRequestHandler):
             def update(state):
                 cluster = body.get("cluster")
                 state["agentHeartbeats"] = [item for item in state["agentHeartbeats"] if item.get("cluster") != cluster]
-                state["agentHeartbeats"].append({"cluster": cluster, "time": now_text(), "version": body.get("version", "dev")})
+                state["agentHeartbeats"].append({"cluster": cluster, "time": now_text(), "version": body.get("version", "dev"), "instanceId": body.get("instanceId") or ""})
 
             mutate_state(update)
             self.send_json({"ok": True})

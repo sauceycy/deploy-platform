@@ -1724,7 +1724,7 @@ function heartbeatForCluster(clusterName) {
 
 function clusterAgentState(cluster) {
   const heartbeat = heartbeatForCluster(cluster.name);
-  return heartbeat ? { label: "Agent 在线", status: "success", time: heartbeat.time } : { label: "Agent 未连接", status: "pending", time: "暂无心跳" };
+  return heartbeat ? { label: "Agent 在线", status: "success", time: heartbeat.time, instanceId: heartbeat.instanceId || "" } : { label: "Agent 未连接", status: "pending", time: "暂无心跳", instanceId: "" };
 }
 
 function renderClusterView() {
@@ -1750,6 +1750,7 @@ function renderClusterView() {
         </div>
         <div class="cluster-meta">
           <span>心跳：${agentState.time}</span>
+          ${agentState.instanceId ? `<span>实例：${String(agentState.instanceId).slice(0, 24)}</span>` : ""}
           <span>节点：${nodes.length} 个</span>
           <span>任务绑定：${tasks.filter((task) => (task.clusters || []).some((target) => target.name === cluster.name)).length} 个</span>
           <span>拉取秘钥：${secretName(cluster.imagePullSecretId)}</span>
