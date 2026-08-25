@@ -272,6 +272,15 @@ function organizationOptions(selectedId = "default") {
   return items.map((org) => `<option value="${org.id}" ${String(org.id) === selected ? "selected" : ""}>${org.name}</option>`).join("");
 }
 
+function normalizeClusterName(value) {
+  return String(value || "").trim();
+}
+
+function clusterNameExists(name, excludeId = "") {
+  const normalized = normalizeClusterName(name).toLowerCase();
+  return clusters.some((cluster) => String(cluster.id) !== String(excludeId) && normalizeClusterName(cluster.name).toLowerCase() === normalized);
+}
+
 function nowText() {
   return new Date().toLocaleString("zh-CN", { hour12: false });
 }
@@ -2520,6 +2529,17 @@ async function saveCluster(event) {
   if (submitter) submitter.disabled = true;
   const formData = new FormData(form);
   const organizationId = formData.get("organizationId") || visibleOrganizations()[0]?.id || "default";
+  const clusterName = normalizeClusterName(formData.get("name"));
+  if (!clusterName) {
+    window.alert("集群名称不能为空");
+    if (submitter) submitter.disabled = false;
+    return;
+  }
+  if (clusterNameExists(clusterName)) {
+    window.alert(`集群名称 ${clusterName} 已存在。集群名称必须和 Agent 的 CLUSTER_NAME 一一对应，不能重复。`);
+    if (submitter) submitter.disabled = false;
+    return;
+  }
   if (!canAccessOrg(organizationId)) {
     window.alert("当前用户组无权添加该资产到目标用户组");
     if (submitter) submitter.disabled = false;
@@ -2527,7 +2547,7 @@ async function saveCluster(event) {
   }
   const cluster = {
     id: Date.now(),
-    name: formData.get("name"),
+    name: clusterName,
     region: formData.get("region"),
     env: formData.get("env"),
     organizationId,
@@ -2637,8 +2657,20 @@ async function saveEditedCluster(event) {
     if (submitter) submitter.disabled = false;
     return;
   }
+  const previousName = normalizeClusterName(cluster.name);
+  const nextName = normalizeClusterName(editClusterForm.elements.name.value);
+  if (!nextName) {
+    window.alert("集群名称不能为空");
+    if (submitter) submitter.disabled = false;
+    return;
+  }
+  if (clusterNameExists(nextName, cluster.id)) {
+    window.alert(`集群名称 ${nextName} 已存在。请给每个集群配置唯一名称，并同步对应 Agent 的 CLUSTER_NAME。`);
+    if (submitter) submitter.disabled = false;
+    return;
+  }
   Object.assign(cluster, {
-    name: editClusterForm.elements.name.value,
+    name: nextName,
     region: editClusterForm.elements.region.value,
     env: editClusterForm.elements.env.value,
     organizationId: editClusterForm.elements.organizationId.value || "default",
@@ -2646,6 +2678,14 @@ async function saveEditedCluster(event) {
     imagePullSecretId: editClusterForm.elements.imagePullSecretId.value,
     nodes: clusterNodeDrafts.filter((node) => node.name || node.ip),
   });
+  if (previousName && previousName !== nextName) {
+    tasks.forEach((task) => {
+      (task.clusters || []).forEach((target) => {
+        if (target.name === previousName) target.name = nextName;
+      });
+    });
+    agentHeartbeats.splice(0, agentHeartbeats.length, ...agentHeartbeats.filter((item) => item.cluster !== previousName));
+  }
   addAudit("编辑集群", cluster.name);
   const saved = await persistState();
   if (saved) {

@@ -664,7 +664,20 @@ def validate_group_state_changes(current_state, next_state, actor):
             raise ValueError("只有全局组用户可以删除用户组")
 
 
+def validate_cluster_names(next_state):
+    seen = {}
+    for cluster in next_state.get("clusters", []):
+        name = str(cluster.get("name") or "").strip()
+        if not name:
+            raise ValueError("集群名称不能为空")
+        key = name.lower()
+        if key in seen:
+            raise ValueError(f"集群名称重复: {name}。每个集群名称必须唯一，并与对应 Agent 的 CLUSTER_NAME 一一对应。")
+        seen[key] = True
+
+
 def validate_state_update(next_state, actor):
+    validate_cluster_names(next_state)
     if not actor or actor == "system":
         return
     current_state = read_state()
