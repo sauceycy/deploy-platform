@@ -404,6 +404,13 @@
                 <option value="cf_pages">CF Pages 部署</option>
               </select>
             </label>
+            <label>
+              <span>应用类型</span>
+              <select name="appType" id="appTypeSelect">
+                <option value="backend" selected>后端服务</option>
+                <option value="frontend">前端静态站点</option>
+              </select>
+            </label>
           </div>
         </section>
 
@@ -452,9 +459,9 @@
               <span>Pages 部署命令</span>
               <input name="pagesDeployCommand" placeholder="npm run deploy" />
             </label>
-            <label class="wide-field java-build-field">
-              <span>JAR 包路径</span>
-              <input name="artifactPath" placeholder="ruoyi-admin/target/*.jar" />
+            <label class="wide-field artifact-path-field">
+              <span id="artifactPathLabel">JAR 包路径</span>
+              <input name="artifactPath" id="artifactPathInput" placeholder="ruoyi-admin/target/*.jar" />
             </label>
             <label class="wide-field">
               <span>构建环境变量</span>

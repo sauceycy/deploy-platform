@@ -850,6 +850,12 @@ def task_deploy_rule(task):
     return "k8s"
 
 
+def task_app_type(task):
+    if task_deploy_rule(task) == "cf_pages":
+        return "frontend"
+    return "frontend" if str(task.get("appType") or "").strip().lower() == "frontend" else "backend"
+
+
 def default_pages_deploy_command(package_manager):
     return "pnpm deploy" if package_manager == "pnpm" else "npm run deploy"
 
@@ -1183,6 +1189,52 @@ def normalize_artifact_pattern(pattern):
     return value
 
 
+def normalize_static_artifact_path(value):
+    value = str(value or "").strip().strip("'\"").replace("\\", "/")
+    if value.startswith("/workspace/"):
+        value = value[len("/workspace/") :]
+    if value.startswith("./"):
+        value = value[2:]
+    if value.startswith("/"):
+        value = value[1:]
+    path = Path(value)
+    if not value or path.is_absolute() or ".." in path.parts:
+        raise RuntimeError("前端产物目录必须是仓库内的相对路径，例如 dist 或 build")
+    return value
+
+
+def node_static_artifact_dir(task, src_dir, app_dir):
+    artifact_path = str(task.get("artifactPath") or "").strip()
+    patterns = [artifact_path] if artifact_path else ["dist", "build"]
+    candidates = []
+    for pattern in patterns:
+        normalized = normalize_static_artifact_path(pattern)
+        candidates.extend([app_dir / normalized, src_dir / normalized])
+    for candidate in candidates:
+        if candidate.is_dir() and is_relative_child(candidate, src_dir):
+            return candidate
+    return None
+
+
+def write_nginx_conf(context_dir, port):
+    conf = context_dir / "default.conf"
+    conf.write_text(
+        f"""server {{
+    listen {port};
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location / {{
+        try_files $uri $uri/ /index.html;
+    }}
+}}
+""",
+        encoding="utf-8",
+    )
+    return conf
+
+
 def java_artifact_candidates(task, src_dir, app_dir):
     artifact_path = str(task.get("artifactPath") or "").strip()
     patterns = [artifact_path] if artifact_path else ["target/*.jar", "**/target/*.jar"]
@@ -1229,11 +1281,31 @@ def normalize_http_path(value):
 
 def generate_dockerfile(task, app_dir, src_dir):
     existing = app_dir / "Dockerfile"
-    if existing.exists():
-        return existing, app_dir, None
-
     language = task.get("language")
     port = int(task.get("containerPort") or 8080)
+    if task_app_type(task) != "frontend" and existing.exists():
+        return existing, app_dir, None
+
+    if task_app_type(task) == "frontend":
+        if language != "node":
+            raise RuntimeError("前端静态站点目前仅支持 Node.js 构建")
+        static_dir = node_static_artifact_dir(task, src_dir, app_dir)
+        if not static_dir:
+            target = task.get("artifactPath") or "dist 或 build"
+            raise RuntimeError(f"未找到前端构建产物目录: {target}")
+        context_dir = src_dir / ".deploy-platform-image"
+        if context_dir.exists():
+            shutil.rmtree(context_dir, ignore_errors=True)
+        html_dir = context_dir / "html"
+        shutil.copytree(static_dir, html_dir)
+        write_nginx_conf(context_dir, port)
+        generated = context_dir / "Dockerfile"
+        generated.write_text(
+            f"FROM nginx:1.27-alpine\nCOPY default.conf /etc/nginx/conf.d/default.conf\nCOPY html /usr/share/nginx/html\nEXPOSE {port}\n",
+            encoding="utf-8",
+        )
+        return generated, context_dir, static_dir.relative_to(src_dir).as_posix()
+
     if language == "java":
         generated = src_dir / ".deploy-platform.Dockerfile"
         jars = java_artifact_candidates(task, src_dir, app_dir)
@@ -1489,6 +1561,7 @@ def lark_notification_card(task, event, event_label, message, event_time):
     else:
         cluster_text = str(clusters or "未绑定")
     rule_label = "CF Pages" if task_deploy_rule(task) == "cf_pages" else "K8s 服务"
+    app_type_label = "前端静态站点" if task_app_type(task) == "frontend" else "后端服务"
     actor = task.get("lastActor") or task.get("actor") or "system"
     return {
         "msg_type": "interactive",
@@ -1505,6 +1578,7 @@ def lark_notification_card(task, event, event_label, message, event_time):
                         lark_field("任务", task.get("name") or "-"),
                         lark_field("状态", event_label),
                         lark_field("部署规则", rule_label),
+                        lark_field("应用类型", app_type_label),
                         lark_field("发布人", actor),
                         lark_field("环境", task.get("env") or "-"),
                         lark_field("负责人", task.get("owner") or "-"),
@@ -1659,7 +1733,9 @@ def build_and_dispatch(execution_id):
         dockerfile, docker_context, selected_artifact = generate_dockerfile(task, app_dir, src_dir)
         ensure_execution_active(execution_id)
         if selected_artifact:
-            append_log(execution_id, f"已选择 Java 制品: {selected_artifact}")
+            append_log(execution_id, f"已选择构建产物: {selected_artifact}")
+        if task_app_type(task) == "frontend":
+            append_log(execution_id, "前端静态站点使用平台生成的 nginx 镜像，不执行项目自带 Dockerfile。")
         set_execution_status(execution_id, "building", f"开始构建镜像 {image}", stage="构建镜像", progress=65)
         code, output = run_command_stream(["docker", "build", "-t", image, "-f", str(dockerfile), "."], execution_id, cwd=docker_context)
         if code != 0:
@@ -1805,6 +1881,7 @@ def normalize_task_payload(payload):
         raise ValueError("任务配置格式不正确")
     notify = payload.get("notify") if isinstance(payload.get("notify"), dict) else {}
     deploy_rule = task_deploy_rule(payload)
+    app_type = "frontend" if deploy_rule == "cf_pages" else task_app_type(payload)
     package_manager = pages_package_manager(payload)
     clusters = payload.get("clusters") if isinstance(payload.get("clusters"), list) else []
     normalized_clusters = []
@@ -1827,6 +1904,7 @@ def normalize_task_payload(payload):
         "tag": str(payload.get("tag") or "").strip(),
         "organizationId": str(payload.get("organizationId") or "default").strip() or "default",
         "deployRule": deploy_rule,
+        "appType": app_type,
         "repo": str(payload.get("repo") or "").strip(),
         "workdir": str(payload.get("workdir") or ".").strip() or ".",
         "artifactPath": str(payload.get("artifactPath") or "").strip(),
@@ -1851,15 +1929,18 @@ def normalize_task_payload(payload):
             "events": notify.get("events") if isinstance(notify.get("events"), list) else [],
         },
     }
-    if deploy_rule == "cf_pages":
+    if app_type == "frontend":
         task_payload["language"] = "node"
         if not task_payload["sdk"] or not task_payload["sdk"].startswith("node"):
             task_payload["sdk"] = "node22"
-        task_payload["clusters"] = []
-        task_payload["artifactPath"] = ""
         task_payload["mavenRepoUrl"] = ""
         task_payload["mavenMirrorOf"] = "maven-public"
         task_payload["jvmOptions"] = ""
+    elif task_payload["language"] != "java":
+        task_payload["artifactPath"] = ""
+    if deploy_rule == "cf_pages":
+        task_payload["clusters"] = []
+        task_payload["artifactPath"] = ""
     return task_payload
 
 

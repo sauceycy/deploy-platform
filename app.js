@@ -141,6 +141,7 @@ const backdrop = document.getElementById("drawerBackdrop");
 const languageSelect = document.getElementById("languageSelect");
 const sdkSelect = document.getElementById("sdkSelect");
 const deployRuleSelect = document.getElementById("deployRuleSelect");
+const appTypeSelect = document.getElementById("appTypeSelect");
 const pagesPackageManagerSelect = document.getElementById("pagesPackageManagerSelect");
 const taskForm = document.getElementById("taskForm");
 const taskOrganizationSelect = document.getElementById("taskOrganizationSelect");
@@ -884,6 +885,14 @@ function deployRuleLabel(rule) {
   return normalizeDeployRule(rule) === "cf_pages" ? "CF Pages" : "K8s 服务";
 }
 
+function normalizeAppType(type) {
+  return String(type || "").toLowerCase() === "frontend" ? "frontend" : "backend";
+}
+
+function appTypeLabel(type) {
+  return normalizeAppType(type) === "frontend" ? "前端静态站点" : "后端服务";
+}
+
 function defaultPagesDeployCommand(packageManager) {
   return packageManager === "pnpm" ? "pnpm deploy" : "npm run deploy";
 }
@@ -1061,6 +1070,7 @@ function filteredTasks() {
         task.sdk,
         publishActor(task),
         deployRuleLabel(task.deployRule),
+        appTypeLabel(task.appType),
         task.workdir,
         task.artifactPath,
         task.pagesDeployCommand,
@@ -1106,14 +1116,14 @@ function renderRows() {
         </div>
         <div class="task-main">
           <strong>${task.name}</strong>
-          <span>${organizationName(task.organizationId)} · ${task.env} · ${task.owner || "未设置负责人"} · 发布人 ${publishActor(task)} · ${task.lastRun}</span>
+          <span>${organizationName(task.organizationId)} · ${task.env} · ${appTypeLabel(task.appType)} · ${task.owner || "未设置负责人"} · 发布人 ${publishActor(task)} · ${task.lastRun}</span>
         </div>
         <div>
           <span class="language-chip ${task.language}">${languageLabel(task.language)} / ${task.sdk}</span>
         </div>
         <div class="repo-cell">
           <strong>${task.repo}</strong>
-          <span>${deployRuleLabel(task.deployRule)} · ${task.workdir} · ${
+          <span>${deployRuleLabel(task.deployRule)} · ${appTypeLabel(task.appType)} · ${task.workdir} · ${
             normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : task.artifactPath || "自动识别制品"
           } · ${task.lastBranch ? `最近发布 ${task.lastBranch}` : "发布时选择分支"}</span>
         </div>
@@ -1259,6 +1269,7 @@ function renderDetail() {
         <span>最近分支</span><strong>${task.lastBranch || "未发布"}</strong>
         <span>最近发布人</span><strong>${publishActor(task)}</strong>
         <span>部署规则</span><strong>${deployRuleLabel(task.deployRule)}</strong>
+        <span>应用类型</span><strong>${appTypeLabel(task.appType)}</strong>
         <span>编译路径</span><strong>${task.workdir}</strong>
         <span>${normalizeDeployRule(task.deployRule) === "cf_pages" ? "部署命令" : "制品路径"}</span><strong>${
           normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : task.artifactPath || "自动识别"
@@ -1393,6 +1404,10 @@ function renderDetailMeta(task, latestExecution, activeSchedule) {
         <strong>${deployRuleLabel(task.deployRule)}</strong>
       </div>
       <div>
+        <span>应用类型</span>
+        <strong>${appTypeLabel(task.appType)}</strong>
+      </div>
+      <div>
         <span>发布人</span>
         <strong>${publishActor(task, latestExecution)}</strong>
       </div>
@@ -1469,6 +1484,7 @@ function renderTaskDetailPage() {
           <div>
             <div class="detail-eyebrow">
               <span>${task.env}</span>
+              <span>${appTypeLabel(task.appType)}</span>
               <span>${task.owner || "未设置负责人"}</span>
               <span>发布人 ${publishActor(task, latestExecution)}</span>
               <span>${task.tag || "未设置标签"}</span>
@@ -1541,10 +1557,10 @@ function renderTaskOverviewTab(task, latestExecution, activeSchedule) {
         <div class="summary-cards">
           <div><span>语言 / SDK</span><strong>${languageLabel(task.language)} / ${task.sdk}</strong></div>
           <div><span>部署规则</span><strong>${deployRuleLabel(task.deployRule)}</strong></div>
+          <div><span>应用类型</span><strong>${appTypeLabel(task.appType)}</strong></div>
           <div><span>${normalizeDeployRule(task.deployRule) === "cf_pages" ? "部署命令" : "部署集群"}</span><strong>${
             normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : `${task.clusters.length} 个`
           }</strong></div>
-          <div><span>定时发布</span><strong>${activeSchedule ? activeSchedule.scheduledAt : "未设置"}</strong></div>
         </div>
         <div class="quick-repo-card">
           <span>代码仓库</span>
@@ -1608,6 +1624,7 @@ function renderTaskConfigTab(task, activeSchedule) {
           <span>最近分支</span><strong>${task.lastBranch || "未发布"}</strong>
           <span>最近发布人</span><strong>${publishActor(task)}</strong>
           <span>部署规则</span><strong>${deployRuleLabel(task.deployRule)}</strong>
+          <span>应用类型</span><strong>${appTypeLabel(task.appType)}</strong>
           <span>编译路径</span><strong>${task.workdir}</strong>
           <span>${normalizeDeployRule(task.deployRule) === "cf_pages" ? "部署命令" : "制品路径"}</span><strong>${
             normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : task.artifactPath || "自动识别"
@@ -2105,14 +2122,18 @@ function updateSdkOptions(language, force = false) {
   const commandInput = taskForm.elements.buildCommand;
   if (force || !commandInput.value) commandInput.value = buildCommands[language] || "";
   document.querySelectorAll(".java-build-field").forEach((field) => {
-    field.hidden = language !== "java";
+    field.hidden = language !== "java" || normalizeAppType(taskForm.elements.appType?.value) === "frontend" || normalizeDeployRule(taskForm.elements.deployRule?.value) === "cf_pages";
   });
 }
 
 function syncDeployRuleFields() {
   const deployRule = normalizeDeployRule(taskForm.elements.deployRule?.value);
   const isPages = deployRule === "cf_pages";
+  const appType = isPages ? "frontend" : normalizeAppType(taskForm.elements.appType?.value);
+  const isFrontend = appType === "frontend";
   if (deployRuleSelect) deployRuleSelect.value = deployRule;
+  if (appTypeSelect) appTypeSelect.value = appType;
+  if (appTypeSelect) appTypeSelect.disabled = isPages;
 
   document.querySelectorAll(".pages-deploy-field").forEach((field) => {
     field.hidden = !isPages;
@@ -2128,6 +2149,7 @@ function syncDeployRuleFields() {
   if (taskForm.elements.buildCommand) taskForm.elements.buildCommand.required = !isPages;
   if (taskForm.elements.containerPort) taskForm.elements.containerPort.required = !isPages;
   if (taskForm.elements.servicePort) taskForm.elements.servicePort.required = !isPages;
+  if (taskForm.elements.language) taskForm.elements.language.disabled = isPages || isFrontend;
 
   ["pagesPackageManager", "pagesDeployCommand"].forEach((name) => {
     const field = taskForm.elements[name];
@@ -2135,14 +2157,29 @@ function syncDeployRuleFields() {
   });
   if (taskForm.elements.pagesDeployCommand) taskForm.elements.pagesDeployCommand.required = isPages;
 
-  if (isPages) {
+  if (isPages || isFrontend) {
     taskForm.elements.language.value = "node";
     updateSdkOptions("node");
+  } else {
+    updateSdkOptions(taskForm.elements.language.value || "java");
+  }
+
+  const artifactField = document.querySelector(".artifact-path-field");
+  const artifactLabel = document.getElementById("artifactPathLabel");
+  const artifactInput = document.getElementById("artifactPathInput");
+  const showStaticArtifact = !isPages && isFrontend;
+  const showJavaArtifact = !isPages && !isFrontend && taskForm.elements.language.value === "java";
+  if (artifactField) artifactField.hidden = !(showStaticArtifact || showJavaArtifact);
+  if (artifactInput) {
+    artifactInput.disabled = isPages || !(showStaticArtifact || showJavaArtifact);
+    artifactInput.placeholder = showStaticArtifact ? "dist 或 build，留空自动识别" : "ruoyi-admin/target/*.jar";
+  }
+  if (artifactLabel) artifactLabel.textContent = showStaticArtifact ? "前端产物目录" : "JAR 包路径";
+
+  if (isPages) {
     const packageManager = taskForm.elements.pagesPackageManager?.value || "npm";
     const deployCommand = taskForm.elements.pagesDeployCommand;
     if (deployCommand && !deployCommand.value) deployCommand.value = defaultPagesDeployCommand(packageManager);
-  } else {
-    updateSdkOptions(taskForm.elements.language.value || "java");
   }
   renderClusters();
 }
@@ -2153,6 +2190,7 @@ function resetTaskForm() {
   taskOrganizationSelect.innerHTML = organizationOptions();
   taskForm.elements.organizationId.value = visibleOrganizations()[0]?.id || "default";
   taskForm.elements.deployRule.value = "k8s";
+  taskForm.elements.appType.value = "backend";
   taskForm.elements.env.value = "test";
   taskForm.elements.language.value = "java";
   taskForm.elements.artifactPath.value = "";
@@ -2196,6 +2234,7 @@ function openTaskEditor(taskId) {
   taskOrganizationSelect.innerHTML = organizationOptions(task.organizationId || "default");
   taskForm.elements.organizationId.value = task.organizationId || "default";
   taskForm.elements.deployRule.value = normalizeDeployRule(task.deployRule);
+  taskForm.elements.appType.value = normalizeDeployRule(task.deployRule) === "cf_pages" ? "frontend" : normalizeAppType(task.appType);
   taskForm.elements.repo.value = task.repo || "";
   taskForm.elements.workdir.value = task.workdir || ".";
   renderGitCredentialOptions(task.gitCredentialId || "");
@@ -2302,6 +2341,7 @@ function buildPreviewObject() {
       tag: formValue("tag"),
       organizationId: formValue("organizationId"),
       deployRule: normalizeDeployRule(formValue("deployRule")),
+      appType: normalizeDeployRule(formValue("deployRule")) === "cf_pages" ? "frontend" : normalizeAppType(formValue("appType")),
     },
     repository: {
       url: formValue("repo"),
@@ -2351,6 +2391,7 @@ async function saveTask(event) {
     tag: preview.task.tag,
     organizationId: preview.task.organizationId || "default",
     deployRule: preview.task.deployRule,
+    appType: preview.task.appType,
     repo: preview.repository.url,
     workdir: preview.repository.workdir,
     artifactPath: preview.repository.artifactPath,
@@ -3625,6 +3666,7 @@ languageSelect.addEventListener("change", (event) => {
 });
 
 deployRuleSelect.addEventListener("change", syncDeployRuleFields);
+appTypeSelect.addEventListener("change", syncDeployRuleFields);
 
 pagesPackageManagerSelect.addEventListener("change", (event) => {
   const deployCommand = taskForm.elements.pagesDeployCommand;
