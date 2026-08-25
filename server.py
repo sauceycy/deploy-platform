@@ -826,10 +826,11 @@ def build_cache_config(task):
         add_cache("maven", "/root/.m2", "Maven")
     if language == "node" or sdk.startswith("node"):
         add_cache("npm", "/root/.npm", "npm")
+        add_cache("corepack", "/root/.cache/corepack", "Corepack")
+        add_cache("pnpm-store", "/root/.pnpm-store", "pnpm")
         env["npm_config_cache"] = "/root/.npm"
-        if pages_package_manager(task) == "pnpm":
-            add_cache("pnpm-store", "/root/.pnpm-store", "pnpm")
-            env["npm_config_store_dir"] = "/root/.pnpm-store"
+        env["COREPACK_HOME"] = "/root/.cache/corepack"
+        env["npm_config_store_dir"] = "/root/.pnpm-store"
     if language == "golang" or sdk.startswith("go"):
         add_cache("go-mod", "/go/pkg/mod", "Go modules")
         add_cache("go-build", "/root/.cache/go-build", "Go build")
@@ -866,11 +867,24 @@ def pages_deploy_command(task):
     return command
 
 
+def is_node_task(task):
+    return str(task.get("language") or "").lower() == "node" or str(task.get("sdk") or "").lower().startswith("node")
+
+
+def sdk_command_for_task(task, command):
+    if is_node_task(task) and "corepack" not in command:
+        return f"corepack enable && {command}"
+    return command
+
+
 def run_sdk_command(execution_id, task, command, src_dir, build_env):
     cache_mounts, cache_env, cache_labels = build_cache_config(task)
     effective_build_env = {**cache_env, **build_env}
     if cache_labels:
         append_log(execution_id, f"已启用构建缓存: {', '.join(cache_labels)}")
+    effective_command = sdk_command_for_task(task, command)
+    if effective_command != command:
+        append_log(execution_id, "已为 Node 构建启用 Corepack，支持 package.json 脚本中调用 pnpm/yarn。")
     docker_src_dir = HOST_WORKSPACE_DIR / execution_id / "src"
     docker_cmd = [
         "docker",
@@ -885,7 +899,7 @@ def run_sdk_command(execution_id, task, command, src_dir, build_env):
         builder_image(task.get("sdk")),
         "sh",
         "-lc",
-        command,
+        effective_command,
     ]
     return run_command_stream(docker_cmd, execution_id)
 
