@@ -1059,6 +1059,18 @@ def dockerfile_env_value(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
 
 
+def normalize_http_path(value):
+    path = str(value or "").strip()
+    if not path:
+        return ""
+    if re.match(r"^https?://", path, flags=re.IGNORECASE):
+        parsed = urlparse(path)
+        path = parsed.path or "/"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return path
+
+
 def generate_dockerfile(task, app_dir, src_dir):
     existing = app_dir / "Dockerfile"
     if existing.exists():
@@ -1104,11 +1116,20 @@ def generate_dockerfile(task, app_dir, src_dir):
 
 def create_manifest(task, target, image, pull_secret=None):
     app = safe_name(task["name"])
-    namespace = target.get("namespace") or "default"
+    namespace = safe_name(target.get("namespace") or "default")
     replicas = int(target.get("replicas") or task.get("replicas") or 1)
     container_port = int(task.get("containerPort") or 8080)
     service_port = int(task.get("servicePort") or 80)
-    health_path = task.get("healthPath") or "/"
+    health_path = normalize_http_path(task.get("healthPath"))
+    readiness_probe_block = ""
+    if health_path:
+        readiness_probe_block = f"""          readinessProbe:
+            httpGet:
+              path: {json.dumps(health_path, ensure_ascii=False)}
+              port: {container_port}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+"""
     ingress_host = target.get("ingress") or ""
     image_pull_secret_block = ""
     jvm_options = str(task.get("jvmOptions") or "").strip()
@@ -1118,7 +1139,15 @@ def create_manifest(task, target, image, pull_secret=None):
             - name: JAVA_OPTS
               value: {json.dumps(jvm_options, ensure_ascii=False)}
 """
-    docs = []
+    docs = [
+        f"""apiVersion: v1
+kind: Namespace
+metadata:
+  name: {namespace}
+  labels:
+    managed-by: deploy-platform
+"""
+    ]
     if pull_secret:
         secret_name = safe_name(f"{app}-{pull_secret.get('name') or 'registry'}-pull")
         dockerconfigjson = dockerconfigjson_for_secret(pull_secret, image)
@@ -1163,12 +1192,7 @@ spec:
           imagePullPolicy: Always
 {jvm_env_block}          ports:
             - containerPort: {container_port}
-          readinessProbe:
-            httpGet:
-              path: {health_path}
-              port: {container_port}
-            initialDelaySeconds: 10
-            periodSeconds: 10
+{readiness_probe_block}
 """,
         f"""apiVersion: v1
 kind: Service
