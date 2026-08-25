@@ -140,6 +140,8 @@ const drawer = document.getElementById("createDrawer");
 const backdrop = document.getElementById("drawerBackdrop");
 const languageSelect = document.getElementById("languageSelect");
 const sdkSelect = document.getElementById("sdkSelect");
+const deployRuleSelect = document.getElementById("deployRuleSelect");
+const pagesPackageManagerSelect = document.getElementById("pagesPackageManagerSelect");
 const taskForm = document.getElementById("taskForm");
 const taskOrganizationSelect = document.getElementById("taskOrganizationSelect");
 const clusterOrganizationSelect = document.getElementById("clusterOrganizationSelect");
@@ -734,14 +736,21 @@ function renderExecutionSummary(execution) {
 
 function renderExecutionTimeline(execution) {
   const currentProgress = progressValue(execution);
-  const steps = [
-    ["拉取代码", 10],
-    ["执行编译", 35],
-    ["构建镜像", 65],
-    ["推送镜像", 78],
-    ["Agent 部署", 90],
-    ["发布完成", 100],
-  ];
+  const isPages = normalizeDeployRule(execution?.deployRule) === "cf_pages";
+  const steps = isPages
+    ? [
+        ["拉取代码", 10],
+        ["CF Pages 部署", 55],
+        ["发布完成", 100],
+      ]
+    : [
+        ["拉取代码", 10],
+        ["执行编译", 35],
+        ["构建镜像", 65],
+        ["推送镜像", 78],
+        ["Agent 部署", 90],
+        ["发布完成", 100],
+      ];
   return `
     <div class="stage-timeline">
       ${steps
@@ -860,7 +869,19 @@ function languageLabel(language) {
     node: "Node.js",
     golang: "Golang",
     python: "Python",
-  }[language];
+  }[language] || language || "未知";
+}
+
+function normalizeDeployRule(rule) {
+  return ["pages", "cf", "cf_pages", "cloudflare_pages"].includes(String(rule || "").toLowerCase()) ? "cf_pages" : "k8s";
+}
+
+function deployRuleLabel(rule) {
+  return normalizeDeployRule(rule) === "cf_pages" ? "CF Pages" : "K8s 服务";
+}
+
+function defaultPagesDeployCommand(packageManager) {
+  return packageManager === "pnpm" ? "pnpm deploy" : "npm run deploy";
 }
 
 function channelLabel(type) {
@@ -1026,7 +1047,22 @@ function filteredTasks() {
     const statusMatch = state.filter === "all" || task.status === state.filter;
     const searchMatch =
       !query ||
-      [task.name, task.repo, task.owner, task.tag, task.env, task.language, task.sdk, task.workdir, task.artifactPath, task.lastBranch || "", schedule?.branch || "", schedule?.scheduledAt || ""].some(
+      [
+        task.name,
+        task.repo,
+        task.owner,
+        task.tag,
+        task.env,
+        task.language,
+        task.sdk,
+        deployRuleLabel(task.deployRule),
+        task.workdir,
+        task.artifactPath,
+        task.pagesDeployCommand,
+        task.lastBranch || "",
+        schedule?.branch || "",
+        schedule?.scheduledAt || "",
+      ].some(
         (value) => String(value || "").toLowerCase().includes(query),
       );
     return statusMatch && searchMatch;
@@ -1072,11 +1108,15 @@ function renderRows() {
         </div>
         <div class="repo-cell">
           <strong>${task.repo}</strong>
-          <span>${task.workdir} · ${task.artifactPath || "自动识别制品"} · ${task.lastBranch ? `最近发布 ${task.lastBranch}` : "发布时选择分支"}</span>
+          <span>${deployRuleLabel(task.deployRule)} · ${task.workdir} · ${
+            normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : task.artifactPath || "自动识别制品"
+          } · ${task.lastBranch ? `最近发布 ${task.lastBranch}` : "发布时选择分支"}</span>
         </div>
         <div>
-          <strong>${task.clusters.length} 个集群</strong>
-          <span class="muted">${task.clusters.map((cluster) => cluster.name).join("、") || "未绑定"}</span>
+          <strong>${normalizeDeployRule(task.deployRule) === "cf_pages" ? "本机部署" : `${task.clusters.length} 个集群`}</strong>
+          <span class="muted">${
+            normalizeDeployRule(task.deployRule) === "cf_pages" ? "Cloudflare Pages" : task.clusters.map((cluster) => cluster.name).join("、") || "未绑定"
+          }</span>
         </div>
         <div>
           <span class="status-chip ${task.status}">${statusLabel(task.status)}</span>
@@ -1208,12 +1248,15 @@ function renderDetail() {
       <div class="kv-grid">
         <span>仓库</span><strong>${task.repo}</strong>
         <span>最近分支</span><strong>${task.lastBranch || "未发布"}</strong>
+        <span>部署规则</span><strong>${deployRuleLabel(task.deployRule)}</strong>
         <span>编译路径</span><strong>${task.workdir}</strong>
-        <span>制品路径</span><strong>${task.artifactPath || "自动识别"}</strong>
+        <span>${normalizeDeployRule(task.deployRule) === "cf_pages" ? "部署命令" : "制品路径"}</span><strong>${
+          normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : task.artifactPath || "自动识别"
+        }</strong>
         <span>Git 凭据</span><strong>${secretName(task.gitCredentialId)}</strong>
         <span>语言</span><strong>${languageLabel(task.language)}</strong>
         <span>SDK</span><strong>${task.sdk}</strong>
-        <span>命令</span><strong>${task.buildCommand}</strong>
+        <span>命令</span><strong>${normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : task.buildCommand}</strong>
         <span>环境变量</span><strong>${buildEnvKeys(task.buildEnv).join("、") || "未设置"}</strong>
         ${
           task.language === "java"
@@ -1336,8 +1379,8 @@ function renderDetailMeta(task, latestExecution, activeSchedule) {
         <strong>${latestExecution?.stage || statusLabel(task.status)}</strong>
       </div>
       <div>
-        <span>集群</span>
-        <strong>${task.clusters.length} 个</strong>
+        <span>部署规则</span>
+        <strong>${deployRuleLabel(task.deployRule)}</strong>
       </div>
       <div>
         <span>SDK</span>
@@ -1352,11 +1395,12 @@ function renderDetailMeta(task, latestExecution, activeSchedule) {
 }
 
 function renderDetailTabs() {
+  const task = tasks.find((item) => String(item.id) === String(state.selectedId));
   const tabs = [
     ["overview", "概览", "layout-dashboard"],
     ["logs", "构建日志", "scroll-text"],
     ["config", "配置", "settings-2"],
-    ["clusters", "集群", "network"],
+    ...(normalizeDeployRule(task?.deployRule) === "cf_pages" ? [] : [["clusters", "集群", "network"]]),
     ["history", "执行历史", "history"],
   ];
   return `
@@ -1398,6 +1442,7 @@ function renderTaskDetailPage() {
   const focusedExecution = detailExecutionForTask(task.id);
   const history = taskExecutionHistory(task.id);
   const activeSchedule = activeScheduleForTask(task.id);
+  if (normalizeDeployRule(task.deployRule) === "cf_pages" && state.detailTab === "clusters") state.detailTab = "overview";
   const tab = state.detailTab || "overview";
 
   taskDetailBody.innerHTML = `
@@ -1475,12 +1520,14 @@ function renderTaskOverviewTab(task, latestExecution, activeSchedule) {
       <section class="detail-section detail-card">
         <div class="section-title-row">
           <h3>任务摘要</h3>
-          <span class="muted">${task.servicePort} -> ${task.containerPort}</span>
+          <span class="muted">${normalizeDeployRule(task.deployRule) === "cf_pages" ? "Cloudflare Pages" : `${task.servicePort} -> ${task.containerPort}`}</span>
         </div>
         <div class="summary-cards">
           <div><span>语言 / SDK</span><strong>${languageLabel(task.language)} / ${task.sdk}</strong></div>
-          <div><span>容器端口</span><strong>${task.containerPort}</strong></div>
-          <div><span>部署集群</span><strong>${task.clusters.length} 个</strong></div>
+          <div><span>部署规则</span><strong>${deployRuleLabel(task.deployRule)}</strong></div>
+          <div><span>${normalizeDeployRule(task.deployRule) === "cf_pages" ? "部署命令" : "部署集群"}</span><strong>${
+            normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : `${task.clusters.length} 个`
+          }</strong></div>
           <div><span>定时发布</span><strong>${activeSchedule ? activeSchedule.scheduledAt : "未设置"}</strong></div>
         </div>
         <div class="quick-repo-card">
@@ -1543,12 +1590,15 @@ function renderTaskConfigTab(task, activeSchedule) {
         <div class="kv-grid roomy">
           <span>仓库</span><strong>${task.repo}</strong>
           <span>最近分支</span><strong>${task.lastBranch || "未发布"}</strong>
+          <span>部署规则</span><strong>${deployRuleLabel(task.deployRule)}</strong>
           <span>编译路径</span><strong>${task.workdir}</strong>
-          <span>制品路径</span><strong>${task.artifactPath || "自动识别"}</strong>
+          <span>${normalizeDeployRule(task.deployRule) === "cf_pages" ? "部署命令" : "制品路径"}</span><strong>${
+            normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : task.artifactPath || "自动识别"
+          }</strong>
           <span>Git 凭据</span><strong>${secretName(task.gitCredentialId)}</strong>
           <span>语言</span><strong>${languageLabel(task.language)}</strong>
           <span>SDK</span><strong>${task.sdk}</strong>
-          <span>命令</span><strong>${task.buildCommand}</strong>
+          <span>命令</span><strong>${normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : task.buildCommand}</strong>
           <span>环境变量</span><strong>${buildEnvKeys(task.buildEnv).join("、") || "未设置"}</strong>
           ${
             task.language === "java"
@@ -1983,6 +2033,10 @@ function renderAuditView() {
 }
 
 function renderClusters() {
+  if (normalizeDeployRule(formValue("deployRule")) === "cf_pages") {
+    clusterEditor.innerHTML = `<div class="empty-state compact"><strong>CF Pages 不需要集群</strong><span>发布会在平台本机执行 deploy 命令。</span></div>`;
+    return;
+  }
   if (clusterDrafts.length === 0) {
     clusterEditor.innerHTML = `<div class="empty-state compact"><strong>未选择部署集群</strong><span>请先在集群管理中添加集群，再回到任务中绑定部署目标。</span></div>`;
     return;
@@ -2028,7 +2082,9 @@ function renderClusters() {
 
 function updateSdkOptions(language, force = false) {
   const options = sdkOptions[language] || [];
-  sdkSelect.innerHTML = options.map((sdk, index) => `<option ${index === 0 ? "selected" : ""}>${sdk}</option>`).join("");
+  const currentSdk = sdkSelect.value;
+  const selectedSdk = options.includes(currentSdk) && !force ? currentSdk : options[0];
+  sdkSelect.innerHTML = options.map((sdk) => `<option ${sdk === selectedSdk ? "selected" : ""}>${sdk}</option>`).join("");
   const commandInput = taskForm.elements.buildCommand;
   if (force || !commandInput.value) commandInput.value = buildCommands[language] || "";
   document.querySelectorAll(".java-build-field").forEach((field) => {
@@ -2036,15 +2092,56 @@ function updateSdkOptions(language, force = false) {
   });
 }
 
+function syncDeployRuleFields() {
+  const deployRule = normalizeDeployRule(taskForm.elements.deployRule?.value);
+  const isPages = deployRule === "cf_pages";
+  if (deployRuleSelect) deployRuleSelect.value = deployRule;
+
+  document.querySelectorAll(".pages-deploy-field").forEach((field) => {
+    field.hidden = !isPages;
+  });
+  document.querySelectorAll(".k8s-deploy-field, .k8s-build-field").forEach((field) => {
+    field.hidden = isPages;
+  });
+
+  ["buildCommand", "containerPort", "servicePort", "replicas", "healthPath", "jvmOptions"].forEach((name) => {
+    const field = taskForm.elements[name];
+    if (field) field.disabled = isPages;
+  });
+  if (taskForm.elements.buildCommand) taskForm.elements.buildCommand.required = !isPages;
+  if (taskForm.elements.containerPort) taskForm.elements.containerPort.required = !isPages;
+  if (taskForm.elements.servicePort) taskForm.elements.servicePort.required = !isPages;
+
+  ["pagesPackageManager", "pagesDeployCommand"].forEach((name) => {
+    const field = taskForm.elements[name];
+    if (field) field.disabled = !isPages;
+  });
+  if (taskForm.elements.pagesDeployCommand) taskForm.elements.pagesDeployCommand.required = isPages;
+
+  if (isPages) {
+    taskForm.elements.language.value = "node";
+    updateSdkOptions("node");
+    const packageManager = taskForm.elements.pagesPackageManager?.value || "npm";
+    const deployCommand = taskForm.elements.pagesDeployCommand;
+    if (deployCommand && !deployCommand.value) deployCommand.value = defaultPagesDeployCommand(packageManager);
+  } else {
+    updateSdkOptions(taskForm.elements.language.value || "java");
+  }
+  renderClusters();
+}
+
 function resetTaskForm() {
   taskForm.reset();
   taskForm.elements.taskId.value = "";
   taskOrganizationSelect.innerHTML = organizationOptions();
   taskForm.elements.organizationId.value = visibleOrganizations()[0]?.id || "default";
+  taskForm.elements.deployRule.value = "k8s";
   taskForm.elements.env.value = "test";
   taskForm.elements.language.value = "java";
   taskForm.elements.artifactPath.value = "";
   taskForm.elements.buildEnv.value = "";
+  taskForm.elements.pagesPackageManager.value = "npm";
+  taskForm.elements.pagesDeployCommand.value = defaultPagesDeployCommand("npm");
   taskForm.elements.mavenRepoUrl.value = "";
   taskForm.elements.mavenMirrorOf.value = "maven-public";
   taskForm.elements.jvmOptions.value = "";
@@ -2052,7 +2149,7 @@ function resetTaskForm() {
   renderGitCredentialOptions("");
   clusterDrafts.splice(0, clusterDrafts.length);
   updateSdkOptions("java", true);
-  renderClusters();
+  syncDeployRuleFields();
 }
 
 function openDrawer() {
@@ -2081,16 +2178,19 @@ function openTaskEditor(taskId) {
   taskForm.elements.tag.value = task.tag || "";
   taskOrganizationSelect.innerHTML = organizationOptions(task.organizationId || "default");
   taskForm.elements.organizationId.value = task.organizationId || "default";
+  taskForm.elements.deployRule.value = normalizeDeployRule(task.deployRule);
   taskForm.elements.repo.value = task.repo || "";
   taskForm.elements.workdir.value = task.workdir || ".";
   renderGitCredentialOptions(task.gitCredentialId || "");
   taskForm.elements.gitCredentialId.value = task.gitCredentialId || "";
-  taskForm.elements.language.value = task.language || "java";
-  updateSdkOptions(task.language || "java", true);
-  taskForm.elements.sdk.value = task.sdk || sdkOptions[task.language || "java"]?.[0] || "";
+  taskForm.elements.language.value = normalizeDeployRule(task.deployRule) === "cf_pages" ? "node" : task.language || "java";
+  updateSdkOptions(taskForm.elements.language.value || "java", true);
+  taskForm.elements.sdk.value = task.sdk || sdkOptions[taskForm.elements.language.value || "java"]?.[0] || "";
   taskForm.elements.buildCommand.value = task.buildCommand || "";
   taskForm.elements.artifactPath.value = task.artifactPath || "";
   taskForm.elements.buildEnv.value = task.buildEnv || "";
+  taskForm.elements.pagesPackageManager.value = task.pagesPackageManager || "npm";
+  taskForm.elements.pagesDeployCommand.value = task.pagesDeployCommand || defaultPagesDeployCommand(task.pagesPackageManager || "npm");
   taskForm.elements.mavenRepoUrl.value = task.mavenRepoUrl || "";
   taskForm.elements.mavenMirrorOf.value = task.mavenMirrorOf || "maven-public";
   taskForm.elements.jvmOptions.value = task.jvmOptions || "";
@@ -2105,7 +2205,7 @@ function openTaskEditor(taskId) {
   taskForm.elements.notifyHealthFail.checked = task.notify?.events?.includes("健康检查失败") ?? true;
   taskForm.elements.notifySuccess.checked = task.notify?.events?.includes("发布成功") ?? false;
   clusterDrafts.splice(0, clusterDrafts.length, ...(task.clusters || []).map((cluster) => ({ ...cluster })));
-  renderClusters();
+  syncDeployRuleFields();
   drawer.inert = false;
   backdrop.hidden = false;
   drawer.classList.add("open");
@@ -2162,6 +2262,7 @@ function selectedEvents() {
 }
 
 function collectClusterDrafts() {
+  if (normalizeDeployRule(formValue("deployRule")) === "cf_pages") return;
   document.querySelectorAll(".cluster-edit-row").forEach((row) => {
     const index = Number(row.dataset.index);
     clusterDrafts[index] = {
@@ -2183,6 +2284,7 @@ function buildPreviewObject() {
       env: formValue("env"),
       tag: formValue("tag"),
       organizationId: formValue("organizationId"),
+      deployRule: normalizeDeployRule(formValue("deployRule")),
     },
     repository: {
       url: formValue("repo"),
@@ -2195,6 +2297,8 @@ function buildPreviewObject() {
       sdk: formValue("sdk"),
       command: formValue("buildCommand"),
       env: formValue("buildEnv"),
+      pagesPackageManager: formValue("pagesPackageManager") || "npm",
+      pagesDeployCommand: formValue("pagesDeployCommand"),
       mavenRepoUrl: formValue("mavenRepoUrl"),
       mavenMirrorOf: formValue("mavenMirrorOf") || "maven-public",
     },
@@ -2205,7 +2309,7 @@ function buildPreviewObject() {
       healthPath: formValue("healthPath"),
       jvmOptions: formValue("language") === "java" ? formValue("jvmOptions") : "",
     },
-    clusters: clusterDrafts,
+    clusters: normalizeDeployRule(formValue("deployRule")) === "cf_pages" ? [] : clusterDrafts,
     notify: {
       channel: selectedNotifyChannel()?.name || formValue("notifyChannel"),
       target: selectedNotifyChannel()?.name || formValue("notifyTarget"),
@@ -2229,6 +2333,7 @@ async function saveTask(event) {
     env: preview.task.env,
     tag: preview.task.tag,
     organizationId: preview.task.organizationId || "default",
+    deployRule: preview.task.deployRule,
     repo: preview.repository.url,
     workdir: preview.repository.workdir,
     artifactPath: preview.repository.artifactPath,
@@ -2237,6 +2342,8 @@ async function saveTask(event) {
     sdk: preview.build.sdk,
     buildCommand: preview.build.command,
     buildEnv: preview.build.env,
+    pagesPackageManager: preview.build.pagesPackageManager,
+    pagesDeployCommand: preview.build.pagesDeployCommand,
     mavenRepoUrl: preview.build.mavenRepoUrl,
     mavenMirrorOf: preview.build.mavenMirrorOf,
     containerPort: preview.runtime.containerPort,
@@ -3497,6 +3604,18 @@ branchForm.addEventListener("submit", (event) => {
 
 languageSelect.addEventListener("change", (event) => {
   updateSdkOptions(event.target.value);
+  syncDeployRuleFields();
+});
+
+deployRuleSelect.addEventListener("change", syncDeployRuleFields);
+
+pagesPackageManagerSelect.addEventListener("change", (event) => {
+  const deployCommand = taskForm.elements.pagesDeployCommand;
+  const previousDefaults = [defaultPagesDeployCommand("npm"), defaultPagesDeployCommand("pnpm")];
+  if (deployCommand && (!deployCommand.value || previousDefaults.includes(deployCommand.value))) {
+    deployCommand.value = defaultPagesDeployCommand(event.target.value);
+  }
+  syncDeployRuleFields();
 });
 
 secretTypeSelect.addEventListener("change", syncSecretNamePlaceholder);
@@ -3833,6 +3952,7 @@ async function init() {
     await loadPersistedState();
   }
   updateSdkOptions(languageSelect.value);
+  syncDeployRuleFields();
   if (restored) {
     setView(preferredViewFromRoute("tasks"), { replace: !routeFromPath() });
   } else {

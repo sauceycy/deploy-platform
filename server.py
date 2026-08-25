@@ -827,6 +827,9 @@ def build_cache_config(task):
     if language == "node" or sdk.startswith("node"):
         add_cache("npm", "/root/.npm", "npm")
         env["npm_config_cache"] = "/root/.npm"
+        if pages_package_manager(task) == "pnpm":
+            add_cache("pnpm-store", "/root/.pnpm-store", "pnpm")
+            env["npm_config_store_dir"] = "/root/.pnpm-store"
     if language == "golang" or sdk.startswith("go"):
         add_cache("go-mod", "/go/pkg/mod", "Go modules")
         add_cache("go-build", "/root/.cache/go-build", "Go build")
@@ -837,6 +840,54 @@ def build_cache_config(task):
         env["PIP_CACHE_DIR"] = "/root/.cache/pip"
 
     return mounts, env, list(dict.fromkeys(labels))
+
+
+def task_deploy_rule(task):
+    value = str(task.get("deployRule") or "k8s").strip().lower()
+    if value in {"pages", "cf", "cf_pages", "cloudflare_pages"}:
+        return "cf_pages"
+    return "k8s"
+
+
+def default_pages_deploy_command(package_manager):
+    return "pnpm deploy" if package_manager == "pnpm" else "npm run deploy"
+
+
+def pages_package_manager(task):
+    value = str(task.get("pagesPackageManager") or "npm").strip().lower()
+    return "pnpm" if value == "pnpm" else "npm"
+
+
+def pages_deploy_command(task):
+    package_manager = pages_package_manager(task)
+    command = str(task.get("pagesDeployCommand") or "").strip() or default_pages_deploy_command(package_manager)
+    if package_manager == "pnpm" and "corepack" not in command and re.search(r"(^|[;&|]\s*)pnpm(\s|$)", command):
+        return f"corepack enable && {command}"
+    return command
+
+
+def run_sdk_command(execution_id, task, command, src_dir, build_env):
+    cache_mounts, cache_env, cache_labels = build_cache_config(task)
+    effective_build_env = {**cache_env, **build_env}
+    if cache_labels:
+        append_log(execution_id, f"已启用构建缓存: {', '.join(cache_labels)}")
+    docker_src_dir = HOST_WORKSPACE_DIR / execution_id / "src"
+    docker_cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "-v",
+        f"{docker_src_dir}:/workspace",
+        *cache_mounts,
+        "-w",
+        f"/workspace/{task.get('workdir') or '.'}",
+        *docker_env_args(effective_build_env),
+        builder_image(task.get("sdk")),
+        "sh",
+        "-lc",
+        command,
+    ]
+    return run_command_stream(docker_cmd, execution_id)
 
 
 def registry_config(state):
@@ -1422,6 +1473,7 @@ def lark_notification_card(task, event, event_label, message, event_time):
         cluster_text = "、".join(cluster_names) or "未绑定"
     else:
         cluster_text = str(clusters or "未绑定")
+    rule_label = "CF Pages" if task_deploy_rule(task) == "cf_pages" else "K8s 服务"
     return {
         "msg_type": "interactive",
         "card": {
@@ -1436,6 +1488,7 @@ def lark_notification_card(task, event, event_label, message, event_time):
                     "fields": [
                         lark_field("任务", task.get("name") or "-"),
                         lark_field("状态", event_label),
+                        lark_field("部署规则", rule_label),
                         lark_field("环境", task.get("env") or "-"),
                         lark_field("负责人", task.get("owner") or "-"),
                         lark_field("语言 / SDK", f"{task.get('language') or '-'} / {task.get('sdk') or '-'}"),
@@ -1516,8 +1569,9 @@ def build_and_dispatch(execution_id):
     image = ""
     image_built = False
     image_pushed = False
+    failure_event = "BUILD_FAILED"
     try:
-        registry = registry_config(state)
+        deploy_rule = task_deploy_rule(task)
         set_execution_status(execution_id, "building", "开始拉取代码", stage="拉取代码", progress=10)
         if work_dir.exists():
             shutil.rmtree(work_dir)
@@ -1542,6 +1596,24 @@ def build_and_dispatch(execution_id):
         if not app_dir.exists():
             raise RuntimeError(f"工作路径不存在: {task.get('workdir')}")
 
+        if deploy_rule == "cf_pages":
+            failure_event = "DEPLOY_FAILED"
+            pages_task = {**task, "language": "node"}
+            if not str(pages_task.get("sdk") or "").startswith("node"):
+                pages_task["sdk"] = "node22"
+            build_env = parse_build_env(task.get("buildEnv"))
+            if build_env:
+                append_log(execution_id, f"已注入 CF Pages 部署环境变量: {', '.join(sorted(build_env.keys()))}")
+            command = pages_deploy_command(pages_task)
+            set_execution_status(execution_id, "deploying", f"本机执行 CF Pages 部署命令: {command}", stage="CF Pages 部署", progress=55)
+            code, output = run_sdk_command(execution_id, pages_task, command, src_dir, build_env)
+            if code != 0:
+                raise RuntimeError("CF Pages 部署命令执行失败")
+            ensure_execution_active(execution_id)
+            set_execution_status(execution_id, "success", "CF Pages 部署完成", stage="发布完成", progress=100)
+            send_notification(task, "BUILD_SUCCESS", "CF Pages 部署完成")
+            return
+
         command = task.get("buildCommand") or ""
         if command:
             set_execution_status(execution_id, "building", f"使用 {task.get('sdk')} 执行编译命令", stage="执行编译", progress=35)
@@ -1558,32 +1630,13 @@ def build_and_dispatch(execution_id):
             build_env = parse_build_env(task.get("buildEnv"))
             if build_env:
                 append_log(execution_id, f"已注入构建环境变量: {', '.join(sorted(build_env.keys()))}")
-            cache_mounts, cache_env, cache_labels = build_cache_config(task)
-            effective_build_env = {**cache_env, **build_env}
-            if cache_labels:
-                append_log(execution_id, f"已启用构建缓存: {', '.join(cache_labels)}")
-            docker_src_dir = HOST_WORKSPACE_DIR / execution_id / "src"
-            docker_cmd = [
-                "docker",
-                "run",
-                "--rm",
-                "-v",
-                f"{docker_src_dir}:/workspace",
-                *cache_mounts,
-                "-w",
-                f"/workspace/{task.get('workdir') or '.'}",
-                *docker_env_args(effective_build_env),
-                builder_image(task.get("sdk")),
-                "sh",
-                "-lc",
-                command,
-            ]
-            code, output = run_command_stream(docker_cmd, execution_id)
+            code, output = run_sdk_command(execution_id, task, command, src_dir, build_env)
             if code != 0:
                 raise RuntimeError("编译命令执行失败")
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "building", "编译命令执行完成", stage="生成镜像", progress=55)
 
+        registry = registry_config(state)
         image = image_name(task, execution_id, registry)
         dockerfile, docker_context, selected_artifact = generate_dockerfile(task, app_dir, src_dir)
         ensure_execution_active(execution_id)
@@ -1635,7 +1688,7 @@ def build_and_dispatch(execution_id):
         latest = read_state()
         current = find_by_id(latest["executions"], execution_id) or {}
         set_execution_status(execution_id, "failed", str(exc), stage=current.get("stage") or "执行失败", progress=current.get("progress") or 100)
-        send_notification(task, "BUILD_FAILED", str(exc))
+        send_notification(task, failure_event, str(exc))
     finally:
         cleanup_build_artifacts(execution_id, work_dir, image, image_built and image_pushed)
 
@@ -1646,6 +1699,7 @@ def create_execution_record(state, task, actor, branch, action="触发发布"):
         "id": execution_id,
         "taskId": task["id"],
         "taskName": task["name"],
+        "deployRule": task_deploy_rule(task),
         "branch": branch,
         "actor": actor or "system",
         "status": "queued",
@@ -1730,6 +1784,8 @@ def normalize_task_payload(payload):
     if not isinstance(payload, dict):
         raise ValueError("任务配置格式不正确")
     notify = payload.get("notify") if isinstance(payload.get("notify"), dict) else {}
+    deploy_rule = task_deploy_rule(payload)
+    package_manager = pages_package_manager(payload)
     clusters = payload.get("clusters") if isinstance(payload.get("clusters"), list) else []
     normalized_clusters = []
     for cluster in clusters:
@@ -1744,12 +1800,13 @@ def normalize_task_payload(payload):
             "imagePullSecretId": str(cluster.get("imagePullSecretId") or "").strip(),
             "status": cluster.get("status") or "success",
         })
-    return {
+    task_payload = {
         "name": str(payload.get("name") or "").strip(),
         "owner": str(payload.get("owner") or "").strip(),
         "env": str(payload.get("env") or "test").strip(),
         "tag": str(payload.get("tag") or "").strip(),
         "organizationId": str(payload.get("organizationId") or "default").strip() or "default",
+        "deployRule": deploy_rule,
         "repo": str(payload.get("repo") or "").strip(),
         "workdir": str(payload.get("workdir") or ".").strip() or ".",
         "artifactPath": str(payload.get("artifactPath") or "").strip(),
@@ -1758,6 +1815,8 @@ def normalize_task_payload(payload):
         "sdk": str(payload.get("sdk") or "").strip(),
         "buildCommand": str(payload.get("buildCommand") or "").strip(),
         "buildEnv": str(payload.get("buildEnv") or ""),
+        "pagesPackageManager": package_manager,
+        "pagesDeployCommand": str(payload.get("pagesDeployCommand") or "").strip() or default_pages_deploy_command(package_manager),
         "mavenRepoUrl": str(payload.get("mavenRepoUrl") or "").strip(),
         "mavenMirrorOf": str(payload.get("mavenMirrorOf") or "maven-public").strip() or "maven-public",
         "containerPort": int(payload.get("containerPort") or 8080),
@@ -1772,6 +1831,16 @@ def normalize_task_payload(payload):
             "events": notify.get("events") if isinstance(notify.get("events"), list) else [],
         },
     }
+    if deploy_rule == "cf_pages":
+        task_payload["language"] = "node"
+        if not task_payload["sdk"] or not task_payload["sdk"].startswith("node"):
+            task_payload["sdk"] = "node22"
+        task_payload["clusters"] = []
+        task_payload["artifactPath"] = ""
+        task_payload["mavenRepoUrl"] = ""
+        task_payload["mavenMirrorOf"] = "maven-public"
+        task_payload["jvmOptions"] = ""
+    return task_payload
 
 
 def save_task_config(task_id, payload, actor):
@@ -1780,8 +1849,10 @@ def save_task_config(task_id, payload, actor):
         raise ValueError("任务名称不能为空")
     if not task_payload["repo"]:
         raise ValueError("仓库地址不能为空")
-    if not task_payload["buildCommand"]:
+    if task_payload["deployRule"] == "k8s" and not task_payload["buildCommand"]:
         raise ValueError("编译命令不能为空")
+    if task_payload["deployRule"] == "cf_pages" and not task_payload["pagesDeployCommand"]:
+        raise ValueError("CF Pages 部署命令不能为空")
 
     def update(state):
         actor_user = find_user(state, actor)

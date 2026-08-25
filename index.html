@@ -397,6 +397,13 @@
               <span>业务标签</span>
               <input name="tag" placeholder="业务标签" />
             </label>
+            <label>
+              <span>部署规则</span>
+              <select name="deployRule" id="deployRuleSelect">
+                <option value="k8s" selected>K8s 服务发布</option>
+                <option value="cf_pages">CF Pages 部署</option>
+              </select>
+            </label>
           </div>
         </section>
 
@@ -430,9 +437,20 @@
               <span>SDK 版本</span>
               <select name="sdk" id="sdkSelect"></select>
             </label>
-            <label class="wide-field">
+            <label class="wide-field k8s-build-field">
               <span>编译命令</span>
               <input name="buildCommand" required placeholder="mvn clean package -DskipTests" />
+            </label>
+            <label class="pages-deploy-field" hidden>
+              <span>Pages 包管理器</span>
+              <select name="pagesPackageManager" id="pagesPackageManagerSelect">
+                <option value="npm" selected>npm</option>
+                <option value="pnpm">pnpm</option>
+              </select>
+            </label>
+            <label class="wide-field pages-deploy-field" hidden>
+              <span>Pages 部署命令</span>
+              <input name="pagesDeployCommand" placeholder="npm run deploy" />
             </label>
             <label class="wide-field java-build-field">
               <span>JAR 包路径</span>
@@ -453,7 +471,7 @@
           </div>
         </section>
 
-        <section class="form-section">
+        <section class="form-section k8s-deploy-field">
           <h3>运行配置</h3>
           <div class="form-grid">
             <label>
@@ -479,7 +497,7 @@
           </div>
         </section>
 
-        <section class="form-section">
+        <section class="form-section k8s-deploy-field">
           <div class="section-title-row">
             <h3>多集群部署</h3>
             <button class="mini-button" id="addCluster" type="button">
