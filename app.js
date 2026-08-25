@@ -1,6 +1,6 @@
 const sdkOptions = {
-  java: ["jdk8", "jdk11", "jdk17", "jdk21"],
-  node: ["node18", "node20", "node22"],
+  java: ["jdk8", "jdk11", "jdk17", "jdk21", "jdk25"],
+  node: ["node18", "node20", "node22", "node24"],
   golang: ["go1.21", "go1.22", "go1.23"],
   python: ["python3.10", "python3.11", "python3.12"],
 };
