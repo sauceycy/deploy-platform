@@ -783,7 +783,7 @@ def apply_maven_settings_to_command(command, settings_path):
     return f"{prefix}{binary} -s {settings_path}{rest}", True
 
 
-def parse_key_value_env(value, label="环境变量"):
+def parse_key_value_env(value, label="环境变量", key_pattern=r"^[A-Za-z_][A-Za-z0-9_]*$", key_hint="KEY"):
     env = {}
     for line_number, raw_line in enumerate(str(value or "").splitlines(), start=1):
         line = raw_line.strip()
@@ -795,18 +795,23 @@ def parse_key_value_env(value, label="环境变量"):
             raise RuntimeError(f"{label}第 {line_number} 行格式错误，应为 KEY=VALUE")
         key, item_value = line.split("=", 1)
         key = key.strip()
-        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
-            raise RuntimeError(f"{label}名不合法: {key}")
+        if not re.match(key_pattern, key):
+            raise RuntimeError(f"{label}名不合法: {key}，请使用 {key_hint}=VALUE")
         env[key] = item_value
     return env
 
 
 def parse_build_env(value):
-    return parse_key_value_env(value, "构建环境变量")
+    return parse_key_value_env(value, "构建环境变量", key_hint="SENTRY_AUTH_TOKEN")
 
 
 def parse_runtime_env(value):
-    return parse_key_value_env(value, "运行环境变量")
+    return parse_key_value_env(
+        value,
+        "运行环境变量",
+        key_pattern=r"^[A-Za-z_][A-Za-z0-9_.-]*$",
+        key_hint="SPRING_PROFILES_ACTIVE 或 spring.profiles.active",
+    )
 
 
 def docker_env_args(env):
