@@ -284,6 +284,14 @@
                   <span>镜像命名空间</span>
                   <input name="imageNamespace" id="platformImageNamespace" placeholder="deploy-platform" />
                 </label>
+                <label>
+                  <span>默认空闲超时（分钟）</span>
+                  <input name="commandIdleTimeoutMinutes" id="platformCommandIdleTimeout" type="number" min="0" max="1440" placeholder="30，0 为关闭" />
+                </label>
+                <label>
+                  <span>默认自动重试次数</span>
+                  <input name="commandRetryCount" id="platformCommandRetryCount" type="number" min="0" max="3" placeholder="1" />
+                </label>
                 <button class="primary-button" type="submit" data-permission-required="secret.manage">
                   <i data-lucide="save"></i>
                   <span>保存仓库配置</span>
@@ -383,8 +391,9 @@
             <label>
               <span>部署环境</span>
               <select name="env">
+                <option value="" selected>请选择环境</option>
                 <option>dev</option>
-                <option selected>test</option>
+                <option>test</option>
                 <option>staging</option>
                 <option>prod</option>
               </select>
@@ -423,7 +432,7 @@
             </label>
             <label>
               <span>编译工作路径</span>
-              <input name="workdir" required placeholder="." />
+              <input name="workdir" placeholder="例如 . 或 ruoyi-admin" />
             </label>
             <label>
               <span>Git 凭据</span>
@@ -434,7 +443,8 @@
             <label>
               <span>编译语言</span>
               <select name="language" id="languageSelect">
-                <option value="java" selected>Java</option>
+                <option value="" selected>请选择语言</option>
+                <option value="java">Java</option>
                 <option value="node">Node.js</option>
                 <option value="golang">Golang</option>
                 <option value="python">Python</option>
@@ -451,13 +461,14 @@
             <label class="pages-deploy-field" hidden>
               <span>Pages 包管理器</span>
               <select name="pagesPackageManager" id="pagesPackageManagerSelect">
-                <option value="npm" selected>npm</option>
+                <option value="" selected>请选择包管理器</option>
+                <option value="npm">npm</option>
                 <option value="pnpm">pnpm</option>
               </select>
             </label>
             <label class="wide-field pages-deploy-field" hidden>
               <span>Pages 部署命令</span>
-              <input name="pagesDeployCommand" placeholder="npm run deploy" />
+              <input name="pagesDeployCommand" placeholder="例如 npm run deploy 或 pnpm run deploy" />
             </label>
             <label class="wide-field artifact-path-field">
               <span id="artifactPathLabel">JAR 包路径</span>
@@ -494,6 +505,14 @@
               <input name="replicas" type="number" min="1" max="50" placeholder="2" />
             </label>
             <label>
+              <span>空闲超时（分钟）</span>
+              <input name="idleTimeoutMinutes" type="number" min="0" max="1440" placeholder="留空使用平台默认，0 为关闭" />
+            </label>
+            <label>
+              <span>自动重试次数</span>
+              <input name="retryCount" type="number" min="0" max="3" placeholder="留空使用平台默认" />
+            </label>
+            <label>
               <span>健康检查路径（选填）</span>
               <input name="healthPath" placeholder="留空不添加，例如 /actuator/health" />
             </label>
@@ -504,6 +523,29 @@
             <label class="wide-field java-build-field">
               <span>JVM 启动参数</span>
               <textarea name="jvmOptions" placeholder="每个参数用空格或换行分隔，例如：&#10;-Xms512m -Xmx1024m&#10;-Dspring.profiles.active=test"></textarea>
+            </label>
+            <label class="check-line wide-field">
+              <input type="checkbox" name="logEnabled" id="logEnabledInput" />
+              <span>启用 Sidecar 日志采集到 Graylog</span>
+            </label>
+            <label class="log-config-field" hidden>
+              <span>应用日志文件</span>
+              <input name="logPath" placeholder="/logs/app.log" />
+            </label>
+            <label class="log-config-field" hidden>
+              <span>Graylog Host</span>
+              <input name="logOutputHost" placeholder="192.168.210.64 或 graylog.example.com" />
+            </label>
+            <label class="log-config-field" hidden>
+              <span>Graylog 端口</span>
+              <input name="logOutputPort" type="number" min="1" max="65535" placeholder="12201" />
+            </label>
+            <label class="log-config-field" hidden>
+              <span>GELF 协议</span>
+              <select name="logOutputMode">
+                <option value="tcp">tcp</option>
+                <option value="udp">udp</option>
+              </select>
             </label>
           </div>
         </section>
