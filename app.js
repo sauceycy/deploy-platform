@@ -86,7 +86,7 @@ const executions = [];
 const agentTasks = [];
 const agentHeartbeats = [];
 const schedules = [];
-const platformSettings = { registrySecretId: "", imageNamespace: "deploy-platform", commandIdleTimeoutMinutes: "", commandRetryCount: "" };
+const platformSettings = { registrySecretId: "", imageNamespace: "deploy-platform" };
 const clusterDrafts = [];
 const clusterNodeDrafts = [];
 const APP_STATE_KEY = "deploy-platform-state";
@@ -167,8 +167,6 @@ const editSecretForm = document.getElementById("editSecretForm");
 const platformSettingsForm = document.getElementById("platformSettingsForm");
 const platformRegistrySecret = document.getElementById("platformRegistrySecret");
 const platformImageNamespace = document.getElementById("platformImageNamespace");
-const platformCommandIdleTimeout = document.getElementById("platformCommandIdleTimeout");
-const platformCommandRetryCount = document.getElementById("platformCommandRetryCount");
 const clusterCreateDialog = document.getElementById("clusterCreateDialog");
 const templateCreateDialog = document.getElementById("templateCreateDialog");
 const channelCreateDialog = document.getElementById("channelCreateDialog");
@@ -407,7 +405,7 @@ function hydrateState(nextState) {
   replaceArray(agentTasks, nextState.agentTasks);
   replaceArray(agentHeartbeats, nextState.agentHeartbeats);
   replaceArray(schedules, nextState.schedules);
-  Object.assign(platformSettings, { registrySecretId: "", imageNamespace: "deploy-platform", commandIdleTimeoutMinutes: "", commandRetryCount: "" }, nextState.platformSettings || {});
+  Object.assign(platformSettings, { registrySecretId: "", imageNamespace: "deploy-platform" }, nextState.platformSettings || {});
   normalizeOrganizations();
   const accessibleTasks = tasks.filter(canAccessAsset);
   state.selectedId = accessibleTasks.some((task) => String(task.id) === String(previousSelectedId)) ? previousSelectedId : accessibleTasks[0]?.id || null;
@@ -1296,13 +1294,9 @@ function renderDetail() {
         <span>容器端口</span><strong>${task.containerPort}</strong>
         <span>Service</span><strong>${task.servicePort}</strong>
         <span>副本</span><strong>${task.replicas}</strong>
-        <span>空闲超时</span><strong>${task.idleTimeoutMinutes === "" || task.idleTimeoutMinutes === undefined ? "平台默认" : `${task.idleTimeoutMinutes} 分钟`}</strong>
-        <span>自动重试</span><strong>${task.retryCount === "" || task.retryCount === undefined ? "平台默认" : `${task.retryCount} 次`}</strong>
         <span>健康检查</span><strong>${task.healthPath || "未设置"}</strong>
         <span>运行环境变量</span><strong>${envKeys(task.runtimeEnv).join("、") || "未设置"}</strong>
         ${task.language === "java" ? `<span>JAVA_TOOL_OPTIONS</span><strong>${task.jvmOptions || "未设置"}</strong>` : ""}
-        <span>日志采集</span><strong>${task.logEnabled ? `Fluent Bit -> ${task.logOutputHost}:${task.logOutputPort || 12201}/${task.logOutputMode || "tcp"}` : "未启用"}</strong>
-        ${task.logEnabled ? `<span>日志文件</span><strong>${task.logPath || "/logs/app.log"}</strong>` : ""}
       </div>
     </section>
 
@@ -1656,13 +1650,9 @@ function renderTaskConfigTab(task, activeSchedule) {
           <span>容器端口</span><strong>${task.containerPort}</strong>
           <span>Service</span><strong>${task.servicePort}</strong>
           <span>副本</span><strong>${task.replicas}</strong>
-          <span>空闲超时</span><strong>${task.idleTimeoutMinutes === "" || task.idleTimeoutMinutes === undefined ? "平台默认" : `${task.idleTimeoutMinutes} 分钟`}</strong>
-          <span>自动重试</span><strong>${task.retryCount === "" || task.retryCount === undefined ? "平台默认" : `${task.retryCount} 次`}</strong>
           <span>健康检查</span><strong>${task.healthPath || "未设置"}</strong>
           <span>运行环境变量</span><strong>${envKeys(task.runtimeEnv).join("、") || "未设置"}</strong>
           ${task.language === "java" ? `<span>JAVA_TOOL_OPTIONS</span><strong>${task.jvmOptions || "未设置"}</strong>` : ""}
-          <span>日志采集</span><strong>${task.logEnabled ? `Fluent Bit -> ${task.logOutputHost}:${task.logOutputPort || 12201}/${task.logOutputMode || "tcp"}` : "未启用"}</strong>
-          ${task.logEnabled ? `<span>日志文件</span><strong>${task.logPath || "/logs/app.log"}</strong>` : ""}
           <span>通知渠道</span><strong>${task.notify.channel}</strong>
           <span>通知目标</span><strong>${task.notify.target || "未设置"}</strong>
           <span>通知事件</span><strong>${task.notify.events.join("、") || "未设置"}</strong>
@@ -2017,8 +2007,6 @@ function renderPlatformSettings() {
   if (!platformRegistrySecret || !platformImageNamespace) return;
   platformRegistrySecret.innerHTML = imagePullSecretOptions(platformSettings.registrySecretId, "使用环境变量配置");
   platformImageNamespace.value = platformSettings.imageNamespace || "deploy-platform";
-  if (platformCommandIdleTimeout) platformCommandIdleTimeout.value = platformSettings.commandIdleTimeoutMinutes ?? "";
-  if (platformCommandRetryCount) platformCommandRetryCount.value = platformSettings.commandRetryCount ?? "";
 }
 
 function renderUserView() {
@@ -2107,7 +2095,7 @@ function renderClusters() {
         </label>
         <label>
           <span>副本</span>
-          <input data-field="replicas" type="number" min="1" value="${cluster.replicas || ""}" />
+          <input data-field="replicas" type="number" min="1" value="${cluster.replicas || 1}" />
         </label>
         <label>
           <span>Ingress</span>
@@ -2128,16 +2116,13 @@ function renderClusters() {
     .join("");
 }
 
-function updateSdkOptions(language, force = false, fillDefaults = true) {
+function updateSdkOptions(language, force = false) {
   const options = sdkOptions[language] || [];
   const currentSdk = sdkSelect.value;
-  const selectedSdk = options.includes(currentSdk) && !force ? currentSdk : fillDefaults ? options[0] : "";
-  sdkSelect.innerHTML = [
-    `<option value="" ${selectedSdk ? "" : "selected"}>请选择 SDK</option>`,
-    ...options.map((sdk) => `<option value="${sdk}" ${sdk === selectedSdk ? "selected" : ""}>${sdk}</option>`),
-  ].join("");
+  const selectedSdk = options.includes(currentSdk) && !force ? currentSdk : options[0];
+  sdkSelect.innerHTML = options.map((sdk) => `<option ${sdk === selectedSdk ? "selected" : ""}>${sdk}</option>`).join("");
   const commandInput = taskForm.elements.buildCommand;
-  if (fillDefaults && (force || !commandInput.value)) commandInput.value = buildCommands[language] || "";
+  if (force || !commandInput.value) commandInput.value = buildCommands[language] || "";
   document.querySelectorAll(".java-build-field").forEach((field) => {
     field.hidden = language !== "java" || normalizeAppType(taskForm.elements.appType?.value) === "frontend" || normalizeDeployRule(taskForm.elements.deployRule?.value) === "cf_pages";
   });
@@ -2159,27 +2144,14 @@ function syncDeployRuleFields() {
     field.hidden = isPages;
   });
 
-  ["buildCommand", "containerPort", "servicePort", "replicas", "idleTimeoutMinutes", "retryCount", "healthPath", "runtimeEnv", "jvmOptions", "logEnabled"].forEach((name) => {
+  ["buildCommand", "containerPort", "servicePort", "replicas", "healthPath", "runtimeEnv", "jvmOptions"].forEach((name) => {
     const field = taskForm.elements[name];
     if (field) field.disabled = isPages;
   });
-  const logEnabled = !isPages && Boolean(taskForm.elements.logEnabled?.checked);
-  document.querySelectorAll(".log-config-field").forEach((field) => {
-    field.hidden = !logEnabled;
-  });
-  ["logPath", "logOutputHost", "logOutputPort", "logOutputMode"].forEach((name) => {
-    const field = taskForm.elements[name];
-    if (field) field.disabled = !logEnabled;
-  });
-  if (taskForm.elements.logOutputHost) taskForm.elements.logOutputHost.required = logEnabled;
   if (taskForm.elements.buildCommand) taskForm.elements.buildCommand.required = !isPages;
   if (taskForm.elements.containerPort) taskForm.elements.containerPort.required = !isPages;
   if (taskForm.elements.servicePort) taskForm.elements.servicePort.required = !isPages;
-  if (taskForm.elements.language) {
-    taskForm.elements.language.disabled = isPages || isFrontend;
-    taskForm.elements.language.required = !isPages && !isFrontend;
-  }
-  if (taskForm.elements.sdk) taskForm.elements.sdk.required = !isPages;
+  if (taskForm.elements.language) taskForm.elements.language.disabled = isPages || isFrontend;
 
   ["pagesPackageManager", "pagesDeployCommand"].forEach((name) => {
     const field = taskForm.elements[name];
@@ -2190,10 +2162,8 @@ function syncDeployRuleFields() {
   if (isPages || isFrontend) {
     taskForm.elements.language.value = "node";
     updateSdkOptions("node");
-  } else if (taskForm.elements.language.value) {
-    updateSdkOptions(taskForm.elements.language.value || "java");
   } else {
-    updateSdkOptions("", false, false);
+    updateSdkOptions(taskForm.elements.language.value || "java");
   }
 
   const artifactField = document.querySelector(".artifact-path-field");
@@ -2223,34 +2193,20 @@ function resetTaskForm() {
   taskForm.elements.organizationId.value = visibleOrganizations()[0]?.id || "default";
   taskForm.elements.deployRule.value = "k8s";
   taskForm.elements.appType.value = "backend";
-  taskForm.elements.env.value = "";
-  taskForm.elements.workdir.value = "";
-  taskForm.elements.language.value = "";
-  taskForm.elements.sdk.value = "";
-  taskForm.elements.buildCommand.value = "";
+  taskForm.elements.env.value = "test";
+  taskForm.elements.language.value = "java";
   taskForm.elements.artifactPath.value = "";
   taskForm.elements.buildEnv.value = "";
-  taskForm.elements.pagesPackageManager.value = "";
-  taskForm.elements.pagesDeployCommand.value = "";
+  taskForm.elements.pagesPackageManager.value = "npm";
+  taskForm.elements.pagesDeployCommand.value = defaultPagesDeployCommand("npm");
   taskForm.elements.mavenRepoUrl.value = "";
-  taskForm.elements.mavenMirrorOf.value = "";
-  taskForm.elements.containerPort.value = "";
-  taskForm.elements.servicePort.value = "";
-  taskForm.elements.replicas.value = "";
-  taskForm.elements.idleTimeoutMinutes.value = "";
-  taskForm.elements.retryCount.value = "";
-  taskForm.elements.healthPath.value = "";
+  taskForm.elements.mavenMirrorOf.value = "maven-public";
   taskForm.elements.runtimeEnv.value = "";
   taskForm.elements.jvmOptions.value = "";
-  taskForm.elements.logEnabled.checked = false;
-  taskForm.elements.logPath.value = "";
-  taskForm.elements.logOutputHost.value = "";
-  taskForm.elements.logOutputPort.value = "";
-  taskForm.elements.logOutputMode.value = "tcp";
   renderNotifyChannelOptions("", true);
   renderGitCredentialOptions("");
   clusterDrafts.splice(0, clusterDrafts.length);
-  updateSdkOptions("", true, false);
+  updateSdkOptions("java", true);
   syncDeployRuleFields();
 }
 
@@ -2301,14 +2257,7 @@ function openTaskEditor(taskId) {
   taskForm.elements.containerPort.value = task.containerPort || "";
   taskForm.elements.servicePort.value = task.servicePort || "";
   taskForm.elements.replicas.value = task.replicas || "";
-  taskForm.elements.idleTimeoutMinutes.value = task.idleTimeoutMinutes ?? "";
-  taskForm.elements.retryCount.value = task.retryCount ?? "";
   taskForm.elements.healthPath.value = task.healthPath || "";
-  taskForm.elements.logEnabled.checked = Boolean(task.logEnabled);
-  taskForm.elements.logPath.value = task.logPath || "";
-  taskForm.elements.logOutputHost.value = task.logOutputHost || "";
-  taskForm.elements.logOutputPort.value = task.logOutputPort || "";
-  taskForm.elements.logOutputMode.value = task.logOutputMode || "tcp";
   taskForm.elements.notifyTarget.value = task.notify?.target || "";
   renderNotifyChannelOptions(task.notify?.target || task.notify?.channel || "", !task.notify?.target);
   taskForm.elements.notifyBuildFail.checked = task.notify?.events?.includes("构建失败") ?? true;
@@ -2418,16 +2367,9 @@ function buildPreviewObject() {
       containerPort: Number(formValue("containerPort")),
       servicePort: Number(formValue("servicePort")),
       replicas: Number(formValue("replicas") || 1),
-      idleTimeoutMinutes: formValue("idleTimeoutMinutes"),
-      retryCount: formValue("retryCount"),
       healthPath: formValue("healthPath"),
       env: formValue("runtimeEnv"),
       jvmOptions: formValue("language") === "java" ? formValue("jvmOptions") : "",
-      logEnabled: Boolean(taskForm.elements.logEnabled?.checked),
-      logPath: formValue("logPath"),
-      logOutputHost: formValue("logOutputHost"),
-      logOutputPort: Number(formValue("logOutputPort") || 12201),
-      logOutputMode: formValue("logOutputMode") || "tcp",
     },
     clusters: normalizeDeployRule(formValue("deployRule")) === "cf_pages" ? [] : clusterDrafts,
     notify: {
@@ -2470,16 +2412,9 @@ async function saveTask(event) {
     containerPort: preview.runtime.containerPort,
     servicePort: preview.runtime.servicePort,
     replicas: preview.runtime.replicas,
-    idleTimeoutMinutes: preview.runtime.idleTimeoutMinutes,
-    retryCount: preview.runtime.retryCount,
     healthPath: preview.runtime.healthPath,
     runtimeEnv: preview.runtime.env,
     jvmOptions: preview.runtime.jvmOptions,
-    logEnabled: preview.runtime.logEnabled,
-    logPath: preview.runtime.logPath,
-    logOutputHost: preview.runtime.logOutputHost,
-    logOutputPort: preview.runtime.logOutputPort,
-    logOutputMode: preview.runtime.logOutputMode,
     clusters: preview.clusters.map((cluster) => ({ ...cluster, status: cluster.status || "success" })),
     notify: preview.notify,
   };
@@ -2821,6 +2756,7 @@ async function saveCluster(event) {
     return;
   }
   const cluster = {
+    id: Date.now(),
     name: clusterName,
     region: formData.get("region"),
     env: formData.get("env"),
@@ -2829,18 +2765,15 @@ async function saveCluster(event) {
     imagePullSecretId: formData.get("imagePullSecretId"),
     nodes: [],
   };
-  try {
-    const result = await postJson("/api/clusters", { actor: state.currentUser?.username || "system", cluster });
-    hydrateState(result.state);
-    cacheStateSnapshot(result.state);
+  clusters.unshift(cluster);
+  addAudit("添加集群", cluster.name);
+  const saved = await persistState();
+  if (saved) {
     form.reset();
     render();
     closeCreateDialog(clusterCreateDialog, form);
-  } catch (error) {
-    window.alert(error.message);
-  } finally {
-    if (submitter) submitter.disabled = false;
   }
+  if (submitter) submitter.disabled = false;
 }
 
 function renderClusterNodes() {
@@ -2934,6 +2867,7 @@ async function saveEditedCluster(event) {
     if (submitter) submitter.disabled = false;
     return;
   }
+  const previousName = normalizeClusterName(cluster.name);
   const nextName = normalizeClusterName(editClusterForm.elements.name.value);
   if (!nextName) {
     window.alert("集群名称不能为空");
@@ -2945,7 +2879,7 @@ async function saveEditedCluster(event) {
     if (submitter) submitter.disabled = false;
     return;
   }
-  const nextCluster = {
+  Object.assign(cluster, {
     name: nextName,
     region: editClusterForm.elements.region.value,
     env: editClusterForm.elements.env.value,
@@ -2953,18 +2887,22 @@ async function saveEditedCluster(event) {
     namespace: editClusterForm.elements.namespace.value || "default",
     imagePullSecretId: editClusterForm.elements.imagePullSecretId.value,
     nodes: clusterNodeDrafts.filter((node) => node.name || node.ip),
-  };
-  try {
-    const result = await postJson(`/api/clusters/${encodeURIComponent(cluster.id)}`, { actor: state.currentUser?.username || "system", cluster: nextCluster }, "PUT");
-    hydrateState(result.state);
-    cacheStateSnapshot(result.state);
+  });
+  if (previousName && previousName !== nextName) {
+    tasks.forEach((task) => {
+      (task.clusters || []).forEach((target) => {
+        if (target.name === previousName) target.name = nextName;
+      });
+    });
+    agentHeartbeats.splice(0, agentHeartbeats.length, ...agentHeartbeats.filter((item) => item.cluster !== previousName));
+  }
+  addAudit("编辑集群", cluster.name);
+  const saved = await persistState();
+  if (saved) {
     render();
     closeClusterDialog();
-  } catch (error) {
-    window.alert(error.message);
-  } finally {
-    if (submitter) submitter.disabled = false;
   }
+  if (submitter) submitter.disabled = false;
 }
 
 async function updateClusterPullSecret(clusterId, secretId) {
@@ -2975,21 +2913,9 @@ async function updateClusterPullSecret(clusterId, secretId) {
     window.alert("当前用户组无权修改该集群");
     return;
   }
-  try {
-    const result = await postJson(
-      `/api/clusters/${encodeURIComponent(cluster.id)}`,
-      {
-        actor: state.currentUser?.username || "system",
-        cluster: { ...cluster, imagePullSecretId: secretId },
-      },
-      "PUT",
-    );
-    hydrateState(result.state);
-    cacheStateSnapshot(result.state);
-    render();
-  } catch (error) {
-    window.alert(error.message);
-  }
+  cluster.imagePullSecretId = secretId;
+  addAudit("设置镜像拉取秘钥", `${cluster.name} / ${secretName(secretId)}`);
+  await saveStateAndRender();
 }
 
 async function saveTemplate(event) {
@@ -3000,23 +2926,21 @@ async function saveTemplate(event) {
   if (submitter) submitter.disabled = true;
   const formData = new FormData(form);
   const template = {
+    id: Date.now(),
     name: formData.get("name"),
     language: formData.get("language"),
     sdk: formData.get("sdk"),
     command: formData.get("command"),
   };
-  try {
-    const result = await postJson("/api/templates", { actor: state.currentUser?.username || "system", template });
-    hydrateState(result.state);
-    cacheStateSnapshot(result.state);
+  buildTemplates.unshift(template);
+  addAudit("添加构建模板", template.name);
+  const saved = await persistState();
+  if (saved) {
     form.reset();
     render();
     closeCreateDialog(templateCreateDialog, form);
-  } catch (error) {
-    window.alert(error.message);
-  } finally {
-    if (submitter) submitter.disabled = false;
   }
+  if (submitter) submitter.disabled = false;
 }
 
 async function saveChannel(event) {
@@ -3027,36 +2951,43 @@ async function saveChannel(event) {
   if (submitter) submitter.disabled = true;
   const formData = new FormData(form);
   const channelId = formData.get("id");
-  const existingChannel = channelId ? notifyChannels.find((item) => String(item.id) === String(channelId)) : null;
-  if (channelId && !existingChannel) {
-    window.alert("通知渠道不存在或已被删除");
-    if (submitter) submitter.disabled = false;
-    return;
-  }
-  if (existingChannel && !canOperateAsset("channel.manage", existingChannel)) {
-    window.alert("当前用户组无权编辑该通知渠道");
-    if (submitter) submitter.disabled = false;
-    return;
-  }
   const channelPayload = {
     name: formData.get("name"),
     type: formData.get("type"),
     target: formData.get("target"),
     secret: formData.get("secret"),
-    organizationId: existingChannel?.organizationId || visibleOrganizations()[0]?.id || "default",
   };
-  try {
-    const result = await postJson(channelId ? `/api/channels/${encodeURIComponent(channelId)}` : "/api/channels", { actor: state.currentUser?.username || "system", channel: channelPayload }, channelId ? "PUT" : "POST");
-    hydrateState(result.state);
-    cacheStateSnapshot(result.state);
+  if (channelId) {
+    const channel = notifyChannels.find((item) => String(item.id) === String(channelId));
+    if (!channel) {
+      window.alert("通知渠道不存在或已被删除");
+      if (submitter) submitter.disabled = false;
+      return;
+    }
+    if (!canOperateAsset("channel.manage", channel)) {
+      window.alert("当前用户组无权编辑该通知渠道");
+      if (submitter) submitter.disabled = false;
+      return;
+    }
+    Object.assign(channel, channelPayload, { updatedAt: nowText() });
+    addAudit("编辑通知渠道", channel.name);
+  } else {
+    const channel = {
+      id: Date.now(),
+      ...channelPayload,
+      organizationId: visibleOrganizations()[0]?.id || "default",
+      createdAt: nowText(),
+    };
+    notifyChannels.unshift(channel);
+    addAudit("添加通知渠道", channel.name);
+  }
+  const saved = await persistState();
+  if (saved) {
     form.reset();
     render();
     closeCreateDialog(channelCreateDialog, form);
-  } catch (error) {
-    window.alert(error.message);
-  } finally {
-    if (submitter) submitter.disabled = false;
   }
+  if (submitter) submitter.disabled = false;
 }
 
 function openChannelCreateDialog() {
@@ -3099,21 +3030,9 @@ async function deleteChannel(channelId) {
     return;
   }
   if (!window.confirm(`确认删除通知渠道 ${channel.name}？`)) return;
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), STATE_SAVE_TIMEOUT_MS);
-  try {
-    const actor = encodeURIComponent(state.currentUser?.username || "system");
-    const response = await fetch(`/api/channels/${channelId}?actor=${actor}`, { method: "DELETE", signal: controller.signal });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || "删除通知渠道失败");
-    hydrateState(result.state);
-    cacheStateSnapshot(result.state);
-    render();
-  } catch (error) {
-    window.alert(error.name === "AbortError" ? "请求超时，请检查后端服务或数据库连接是否正常" : error.message);
-  } finally {
-    window.clearTimeout(timeoutId);
-  }
+  notifyChannels.splice(notifyChannels.findIndex((item) => String(item.id) === String(channelId)), 1);
+  addAudit("删除通知渠道", channel.name);
+  await saveStateAndRender();
 }
 
 async function savePlatformSettings(event) {
@@ -3121,22 +3040,11 @@ async function savePlatformSettings(event) {
   if (!requirePermission("secret.manage")) return;
   const submitter = event.submitter;
   if (submitter) submitter.disabled = true;
-  const settings = {
-    registrySecretId: platformSettingsForm.elements.registrySecretId.value,
-    imageNamespace: (platformSettingsForm.elements.imageNamespace.value || "deploy-platform").trim().replace(/^\/+|\/+$/g, "") || "deploy-platform",
-    commandIdleTimeoutMinutes: platformSettingsForm.elements.commandIdleTimeoutMinutes.value,
-    commandRetryCount: platformSettingsForm.elements.commandRetryCount.value,
-  };
-  try {
-    const result = await postJson("/api/platform-settings", { actor: state.currentUser?.username || "system", settings }, "PUT");
-    hydrateState(result.state);
-    cacheStateSnapshot(result.state);
-    render();
-  } catch (error) {
-    window.alert(error.message);
-  } finally {
-    if (submitter) submitter.disabled = false;
-  }
+  platformSettings.registrySecretId = platformSettingsForm.elements.registrySecretId.value;
+  platformSettings.imageNamespace = (platformSettingsForm.elements.imageNamespace.value || "deploy-platform").trim().replace(/^\/+|\/+$/g, "") || "deploy-platform";
+  addAudit("保存镜像仓库配置", `${secretName(platformSettings.registrySecretId)} / ${platformSettings.imageNamespace}`);
+  await saveStateAndRender();
+  if (submitter) submitter.disabled = false;
 }
 
 async function saveSecret(event) {
@@ -3328,18 +3236,15 @@ async function saveUser(event) {
     globalAccess,
     organizationIds,
   };
-  try {
-    const result = await postJson("/api/users", { actor: state.currentUser?.username || "system", user });
-    hydrateState(result.state);
-    cacheStateSnapshot(result.state);
+  users.push(user);
+  addAudit("添加用户", username);
+  const saved = await persistState();
+  if (saved) {
     form.reset();
     closeCreateDialog(userCreateDialog, form);
     render();
-  } catch (error) {
-    window.alert(error.message);
-  } finally {
-    if (submitter) submitter.disabled = false;
   }
+  if (submitter) submitter.disabled = false;
 }
 
 async function saveOrganization(event) {
@@ -3357,18 +3262,18 @@ async function saveOrganization(event) {
     window.alert(`用户组 ${name} 已存在`);
     return;
   }
-  const organization = {
+  organizations.push({
+    id,
     name,
     description: String(formData.get("description") || "").trim(),
-  };
-  try {
-    const result = await postJson("/api/organizations", { actor: state.currentUser?.username || "system", organization });
-    hydrateState(result.state);
-    cacheStateSnapshot(result.state);
+    permissions: [],
+    globalAccess: false,
+  });
+  addAudit("添加用户组", name);
+  const saved = await persistState();
+  if (saved) {
     event.currentTarget.reset();
     render();
-  } catch (error) {
-    window.alert(error.message);
   }
 }
 
@@ -3439,33 +3344,32 @@ async function saveEditedUser(event) {
     if (submitter) submitter.disabled = false;
     return;
   }
-  const nextUser = {
-    username,
-    name: nextName,
-    role: nextRole,
-    password: nextPassword,
-    globalAccess: nextGlobalAccess,
-    organizationIds: nextOrganizationIds,
-  };
+  const changedRole = user.role !== nextRole;
+  const changedName = user.name !== nextName;
+  const changedPassword = Boolean(nextPassword);
+  const changedAccess = user.globalAccess !== nextGlobalAccess || JSON.stringify(user.organizationIds || []) !== JSON.stringify(nextOrganizationIds);
 
-  try {
-    const result = await postJson(`/api/users/${encodeURIComponent(username)}`, { actor: state.currentUser?.username || "system", user: nextUser }, "PUT");
-    hydrateState(result.state);
-    cacheStateSnapshot(result.state);
-    if (state.currentUser.username === username && result.user) {
-      state.currentUser.name = result.user.name;
-      state.currentUser.role = result.user.role;
-      state.currentUser.globalAccess = Boolean(result.user.globalAccess);
-      state.currentUser.organizationIds = result.user.organizationIds || ["default"];
-      window.localStorage.setItem(APP_USER_KEY, JSON.stringify(state.currentUser));
-    }
+  user.name = nextName;
+  user.role = nextRole;
+  user.globalAccess = nextGlobalAccess;
+  user.organizationIds = nextOrganizationIds;
+  if (changedPassword) user.password = nextPassword;
+
+  if (state.currentUser.username === user.username) {
+    state.currentUser.name = user.name;
+    state.currentUser.role = user.role;
+    window.localStorage.setItem(APP_USER_KEY, JSON.stringify(state.currentUser));
+  }
+
+  if (changedName || changedRole || changedAccess) addAudit("编辑用户", username);
+  if (changedPassword) addAudit("重置密码", username);
+
+  const saved = await persistState();
+  if (saved) {
     closeUserDialog();
     render();
-  } catch (error) {
-    window.alert(error.message);
-  } finally {
-    if (submitter) submitter.disabled = false;
   }
+  if (submitter) submitter.disabled = false;
 }
 
 const viewConfig = {
@@ -3769,7 +3673,6 @@ languageSelect.addEventListener("change", (event) => {
 
 deployRuleSelect.addEventListener("change", syncDeployRuleFields);
 appTypeSelect.addEventListener("change", syncDeployRuleFields);
-taskForm.elements.logEnabled?.addEventListener("change", syncDeployRuleFields);
 
 pagesPackageManagerSelect.addEventListener("change", (event) => {
   const deployCommand = taskForm.elements.pagesDeployCommand;
@@ -3878,27 +3781,13 @@ document.addEventListener("change", async (event) => {
     const group = organizations.find((item) => String(item.id) === String(groupPermissionInput.dataset.group));
     if (!group) return;
     const permission = groupPermissionInput.dataset.groupPermission;
-    const nextPermissions = groupPermissionInput.checked
-      ? Array.from(new Set([...(group.permissions || []), permission]))
-      : (group.permissions || []).filter((item) => item !== permission);
-    const nextGroup = { ...group, permissions: nextPermissions };
-    groupPermissionInput.disabled = true;
-    try {
-      const result = await postJson(
-        `/api/organizations/${encodeURIComponent(group.id)}`,
-        { actor: state.currentUser?.username || "system", organization: nextGroup },
-        "PUT",
-      );
-      hydrateState(result.state);
-      cacheStateSnapshot(result.state);
-      render();
-    } catch (error) {
-      window.alert(error.message);
-      await refreshRemoteState({ force: true });
-      render();
-    } finally {
-      groupPermissionInput.disabled = false;
+    if (groupPermissionInput.checked) {
+      group.permissions = Array.from(new Set([...(group.permissions || []), permission]));
+    } else {
+      group.permissions = (group.permissions || []).filter((item) => item !== permission);
     }
+    addAudit("更新用户组权限", `${group.name} / ${permission}`);
+    await saveStateAndRender();
     return;
   }
 
@@ -3907,50 +3796,22 @@ document.addEventListener("change", async (event) => {
     if (!hasPermission("org.manage")) return;
     const group = organizations.find((item) => String(item.id) === String(groupGlobalInput.dataset.groupGlobal));
     if (!group || group.id === "default") return;
-    const nextGroup = { ...group, globalAccess: groupGlobalInput.checked };
-    groupGlobalInput.disabled = true;
-    try {
-      const result = await postJson(
-        `/api/organizations/${encodeURIComponent(group.id)}`,
-        { actor: state.currentUser?.username || "system", organization: nextGroup },
-        "PUT",
-      );
-      hydrateState(result.state);
-      cacheStateSnapshot(result.state);
-      render();
-    } catch (error) {
-      window.alert(error.message);
-      await refreshRemoteState({ force: true });
-      render();
-    } finally {
-      groupGlobalInput.disabled = false;
-    }
+    group.globalAccess = groupGlobalInput.checked;
+    addAudit("更新用户组全局权限", `${group.name} / ${group.globalAccess ? "开启" : "关闭"}`);
+    await saveStateAndRender();
     return;
   }
 
   const input = event.target.closest("[data-role][data-permission]");
   if (!input || !hasPermission("rbac.manage")) return;
   const role = roles[input.dataset.role];
-  const nextPermissions = input.checked
-    ? Array.from(new Set([...role.permissions, input.dataset.permission]))
-    : role.permissions.filter((permission) => permission !== input.dataset.permission);
-  input.disabled = true;
-  try {
-    const result = await postJson(
-      `/api/roles/${encodeURIComponent(input.dataset.role)}`,
-      { actor: state.currentUser?.username || "system", permissions: nextPermissions },
-      "PUT",
-    );
-    hydrateState(result.state);
-    cacheStateSnapshot(result.state);
-    render();
-  } catch (error) {
-    window.alert(error.message);
-    await refreshRemoteState({ force: true });
-    render();
-  } finally {
-    input.disabled = false;
+  if (input.checked) {
+    role.permissions = Array.from(new Set([...role.permissions, input.dataset.permission]));
+  } else {
+    role.permissions = role.permissions.filter((permission) => permission !== input.dataset.permission);
   }
+  addAudit("更新角色", `${role.label} / ${input.dataset.permission}`);
+  await saveStateAndRender();
 });
 
 document.addEventListener("click", (event) => {
@@ -4132,8 +3993,8 @@ document.getElementById("addCluster").addEventListener("click", () => {
   const firstCluster = selectableClusters[0];
   clusterDrafts.push({
     name: firstCluster.name,
-    namespace: "",
-    replicas: "",
+    namespace: firstCluster.namespace || "default",
+    replicas: 1,
     ingress: "",
     imagePullSecretId: firstCluster.imagePullSecretId || "",
   });

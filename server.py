@@ -4,7 +4,6 @@ import hashlib
 import hmac
 import json
 import os
-import queue
 import re
 import shutil
 import sqlite3
@@ -15,7 +14,7 @@ import uuid
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 from xml.sax.saxutils import escape as xml_escape
 
@@ -49,8 +48,6 @@ CLEAN_WORKSPACE_AFTER_BUILD = os.environ.get("CLEAN_WORKSPACE_AFTER_BUILD", "tru
 CLEAN_LOCAL_IMAGE_AFTER_BUILD = os.environ.get("CLEAN_LOCAL_IMAGE_AFTER_BUILD", "true").lower() != "false"
 DOCKER_PRUNE_AFTER_BUILD = os.environ.get("DOCKER_PRUNE_AFTER_BUILD", "false").lower() == "true"
 CLIENT_LOG_TAIL = int(os.environ.get("CLIENT_LOG_TAIL", "30"))
-COMMAND_IDLE_TIMEOUT_SECONDS = int(os.environ.get("COMMAND_IDLE_TIMEOUT_SECONDS", "1800"))
-COMMAND_RETRY_COUNT = int(os.environ.get("COMMAND_RETRY_COUNT", "1"))
 
 DEFAULT_STATE = {
     "roles": {
@@ -106,8 +103,6 @@ DEFAULT_STATE = {
     "platformSettings": {
         "registrySecretId": "",
         "imageNamespace": IMAGE_NAMESPACE,
-        "commandIdleTimeoutMinutes": "",
-        "commandRetryCount": "",
     },
 }
 
@@ -351,12 +346,11 @@ def read_state():
         return merge_defaults(json.loads(row[0]))
 
 
-def write_state(state, preserve_existing=True):
-    current_state = read_raw_state() if preserve_existing else None
+def write_state(state):
+    current_state = read_raw_state()
     state = merge_defaults(state)
-    if preserve_existing:
-        state = preserve_existing_user_passwords(state, current_state)
-        state = preserve_runtime_fields(state, current_state)
+    state = preserve_existing_user_passwords(state, current_state)
+    state = preserve_runtime_fields(state, current_state)
     payload = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
     with STATE_LOCK:
         if use_postgres():
@@ -377,7 +371,7 @@ def write_state(state, preserve_existing=True):
 def mutate_state(fn):
     state = read_state()
     result = fn(state)
-    write_state(state, preserve_existing=False)
+    write_state(state)
     return result, state
 
 
@@ -715,10 +709,6 @@ def ensure_execution_active(execution_id):
         raise RuntimeError("发布已取消")
 
 
-class CommandIdleTimeout(RuntimeError):
-    pass
-
-
 def safe_name(value):
     value = re.sub(r"[^a-zA-Z0-9-]+", "-", str(value).lower()).strip("-")
     return value[:63] or "app"
@@ -906,10 +896,6 @@ def sdk_command_for_task(task, command):
     return command
 
 
-def build_container_name(execution_id):
-    return f"deploy-build-{safe_name(execution_id)}"[:63]
-
-
 def run_sdk_command(execution_id, task, command, src_dir, build_env):
     cache_mounts, cache_env, cache_labels = build_cache_config(task)
     effective_build_env = {**cache_env, **build_env}
@@ -919,13 +905,10 @@ def run_sdk_command(execution_id, task, command, src_dir, build_env):
     if effective_command != command:
         append_log(execution_id, "已为 Node 构建启用 Corepack，支持 package.json 脚本中调用 pnpm/yarn。")
     docker_src_dir = HOST_WORKSPACE_DIR / execution_id / "src"
-    container_name = build_container_name(execution_id)
     docker_cmd = [
         "docker",
         "run",
         "--rm",
-        "--name",
-        container_name,
         "-v",
         f"{docker_src_dir}:/workspace",
         *cache_mounts,
@@ -937,11 +920,7 @@ def run_sdk_command(execution_id, task, command, src_dir, build_env):
         "-lc",
         effective_command,
     ]
-
-    def stop_build_container():
-        run_command(["docker", "rm", "-f", container_name])
-
-    return run_command_stream_with_retry(docker_cmd, execution_id, task, "编译命令", on_stop=stop_build_container)
+    return run_command_stream(docker_cmd, execution_id)
 
 
 def registry_config(state):
@@ -1036,23 +1015,7 @@ def run_command(args, cwd=None, input_text=None, env=None):
     return process.returncode, process.stdout
 
 
-def stop_process(process, on_stop=None):
-    if on_stop:
-        try:
-            on_stop()
-        except Exception:
-            pass
-    if process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
-
-
-def run_command_stream(args, execution_id, cwd=None, env=None, redact=None, idle_timeout_seconds=None, on_stop=None):
+def run_command_stream(args, execution_id, cwd=None, env=None, redact=None):
     process = subprocess.Popen(
         args,
         cwd=cwd,
@@ -1065,10 +1028,6 @@ def run_command_stream(args, execution_id, cwd=None, env=None, redact=None, idle
     output = []
     batch = []
     last_cancel_check = 0
-    last_output_at = time.time()
-    line_queue = queue.Queue()
-    stream_done = object()
-    stream_closed = False
 
     def flush():
         nonlocal batch
@@ -1078,43 +1037,8 @@ def run_command_stream(args, execution_id, cwd=None, env=None, redact=None, idle
         append_log(execution_id, redact(text) if redact else text)
         batch = []
 
-    def reader():
-        try:
-            for raw_line in process.stdout or []:
-                line_queue.put(raw_line)
-        finally:
-            line_queue.put(stream_done)
-
-    reader_thread = threading.Thread(target=reader, daemon=True)
-    reader_thread.start()
-
     try:
-        while True:
-            try:
-                raw_line = line_queue.get(timeout=1)
-            except queue.Empty:
-                raw_line = None
-            if raw_line is stream_done:
-                stream_closed = True
-                if process.poll() is not None and line_queue.empty():
-                    break
-                continue
-            if raw_line is None and process.poll() is not None and stream_closed:
-                break
-            if raw_line is None:
-                current_time = time.time()
-                if current_time - last_cancel_check > 1:
-                    last_cancel_check = current_time
-                    if is_execution_cancelled(execution_id):
-                        stop_process(process, on_stop=on_stop)
-                        raise RuntimeError("发布已取消")
-                if idle_timeout_seconds and current_time - last_output_at >= idle_timeout_seconds:
-                    stop_process(process, on_stop=on_stop)
-                    minutes = max(1, int(idle_timeout_seconds / 60))
-                    raise CommandIdleTimeout(f"命令连续 {minutes} 分钟没有输出，已自动终止")
-                continue
-
-            last_output_at = time.time()
+        for raw_line in process.stdout or []:
             line = raw_line.rstrip("\n")
             output.append(raw_line)
             batch.append(line)
@@ -1124,63 +1048,16 @@ def run_command_stream(args, execution_id, cwd=None, env=None, redact=None, idle
             if current_time - last_cancel_check > 1:
                 last_cancel_check = current_time
                 if is_execution_cancelled(execution_id):
-                    stop_process(process, on_stop=on_stop)
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
                     raise RuntimeError("发布已取消")
         flush()
         return process.wait(), "".join(output)
     finally:
         flush()
-
-
-def task_idle_timeout_seconds(task):
-    raw_value = task.get("idleTimeoutMinutes")
-    if raw_value is None or str(raw_value).strip() == "":
-        settings = task.get("_platformSettings") if isinstance(task.get("_platformSettings"), dict) else {}
-        raw_default = settings.get("commandIdleTimeoutMinutes")
-        if raw_default is None or str(raw_default).strip() == "":
-            return max(0, COMMAND_IDLE_TIMEOUT_SECONDS)
-        try:
-            return max(0, int(raw_default) * 60)
-        except Exception:
-            return max(0, COMMAND_IDLE_TIMEOUT_SECONDS)
-    try:
-        return max(0, int(raw_value) * 60)
-    except Exception:
-        return max(0, COMMAND_IDLE_TIMEOUT_SECONDS)
-
-
-def task_retry_count(task):
-    raw_value = task.get("retryCount")
-    if raw_value is None or str(raw_value).strip() == "":
-        settings = task.get("_platformSettings") if isinstance(task.get("_platformSettings"), dict) else {}
-        raw_default = settings.get("commandRetryCount")
-        if raw_default is None or str(raw_default).strip() == "":
-            return max(0, COMMAND_RETRY_COUNT)
-        try:
-            return max(0, int(raw_default))
-        except Exception:
-            return max(0, COMMAND_RETRY_COUNT)
-    try:
-        return max(0, int(raw_value))
-    except Exception:
-        return max(0, COMMAND_RETRY_COUNT)
-
-
-def run_command_stream_with_retry(args, execution_id, task, label, cwd=None, env=None, redact=None, on_stop=None):
-    idle_timeout_seconds = task_idle_timeout_seconds(task)
-    retry_count = task_retry_count(task)
-    attempt = 0
-    while True:
-        try:
-            if attempt:
-                append_log(execution_id, f"{label}因长时间无输出触发第 {attempt} 次重试")
-            return run_command_stream(args, execution_id, cwd=cwd, env=env, redact=redact, idle_timeout_seconds=idle_timeout_seconds, on_stop=on_stop)
-        except CommandIdleTimeout as exc:
-            append_log(execution_id, str(exc))
-            if attempt >= retry_count:
-                raise RuntimeError(f"{label}长时间无输出，已达到最大重试次数") from exc
-            attempt += 1
-            ensure_execution_active(execution_id)
 
 
 def cleanup_build_artifacts(execution_id, work_dir, image=None, image_built=False):
@@ -1419,66 +1296,6 @@ def normalize_http_path(value):
     return path
 
 
-def normalize_log_path(value):
-    path = str(value or "").strip() or "/logs/app.log"
-    if not path.startswith("/"):
-        path = f"/{path}"
-    if path.endswith("/"):
-        path = f"{path.rstrip('/')}/app.log"
-    return path
-
-
-def log_mount_path(log_path):
-    path = normalize_log_path(log_path)
-    parent = path.rsplit("/", 1)[0]
-    return parent or "/"
-
-
-def normalize_log_mode(value):
-    mode = str(value or "tcp").strip().lower()
-    return mode if mode in {"tcp", "udp"} else "tcp"
-
-
-def normalize_log_port(value):
-    try:
-        port = int(value or 12201)
-    except Exception as exc:
-        raise ValueError("Graylog 端口必须是数字") from exc
-    if port < 1 or port > 65535:
-        raise ValueError("Graylog 端口必须在 1-65535 之间")
-    return port
-
-
-def normalize_optional_int(value, label, minimum=0, maximum=9999):
-    text = str(value if value is not None else "").strip()
-    if not text:
-        return ""
-    try:
-        number = int(text)
-    except Exception as exc:
-        raise ValueError(f"{label}必须是数字") from exc
-    if number < minimum or number > maximum:
-        raise ValueError(f"{label}必须在 {minimum}-{maximum} 之间")
-    return number
-
-
-def task_log_config(task):
-    if not task.get("logEnabled"):
-        return None
-    host = str(task.get("logOutputHost") or "").strip()
-    if not host:
-        raise RuntimeError("已启用日志采集，请填写 Graylog Host")
-    log_path = normalize_log_path(task.get("logPath"))
-    return {
-        "path": log_path,
-        "mountPath": log_mount_path(log_path),
-        "host": host,
-        "port": normalize_log_port(task.get("logOutputPort")),
-        "mode": normalize_log_mode(task.get("logOutputMode")),
-        "configName": "",
-    }
-
-
 def generate_dockerfile(task, app_dir, src_dir):
     existing = app_dir / "Dockerfile"
     language = task.get("language")
@@ -1560,10 +1377,6 @@ def create_manifest(task, target, image, pull_secret=None):
 """
     ingress_host = target.get("ingress") or ""
     image_pull_secret_block = ""
-    volume_block = ""
-    app_volume_mount_block = ""
-    sidecar_block = ""
-    log_config = task_log_config(task)
     runtime_env = parse_runtime_env(task.get("runtimeEnv"))
     jvm_options = normalize_jvm_options(task.get("jvmOptions"))
     env_block = ""
@@ -1575,28 +1388,6 @@ def create_manifest(task, target, image, pull_secret=None):
             env_lines.append(f"            - name: {key}")
             env_lines.append(f"              value: {json.dumps(value, ensure_ascii=False)}")
         env_block = "\n".join(env_lines) + "\n"
-    if log_config:
-        log_config["configName"] = safe_name(f"{app}-fluent-bit")
-        volume_block = f"""      volumes:
-        - name: app-logs
-          emptyDir: {{}}
-        - name: fluent-bit-config
-          configMap:
-            name: {log_config["configName"]}
-"""
-        app_volume_mount_block = f"""          volumeMounts:
-            - name: app-logs
-              mountPath: {json.dumps(log_config["mountPath"], ensure_ascii=False)}
-"""
-        sidecar_block = f"""        - name: fluent-bit
-          image: cr.fluentbit.io/fluent/fluent-bit:3.2
-          imagePullPolicy: IfNotPresent
-          volumeMounts:
-            - name: app-logs
-              mountPath: {json.dumps(log_config["mountPath"], ensure_ascii=False)}
-            - name: fluent-bit-config
-              mountPath: /fluent-bit/etc/
-"""
     docs = []
     if AUTO_CREATE_NAMESPACE:
         docs.append(
@@ -1627,44 +1418,6 @@ data:
   .dockerconfigjson: {dockerconfigjson}
 """
         )
-    if log_config:
-        docs.append(
-            f"""apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {log_config["configName"]}
-  namespace: {namespace}
-  labels:
-    app: {app}
-data:
-  fluent-bit.conf: |
-    [SERVICE]
-        Flush        1
-        Daemon       Off
-        Log_Level    info
-        Parsers_File parsers.conf
-
-    [INPUT]
-        Name              tail
-        Path              {log_config["path"]}
-        Tag               {app}.logs
-        Read_from_Head    On
-        Skip_Long_Lines   On
-
-    [OUTPUT]
-        Name                   gelf
-        Match                  {app}.logs
-        Host                   {log_config["host"]}
-        Port                   {log_config["port"]}
-        Mode                   {log_config["mode"]}
-        Gelf_Short_Message_Key log
-
-  parsers.conf: |
-    [PARSER]
-        Name   json
-        Format json
-"""
-        )
 
     docs.extend([
         f"""apiVersion: apps/v1
@@ -1684,14 +1437,13 @@ spec:
       labels:
         app: {app}
     spec:
-{image_pull_secret_block}{volume_block}      containers:
+{image_pull_secret_block}      containers:
         - name: {app}
           image: {image}
           imagePullPolicy: Always
 {env_block}          ports:
             - containerPort: {container_port}
 {readiness_probe_block}
-{app_volume_mount_block}{sidecar_block}
 """,
         f"""apiVersion: v1
 kind: Service
@@ -1924,7 +1676,6 @@ def build_and_dispatch(execution_id):
     if not task:
         set_execution_status(execution_id, "failed", "任务不存在")
         return
-    task = {**task, "_platformSettings": state.get("platformSettings") if isinstance(state.get("platformSettings"), dict) else {}}
 
     work_dir = WORKSPACE_DIR / execution_id
     src_dir = work_dir / "src"
@@ -1938,12 +1689,6 @@ def build_and_dispatch(execution_id):
         if work_dir.exists():
             shutil.rmtree(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
-        idle_timeout_seconds = task_idle_timeout_seconds(task)
-        retry_count = task_retry_count(task)
-        if idle_timeout_seconds:
-            append_log(execution_id, f"执行保护: 连续 {max(1, int(idle_timeout_seconds / 60))} 分钟无日志输出则重试，最多重试 {retry_count} 次")
-        else:
-            append_log(execution_id, "执行保护: 空闲超时已关闭")
 
         branch = execution.get("branch")
         if not branch:
@@ -1953,14 +1698,8 @@ def build_and_dispatch(execution_id):
         clone_repo = authenticated_repo_url(task["repo"], git_secret)
         clone_env = clone_environment(work_dir, git_secret)
         clone_cmd = ["git", "clone", "--depth", "1", "--branch", branch, clone_repo, str(src_dir)]
-        code, output = run_command_stream_with_retry(
-            clone_cmd,
-            execution_id,
-            task,
-            "代码拉取",
-            env=clone_env,
-            redact=lambda text: redact_secret_text(text, git_secret),
-        )
+        code, output = run_command(clone_cmd, env=clone_env)
+        append_log(execution_id, redact_secret_text(output, git_secret))
         if code != 0:
             raise RuntimeError("代码拉取失败")
         ensure_execution_active(execution_id)
@@ -2019,7 +1758,7 @@ def build_and_dispatch(execution_id):
         if task_app_type(task) == "frontend":
             append_log(execution_id, "前端静态站点使用平台生成的 nginx 镜像，不执行项目自带 Dockerfile。")
         set_execution_status(execution_id, "building", f"开始构建镜像 {image}", stage="构建镜像", progress=65)
-        code, output = run_command_stream_with_retry(["docker", "build", "-t", image, "-f", str(dockerfile), "."], execution_id, task, "Docker 镜像构建", cwd=docker_context)
+        code, output = run_command_stream(["docker", "build", "-t", image, "-f", str(dockerfile), "."], execution_id, cwd=docker_context)
         if code != 0:
             raise RuntimeError("Docker 镜像构建失败")
         image_built = True
@@ -2043,7 +1782,7 @@ def build_and_dispatch(execution_id):
                     raise RuntimeError("镜像仓库登录失败")
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "building", f"推送镜像 {image}", stage="推送镜像", progress=78)
-            code, output = run_command_stream_with_retry(["docker", "push", image], execution_id, task, "镜像推送", env=registry_env)
+            code, output = run_command_stream(["docker", "push", image], execution_id, env=registry_env)
             if code != 0:
                 raise RuntimeError("镜像推送失败")
             image_pushed = True
@@ -2191,7 +1930,7 @@ def normalize_task_payload(payload):
         "workdir": str(payload.get("workdir") or ".").strip() or ".",
         "artifactPath": str(payload.get("artifactPath") or "").strip(),
         "gitCredentialId": str(payload.get("gitCredentialId") or "").strip(),
-        "language": str(payload.get("language") or "").strip().lower(),
+        "language": str(payload.get("language") or "java").strip().lower(),
         "sdk": str(payload.get("sdk") or "").strip(),
         "buildCommand": str(payload.get("buildCommand") or "").strip(),
         "buildEnv": str(payload.get("buildEnv") or ""),
@@ -2205,13 +1944,6 @@ def normalize_task_payload(payload):
         "healthPath": str(payload.get("healthPath") or "").strip(),
         "runtimeEnv": str(payload.get("runtimeEnv") or ""),
         "jvmOptions": normalize_jvm_options(payload.get("jvmOptions")),
-        "idleTimeoutMinutes": normalize_optional_int(payload.get("idleTimeoutMinutes"), "空闲超时分钟", 0, 1440),
-        "retryCount": normalize_optional_int(payload.get("retryCount"), "自动重试次数", 0, 3),
-        "logEnabled": bool(payload.get("logEnabled")),
-        "logPath": normalize_log_path(payload.get("logPath")) if payload.get("logEnabled") else "",
-        "logOutputHost": str(payload.get("logOutputHost") or "").strip(),
-        "logOutputPort": normalize_log_port(payload.get("logOutputPort")) if payload.get("logEnabled") else 12201,
-        "logOutputMode": normalize_log_mode(payload.get("logOutputMode")),
         "clusters": normalized_clusters,
         "notify": {
             "channel": notify.get("channel") or "企业微信",
@@ -2234,9 +1966,6 @@ def normalize_task_payload(payload):
         task_payload["artifactPath"] = ""
         task_payload["runtimeEnv"] = ""
         task_payload["jvmOptions"] = ""
-        task_payload["logEnabled"] = False
-        task_payload["logPath"] = ""
-        task_payload["logOutputHost"] = ""
     return task_payload
 
 
@@ -2246,16 +1975,10 @@ def save_task_config(task_id, payload, actor):
         raise ValueError("任务名称不能为空")
     if not task_payload["repo"]:
         raise ValueError("仓库地址不能为空")
-    if task_payload["deployRule"] == "k8s" and not task_payload["language"]:
-        raise ValueError("请选择编译语言")
-    if task_payload["deployRule"] == "k8s" and not task_payload["sdk"]:
-        raise ValueError("请选择 SDK 版本")
     if task_payload["deployRule"] == "k8s" and not task_payload["buildCommand"]:
         raise ValueError("编译命令不能为空")
     if task_payload["deployRule"] == "cf_pages" and not task_payload["pagesDeployCommand"]:
         raise ValueError("CF Pages 部署命令不能为空")
-    if task_payload["deployRule"] == "k8s" and task_payload["logEnabled"] and not task_payload["logOutputHost"]:
-        raise ValueError("已启用日志采集，请填写 Graylog Host")
 
     def update(state):
         actor_user = find_user(state, actor)
@@ -2399,414 +2122,6 @@ def delete_secret_config(secret_id, actor):
 
     secret, state = mutate_state(update)
     return secret, state
-
-
-def normalize_user_payload(payload, require_password=False):
-    if not isinstance(payload, dict):
-        raise ValueError("用户配置格式不正确")
-    username = str(payload.get("username") or "").strip()
-    name = str(payload.get("name") or "").strip()
-    password = str(payload.get("password") or "")
-    role = str(payload.get("role") or "viewer").strip() or "viewer"
-    organization_ids = payload.get("organizationIds") if isinstance(payload.get("organizationIds"), list) else []
-    organization_ids = [str(item).strip() for item in organization_ids if str(item).strip()]
-    if not organization_ids:
-        organization_ids = ["default"]
-    if not username:
-        raise ValueError("账号不能为空")
-    if not name:
-        raise ValueError("姓名不能为空")
-    if require_password and not password:
-        raise ValueError("初始密码不能为空")
-    return {
-        "username": username,
-        "name": name,
-        "password": password,
-        "role": role,
-        "globalAccess": bool(payload.get("globalAccess")),
-        "organizationIds": list(dict.fromkeys(organization_ids)),
-    }
-
-
-def validate_user_assignment(state, actor_user, user_payload, current_user=None):
-    if user_payload["role"] not in state.get("roles", {}):
-        raise ValueError("角色不存在")
-    known_org_ids = {str(item.get("id")) for item in state.get("organizations", [])}
-    missing_orgs = [org_id for org_id in user_payload["organizationIds"] if org_id not in known_org_ids]
-    if missing_orgs:
-        raise ValueError(f"用户组不存在: {', '.join(missing_orgs)}")
-    if not user_has_permission(state, actor_user, "user.manage"):
-        raise ValueError("当前用户没有管理用户权限")
-    if current_user and not user_can_access_user(state, actor_user, current_user):
-        raise ValueError("当前用户组无权修改该用户")
-    if not user_can_access_user(state, actor_user, user_payload):
-        raise ValueError("当前用户组无权保存该用户到目标用户组")
-    if not user_has_global_access(state, actor_user):
-        if user_payload.get("globalAccess"):
-            raise ValueError("当前用户组无权授予全局组权限")
-        allowed_groups = set(user_org_ids(actor_user))
-        if not set(user_payload["organizationIds"]).issubset(allowed_groups):
-            raise ValueError("当前用户组无权分配目标用户组")
-
-
-def save_user_config(username, payload, actor):
-    user_payload = normalize_user_payload(payload, require_password=not username)
-
-    def update(state):
-        actor_user = find_user(state, actor)
-        if not actor_user:
-            raise ValueError("操作用户不存在")
-        users = state.setdefault("users", [])
-
-        if username:
-            user = next((item for item in users if str(item.get("username")) == str(username)), None)
-            if not user:
-                raise ValueError("用户不存在或已被删除")
-            if user_payload["username"] != str(username):
-                raise ValueError("账号不允许修改")
-            validate_user_assignment(state, actor_user, user_payload, user)
-            platform_admin_count = sum(1 for item in users if item.get("role") == "platform_admin")
-            if user.get("role") == "platform_admin" and user_payload["role"] != "platform_admin" and platform_admin_count <= 1:
-                raise ValueError("至少需要保留一个平台管理员")
-            changed_password = bool(user_payload.get("password"))
-            user.update({
-                "name": user_payload["name"],
-                "role": user_payload["role"],
-                "globalAccess": user_payload["globalAccess"],
-                "organizationIds": user_payload["organizationIds"],
-                "updatedAt": now_text(),
-            })
-            if changed_password:
-                user["password"] = user_payload["password"]
-            state["auditLogs"].insert(0, {
-                "time": now_text(),
-                "actor": actor or "system",
-                "action": "重置密码" if changed_password else "编辑用户",
-                "target": user.get("username"),
-                "result": "成功",
-            })
-            return user
-
-        if any(str(item.get("username")) == user_payload["username"] for item in users):
-            raise ValueError("账号已存在")
-        validate_user_assignment(state, actor_user, user_payload)
-        user = {
-            **user_payload,
-            "createdAt": now_text(),
-        }
-        users.append(user)
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "添加用户", "target": user.get("username"), "result": "成功"})
-        return user
-
-    user, state = mutate_state(update)
-    return user, state
-
-
-def require_actor_permission(state, actor, permission, action):
-    user = find_user(state, actor)
-    if not user:
-        raise ValueError("操作用户不存在")
-    if not user_has_permission(state, user, permission):
-        raise ValueError(f"当前用户没有{action}权限")
-    return user
-
-
-def normalize_cluster_payload(payload):
-    if not isinstance(payload, dict):
-        raise ValueError("集群配置格式不正确")
-    nodes = payload.get("nodes") if isinstance(payload.get("nodes"), list) else []
-    normalized_nodes = []
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        name = str(node.get("name") or "").strip()
-        ip = str(node.get("ip") or "").strip()
-        if not name and not ip:
-            continue
-        normalized_nodes.append({
-            "name": name,
-            "ip": ip,
-            "role": str(node.get("role") or "worker").strip() or "worker",
-            "status": str(node.get("status") or "Ready").strip() or "Ready",
-        })
-    name = str(payload.get("name") or "").strip()
-    if not name:
-        raise ValueError("集群名称不能为空")
-    return {
-        "name": name,
-        "region": str(payload.get("region") or "").strip(),
-        "env": str(payload.get("env") or "").strip(),
-        "organizationId": str(payload.get("organizationId") or "default").strip() or "default",
-        "namespace": str(payload.get("namespace") or "default").strip() or "default",
-        "imagePullSecretId": str(payload.get("imagePullSecretId") or "").strip(),
-        "nodes": normalized_nodes,
-    }
-
-
-def cluster_name_exists(state, name, ignore_id=None):
-    normalized = str(name or "").strip().lower()
-    return any(str(item.get("name") or "").strip().lower() == normalized and str(item.get("id")) != str(ignore_id or "") for item in state.get("clusters", []))
-
-
-def save_cluster_config(cluster_id, payload, actor):
-    cluster_payload = normalize_cluster_payload(payload)
-
-    def update(state):
-        actor_user = require_actor_permission(state, actor, "cluster.manage", "保存集群")
-        if not user_can_access_asset(state, actor_user, cluster_payload):
-            raise ValueError("当前用户组无权保存该集群")
-        if cluster_name_exists(state, cluster_payload["name"], cluster_id):
-            raise ValueError(f"集群名称 {cluster_payload['name']} 已存在。集群名称必须和 Agent 的 CLUSTER_NAME 一一对应，不能重复。")
-        if cluster_payload["imagePullSecretId"]:
-            pull_secret = find_by_id(state.get("secrets", []), cluster_payload["imagePullSecretId"])
-            if not pull_secret:
-                raise ValueError("镜像拉取秘钥不存在")
-            if pull_secret.get("type") != "registry":
-                raise ValueError("镜像拉取秘钥必须选择镜像仓库账号")
-            if not user_can_access_asset(state, actor_user, pull_secret):
-                raise ValueError("当前用户组无权使用该镜像拉取秘钥")
-
-        if cluster_id:
-            cluster = find_by_id(state.get("clusters", []), cluster_id)
-            if not cluster:
-                raise ValueError("集群不存在或已被删除")
-            if not user_can_access_asset(state, actor_user, cluster):
-                raise ValueError("当前用户组无权修改该集群")
-            previous_name = str(cluster.get("name") or "")
-            cluster.update(cluster_payload)
-            cluster["updatedAt"] = now_text()
-            if previous_name and previous_name != cluster["name"]:
-                for task in state.get("tasks", []):
-                    for target in task.get("clusters", []) or []:
-                        if target.get("name") == previous_name:
-                            target["name"] = cluster["name"]
-                state["agentHeartbeats"] = [item for item in state.get("agentHeartbeats", []) if item.get("cluster") != previous_name]
-            state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "编辑集群", "target": cluster.get("name"), "result": "成功"})
-            return cluster
-
-        cluster = {
-            "id": int(time.time() * 1000),
-            **cluster_payload,
-            "createdAt": now_text(),
-        }
-        state.setdefault("clusters", []).insert(0, cluster)
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "添加集群", "target": cluster.get("name"), "result": "成功"})
-        return cluster
-
-    cluster, state = mutate_state(update)
-    return cluster, state
-
-
-def normalize_template_payload(payload):
-    if not isinstance(payload, dict):
-        raise ValueError("模板配置格式不正确")
-    name = str(payload.get("name") or "").strip()
-    if not name:
-        raise ValueError("模板名称不能为空")
-    command = str(payload.get("command") or "").strip()
-    if not command:
-        raise ValueError("默认构建命令不能为空")
-    return {
-        "name": name,
-        "language": str(payload.get("language") or "java").strip().lower() or "java",
-        "sdk": str(payload.get("sdk") or "").strip(),
-        "command": command,
-    }
-
-
-def save_template_config(payload, actor):
-    template_payload = normalize_template_payload(payload)
-
-    def update(state):
-        require_actor_permission(state, actor, "template.manage", "保存模板")
-        template = {
-            "id": int(time.time() * 1000),
-            **template_payload,
-            "createdAt": now_text(),
-        }
-        state.setdefault("buildTemplates", []).insert(0, template)
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "添加构建模板", "target": template.get("name"), "result": "成功"})
-        return template
-
-    template, state = mutate_state(update)
-    return template, state
-
-
-def normalize_channel_payload(payload, keep_existing_secret=False):
-    if not isinstance(payload, dict):
-        raise ValueError("通知渠道配置格式不正确")
-    name = str(payload.get("name") or "").strip()
-    target = str(payload.get("target") or "").strip()
-    if not name:
-        raise ValueError("渠道名称不能为空")
-    if not target:
-        raise ValueError("通知目标不能为空")
-    normalized = {
-        "name": name,
-        "type": str(payload.get("type") or "feishu").strip() or "feishu",
-        "target": target,
-        "organizationId": str(payload.get("organizationId") or "default").strip() or "default",
-    }
-    secret = str(payload.get("secret") or "")
-    if secret or not keep_existing_secret:
-        normalized["secret"] = secret
-    return normalized
-
-
-def save_channel_config(channel_id, payload, actor):
-    channel_payload = normalize_channel_payload(payload, keep_existing_secret=bool(channel_id))
-
-    def update(state):
-        actor_user = require_actor_permission(state, actor, "channel.manage", "保存通知渠道")
-        if not user_can_access_asset(state, actor_user, channel_payload):
-            raise ValueError("当前用户组无权保存该通知渠道")
-        if channel_id:
-            channel = find_by_id(state.get("notifyChannels", []), channel_id)
-            if not channel:
-                raise ValueError("通知渠道不存在或已被删除")
-            if not user_can_access_asset(state, actor_user, channel):
-                raise ValueError("当前用户组无权编辑该通知渠道")
-            channel.update(channel_payload)
-            channel["updatedAt"] = now_text()
-            state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "编辑通知渠道", "target": channel.get("name"), "result": "成功"})
-            return channel
-        channel = {
-            "id": int(time.time() * 1000),
-            **channel_payload,
-            "createdAt": now_text(),
-        }
-        state.setdefault("notifyChannels", []).insert(0, channel)
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "添加通知渠道", "target": channel.get("name"), "result": "成功"})
-        return channel
-
-    channel, state = mutate_state(update)
-    return channel, state
-
-
-def channel_matches(channel, value):
-    key = str(value or "")
-    return bool(key and any(str(item or "") == key for item in (channel.get("id"), channel.get("name"), channel.get("target"), channel.get("type"))))
-
-
-def delete_channel_config(channel_id, actor):
-    def update(state):
-        actor_user = require_actor_permission(state, actor, "channel.manage", "删除通知渠道")
-        channel = find_by_id(state.get("notifyChannels", []), channel_id)
-        if not channel:
-            raise ValueError("通知渠道不存在或已被删除")
-        if not user_can_access_asset(state, actor_user, channel):
-            raise ValueError("当前用户组无权删除该通知渠道")
-        used_by = next((task for task in state.get("tasks", []) if channel_matches(channel, task.get("notify", {}).get("channel")) or channel_matches(channel, task.get("notify", {}).get("target"))), None)
-        if used_by:
-            raise ValueError(f"任务 {used_by.get('name')} 正在使用该通知渠道，请先编辑任务取消绑定")
-        state["notifyChannels"] = [item for item in state.get("notifyChannels", []) if str(item.get("id")) != str(channel_id)]
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "删除通知渠道", "target": channel.get("name"), "result": "成功"})
-        return channel
-
-    channel, state = mutate_state(update)
-    return channel, state
-
-
-def save_platform_settings(payload, actor):
-    if not isinstance(payload, dict):
-        raise ValueError("平台配置格式不正确")
-    settings = {
-        "registrySecretId": str(payload.get("registrySecretId") or "").strip(),
-        "imageNamespace": str(payload.get("imageNamespace") or "deploy-platform").strip().strip("/") or "deploy-platform",
-        "commandIdleTimeoutMinutes": normalize_optional_int(payload.get("commandIdleTimeoutMinutes"), "默认空闲超时分钟", 0, 1440),
-        "commandRetryCount": normalize_optional_int(payload.get("commandRetryCount"), "默认自动重试次数", 0, 3),
-    }
-
-    def update(state):
-        actor_user = require_actor_permission(state, actor, "secret.manage", "保存镜像仓库配置")
-        if not user_has_global_access(state, actor_user):
-            raise ValueError("只有全局组用户可以修改平台镜像仓库配置")
-        if settings["registrySecretId"]:
-            secret = find_by_id(state.get("secrets", []), settings["registrySecretId"])
-            if not secret:
-                raise ValueError("平台默认镜像仓库秘钥不存在")
-            if secret.get("type") != "registry":
-                raise ValueError("平台默认镜像仓库秘钥必须是镜像仓库账号")
-            if not user_can_access_asset(state, actor_user, secret):
-                raise ValueError("当前用户组无权使用该镜像仓库秘钥")
-        state["platformSettings"] = settings
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "保存镜像仓库配置", "target": settings["imageNamespace"], "result": "成功"})
-        return settings
-
-    settings, state = mutate_state(update)
-    return settings, state
-
-
-def normalize_organization_payload(payload, group_id=None):
-    if not isinstance(payload, dict):
-        raise ValueError("用户组配置格式不正确")
-    name = str(payload.get("name") or "").strip()
-    if not name:
-        raise ValueError("用户组名称不能为空")
-    organization_id = str(group_id or payload.get("id") or safe_group_id(name)).strip() or "default"
-    if organization_id == "default":
-        name = "default"
-    permissions = payload.get("permissions") if isinstance(payload.get("permissions"), list) else []
-    return {
-        "id": organization_id,
-        "name": name,
-        "description": str(payload.get("description") or "").strip(),
-        "permissions": [str(item) for item in permissions if str(item) in {permission for role in DEFAULT_STATE["roles"].values() for permission in role.get("permissions", [])}],
-        "globalAccess": bool(payload.get("globalAccess")) and organization_id != "default",
-    }
-
-
-def safe_group_id(value):
-    group_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(value or "").strip().lower()).strip("-")
-    return group_id or "default"
-
-
-def save_organization_config(group_id, payload, actor):
-    group_payload = normalize_organization_payload(payload, group_id)
-
-    def update(state):
-        actor_user = require_actor_permission(state, actor, "org.manage", "保存用户组")
-        if not user_has_global_access(state, actor_user):
-            raise ValueError("只有全局组用户可以保存用户组")
-        groups = state.setdefault("organizations", [])
-        if group_id:
-            group = next((item for item in groups if str(item.get("id")) == str(group_id)), None)
-            if not group:
-                raise ValueError("用户组不存在或已被删除")
-            if group.get("id") == "default" and group_payload.get("globalAccess"):
-                raise ValueError("default 用户组不能设置为全局组")
-            group.update(group_payload)
-            state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "更新用户组权限", "target": group.get("name"), "result": "成功"})
-            return group
-        if any(str(item.get("id")) == group_payload["id"] for item in groups):
-            raise ValueError(f"用户组 {group_payload['name']} 已存在")
-        groups.append(group_payload)
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "添加用户组", "target": group_payload.get("name"), "result": "成功"})
-        return group_payload
-
-    group, state = mutate_state(update)
-    return group, state
-
-
-def save_role_permissions(role_key, permissions, actor):
-    permission_set = {permission for role in DEFAULT_STATE["roles"].values() for permission in role.get("permissions", [])}
-    next_permissions = [str(item) for item in (permissions if isinstance(permissions, list) else []) if str(item) in permission_set]
-
-    def update(state):
-        require_actor_permission(state, actor, "rbac.manage", "保存角色")
-        role = state.setdefault("roles", {}).get(role_key)
-        if not role:
-            raise ValueError("角色不存在")
-        if role_key == "platform_admin":
-            next_values = list(dict.fromkeys([*next_permissions, *DEFAULT_STATE["roles"]["platform_admin"]["permissions"]]))
-        else:
-            next_values = list(dict.fromkeys(next_permissions))
-        role["permissions"] = next_values
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "更新角色", "target": role.get("label") or role_key, "result": "成功"})
-        return role
-
-    role, state = mutate_state(update)
-    return role, state
 
 
 def create_execution(task_id, actor, branch):
@@ -3220,51 +2535,6 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             self.send_json({"secret": secret, "state": client_state(state)})
             return
-        if parsed.path == "/api/users":
-            body = self.read_json_body()
-            try:
-                user, state = save_user_config(None, body.get("user") or {}, body.get("actor"))
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
-            self.send_json({"user": user, "state": client_state(state)})
-            return
-        if parsed.path == "/api/clusters":
-            body = self.read_json_body()
-            try:
-                cluster, state = save_cluster_config(None, body.get("cluster") or {}, body.get("actor"))
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
-            self.send_json({"cluster": cluster, "state": client_state(state)})
-            return
-        if parsed.path == "/api/templates":
-            body = self.read_json_body()
-            try:
-                template, state = save_template_config(body.get("template") or {}, body.get("actor"))
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
-            self.send_json({"template": template, "state": client_state(state)})
-            return
-        if parsed.path == "/api/channels":
-            body = self.read_json_body()
-            try:
-                channel, state = save_channel_config(None, body.get("channel") or {}, body.get("actor"))
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
-            self.send_json({"channel": channel, "state": client_state(state)})
-            return
-        if parsed.path == "/api/organizations":
-            body = self.read_json_body()
-            try:
-                organization, state = save_organization_config(None, body.get("organization") or {}, body.get("actor"))
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
-            self.send_json({"organization": organization, "state": client_state(state)})
-            return
         if parsed.path == "/api/tasks/batch-run":
             body = self.read_json_body()
             try:
@@ -3374,16 +2644,6 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             self.send_json({"secret": secret, "state": client_state(state)})
             return
-        match = re.match(r"^/api/channels/([^/]+)$", parsed.path)
-        if match:
-            query = parse_qs(parsed.query)
-            try:
-                channel, state = delete_channel_config(match.group(1), query.get("actor", ["system"])[0])
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
-            self.send_json({"channel": channel, "state": client_state(state)})
-            return
         self.send_error(404)
 
     def do_PUT(self):
@@ -3407,66 +2667,6 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, status=400)
                 return
             self.send_json({"secret": secret, "state": client_state(state)})
-            return
-        match = re.match(r"^/api/users/([^/]+)$", parsed.path)
-        if match:
-            body = self.read_json_body()
-            try:
-                username = unquote(match.group(1))
-                user, state = save_user_config(username, body.get("user") or {}, body.get("actor"))
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
-            self.send_json({"user": user, "state": client_state(state)})
-            return
-        match = re.match(r"^/api/clusters/([^/]+)$", parsed.path)
-        if match:
-            body = self.read_json_body()
-            try:
-                cluster, state = save_cluster_config(match.group(1), body.get("cluster") or {}, body.get("actor"))
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
-            self.send_json({"cluster": cluster, "state": client_state(state)})
-            return
-        match = re.match(r"^/api/channels/([^/]+)$", parsed.path)
-        if match:
-            body = self.read_json_body()
-            try:
-                channel, state = save_channel_config(match.group(1), body.get("channel") or {}, body.get("actor"))
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
-            self.send_json({"channel": channel, "state": client_state(state)})
-            return
-        match = re.match(r"^/api/organizations/([^/]+)$", parsed.path)
-        if match:
-            body = self.read_json_body()
-            try:
-                organization, state = save_organization_config(unquote(match.group(1)), body.get("organization") or {}, body.get("actor"))
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
-            self.send_json({"organization": organization, "state": client_state(state)})
-            return
-        match = re.match(r"^/api/roles/([^/]+)$", parsed.path)
-        if match:
-            body = self.read_json_body()
-            try:
-                role, state = save_role_permissions(unquote(match.group(1)), body.get("permissions") or [], body.get("actor"))
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
-            self.send_json({"role": role, "state": client_state(state)})
-            return
-        if parsed.path == "/api/platform-settings":
-            body = self.read_json_body()
-            try:
-                settings, state = save_platform_settings(body.get("settings") or {}, body.get("actor"))
-            except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
-                return
-            self.send_json({"settings": settings, "state": client_state(state)})
             return
         if parsed.path != "/api/state":
             self.send_error(404)
