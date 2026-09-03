@@ -213,6 +213,7 @@ const branchForm = document.getElementById("branchForm");
 const branchSelect = document.getElementById("branchSelect");
 const branchStatus = document.getElementById("branchStatus");
 const confirmBranchDeploy = document.getElementById("confirmBranchDeploy");
+const branchDeployText = document.getElementById("branchDeployText");
 const batchDialog = document.getElementById("batchDialog");
 const batchForm = document.getElementById("batchForm");
 const batchTaskList = document.getElementById("batchTaskList");
@@ -1949,6 +1950,10 @@ function textIncludes(values, query) {
   return values.some((value) => String(value || "").toLowerCase().includes(query));
 }
 
+function nextPaint() {
+  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+}
+
 function paginateRows(key, rows, pageSize = LIST_PAGE_SIZE) {
   const list = listState(key);
   const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
@@ -2883,8 +2888,13 @@ async function runTask(taskId, branch) {
     return;
   }
   confirmBranchDeploy.disabled = true;
+  if (branchDeployText) branchDeployText.textContent = "发布中...";
   try {
+    await nextPaint();
     await mutateJson(`/api/tasks/${taskId}/run`, { actor: state.currentUser?.username || "system", branch });
+    if (branchStatus) branchStatus.textContent = "发布请求已提交，正在进入执行队列...";
+    if (branchDeployText) branchDeployText.textContent = "已提交";
+    await nextPaint();
     state.selectedTaskIds.delete(String(taskId));
     render();
     closeBranchDialog(false);
@@ -2897,6 +2907,7 @@ async function runTask(taskId, branch) {
     state.batchQueue = [];
     window.alert(error.message || "发布请求失败");
   } finally {
+    if (branchDeployText) branchDeployText.textContent = "发布";
     if (branchDialog.open) confirmBranchDeploy.disabled = false;
   }
 }
@@ -3303,37 +3314,46 @@ async function saveChannel(event) {
     target: formData.get("target"),
     secret: formData.get("secret"),
   };
-  if (channelId) {
-    const channel = notifyChannels.find((item) => String(item.id) === String(channelId));
-    if (!channel) {
-      window.alert("通知渠道不存在或已被删除");
-      if (submitter) submitter.disabled = false;
-      return;
+  const originalText = channelSubmitText?.textContent || "保存渠道";
+  try {
+    if (channelSubmitText) channelSubmitText.textContent = channelId ? "保存中..." : "添加中...";
+    if (channelId) {
+      const channel = notifyChannels.find((item) => String(item.id) === String(channelId));
+      if (!channel) {
+        window.alert("通知渠道不存在或已被删除");
+        return;
+      }
+      if (!canOperateAsset("channel.manage", channel)) {
+        window.alert("当前用户组无权编辑该通知渠道");
+        return;
+      }
+      Object.assign(channel, channelPayload, { updatedAt: nowText() });
+      addAudit("编辑通知渠道", channel.name);
+    } else {
+      const channel = {
+        id: Date.now(),
+        ...channelPayload,
+        organizationId: visibleOrganizations()[0]?.id || "default",
+        createdAt: nowText(),
+      };
+      notifyChannels.unshift(channel);
+      addAudit("添加通知渠道", channel.name);
     }
-    if (!canOperateAsset("channel.manage", channel)) {
-      window.alert("当前用户组无权编辑该通知渠道");
-      if (submitter) submitter.disabled = false;
-      return;
+    await nextPaint();
+    const saved = await persistState();
+    if (saved) {
+      if (channelSubmitText) channelSubmitText.textContent = "已保存";
+      await nextPaint();
+      form.reset();
+      render();
+      closeCreateDialog(channelCreateDialog, form);
     }
-    Object.assign(channel, channelPayload, { updatedAt: nowText() });
-    addAudit("编辑通知渠道", channel.name);
-  } else {
-    const channel = {
-      id: Date.now(),
-      ...channelPayload,
-      organizationId: visibleOrganizations()[0]?.id || "default",
-      createdAt: nowText(),
-    };
-    notifyChannels.unshift(channel);
-    addAudit("添加通知渠道", channel.name);
+  } catch (error) {
+    window.alert(error.message || "保存渠道失败");
+  } finally {
+    if (channelSubmitText) channelSubmitText.textContent = originalText;
+    if (submitter) submitter.disabled = false;
   }
-  const saved = await persistState();
-  if (saved) {
-    form.reset();
-    render();
-    closeCreateDialog(channelCreateDialog, form);
-  }
-  if (submitter) submitter.disabled = false;
 }
 
 function openChannelCreateDialog() {
