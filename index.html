@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>应用发布任务平台预览</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=20260903-1" />
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
   </head>
   <body>
@@ -116,7 +116,7 @@
               <i data-lucide="search"></i>
               <input id="taskSearch" type="search" placeholder="搜索任务、仓库、负责人、环境、语言、SDK" />
             </label>
-            <button class="icon-button" type="button" title="刷新">
+            <button class="icon-button" id="refreshButton" type="button" title="刷新">
               <i data-lucide="refresh-cw"></i>
             </button>
             <button class="primary-button" id="openCreate" type="button" data-permission-required="task.create">
@@ -144,7 +144,7 @@
               <strong id="metricPartial">0</strong>
             </div>
             <div class="metric">
-              <span>告警中</span>
+              <span>发布中</span>
               <strong id="metricAlerts">0</strong>
             </div>
           </section>
@@ -164,7 +164,7 @@
                 </button>
                 <button class="ghost-button" id="batchDeploy" type="button" data-permission-required="task.deploy">
                   <i data-lucide="rocket"></i>
-                  <span>批量发布</span>
+                  <span id="batchDeployText">批量发布</span>
                 </button>
               </div>
 
@@ -1098,6 +1098,6 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=20260824-1"></script>
+    <script src="./app.js?v=20260903-1"></script>
   </body>
 </html>

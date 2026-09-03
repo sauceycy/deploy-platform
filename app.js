@@ -75,7 +75,7 @@ const permissionCatalog = [
 ];
 
 const organizations = [{ id: "default", name: "default", description: "默认用户组", permissions: [], globalAccess: false }];
-const users = [{ username: "admin", password: "admin123", name: "平台管理员", role: "platform_admin", globalAccess: true, organizationIds: ["default"] }];
+const users = [{ username: "admin", name: "平台管理员", role: "platform_admin", globalAccess: true, organizationIds: ["default"] }];
 const tasks = [];
 const clusters = [];
 const buildTemplates = [];
@@ -93,9 +93,16 @@ const APP_STATE_KEY = "deploy-platform-state";
 const APP_USER_KEY = "deploy-platform-user";
 const APP_VIEW_KEY = "deploy-platform-view";
 const STATE_SAVE_TIMEOUT_MS = 20000;
+const MAX_BATCH_DEPLOY_TASKS = 5;
 let refreshTimer = null;
+let refreshPromise = null;
 let stateLoadError = "";
 let pendingStateWrites = 0;
+let currentStateRevision = 0;
+let stateReadSequence = 0;
+let latestAppliedStateRead = 0;
+let stateMutationEpoch = 0;
+let platformSettingsDirty = false;
 const loadingExecutionLogs = new Set();
 
 const state = {
@@ -197,6 +204,8 @@ const confirmScheduleDeploy = document.getElementById("confirmScheduleDeploy");
 const drawerTitle = document.getElementById("drawerTitle");
 const selectAllTasks = document.getElementById("selectAllTasks");
 const batchDeploy = document.getElementById("batchDeploy");
+const batchDeployText = document.getElementById("batchDeployText");
+const refreshButton = document.getElementById("refreshButton");
 
 function hasPermission(permission) {
   if (!state.currentUser) return false;
@@ -302,6 +311,7 @@ function addAudit(action, target, result = "成功") {
 
 function exportState() {
   return {
+    revision: currentStateRevision,
     roles,
     users,
     tasks,
@@ -309,11 +319,6 @@ function exportState() {
     buildTemplates,
     notifyChannels,
     secrets,
-    auditLogs,
-    executions,
-    agentTasks,
-    agentHeartbeats,
-    schedules,
     platformSettings,
     organizations,
   };
@@ -322,6 +327,37 @@ function exportState() {
 function replaceArray(target, nextValue) {
   if (!Array.isArray(nextValue)) return;
   target.splice(0, target.length, ...nextValue);
+}
+
+function mergeExecutionSnapshots(nextValue, compact = false) {
+  if (!Array.isArray(nextValue)) return;
+  if (!compact) {
+    replaceArray(executions, nextValue);
+    return;
+  }
+  const previousById = new Map(executions.map((execution) => [String(execution.id), execution]));
+  const merged = nextValue.map((execution) => {
+    const previous = previousById.get(String(execution.id));
+    if (!previous) return execution;
+    const nextLogs = Array.isArray(execution.logs) && execution.logs.length ? execution.logs : previous.logs;
+    return { ...previous, ...execution, logs: nextLogs || [] };
+  });
+  executions.splice(0, executions.length, ...merged);
+}
+
+function mergeAgentTaskSnapshots(nextValue, compact = false) {
+  if (!Array.isArray(nextValue)) return;
+  if (!compact) {
+    replaceArray(agentTasks, nextValue);
+    return;
+  }
+  const previousById = new Map(agentTasks.map((item) => [String(item.id), item]));
+  const merged = nextValue.map((item) => {
+    const previous = previousById.get(String(item.id));
+    if (!previous) return item;
+    return { ...previous, ...item, logs: item.logs || previous.logs || [] };
+  });
+  agentTasks.splice(0, agentTasks.length, ...merged);
 }
 
 function replaceRoles(nextRoles) {
@@ -357,7 +393,7 @@ function normalizeOrganizations() {
   });
   if (!organizations.some((group) => String(group.id) === "default")) organizations.unshift({ id: "default", name: "default", description: "默认用户组", permissions: [], globalAccess: false });
   if (!users.length) {
-    users.push({ username: "admin", password: "admin123", name: "平台管理员", role: "platform_admin", globalAccess: true, organizationIds: ["default"] });
+    users.push({ username: "admin", name: "平台管理员", role: "platform_admin", globalAccess: true, organizationIds: ["default"] });
   }
   if (!users.some((user) => user.role === "platform_admin")) {
     const admin = users.find((user) => user.username === "admin");
@@ -365,7 +401,7 @@ function normalizeOrganizations() {
       admin.role = "platform_admin";
       admin.globalAccess = true;
     } else {
-      users.unshift({ username: "admin", password: "admin123", name: "平台管理员", role: "platform_admin", globalAccess: true, organizationIds: ["default"] });
+      users.unshift({ username: "admin", name: "平台管理员", role: "platform_admin", globalAccess: true, organizationIds: ["default"] });
     }
   }
   users.forEach((user) => {
@@ -389,8 +425,29 @@ function safeGroupId(value) {
   );
 }
 
-function hydrateState(nextState) {
-  if (!nextState || typeof nextState !== "object") return;
+function reconcileTaskRuntime() {
+  const latestByTask = new Map();
+  executions.forEach((execution) => {
+    const taskId = String(execution.taskId);
+    if (!latestByTask.has(taskId)) latestByTask.set(taskId, execution);
+  });
+  tasks.forEach((task) => {
+    const execution = latestByTask.get(String(task.id));
+    if (!execution) return;
+    ["status", "stage", "progress"].forEach((field) => {
+      if (execution[field] !== undefined && execution[field] !== null) task[field] = execution[field];
+    });
+    if (execution.branch) task.lastBranch = execution.branch;
+    if (execution.actor) task.lastActor = execution.actor;
+    if (execution.updatedAt || execution.createdAt) task.lastRun = execution.updatedAt || execution.createdAt;
+  });
+}
+
+function hydrateState(nextState, options = {}) {
+  if (!nextState || typeof nextState !== "object" || nextState.unchanged) return false;
+  const incomingRevision = Number(nextState.revision || 0);
+  if (!options.force && incomingRevision < currentStateRevision) return false;
+  const compact = Boolean(nextState.compact);
   const previousSelectedId = state.selectedId;
   replaceRoles(nextState.roles);
   replaceArray(organizations, nextState.organizations);
@@ -401,73 +458,56 @@ function hydrateState(nextState) {
   replaceArray(notifyChannels, nextState.notifyChannels);
   replaceArray(secrets, nextState.secrets);
   replaceArray(auditLogs, nextState.auditLogs);
-  replaceArray(executions, nextState.executions);
-  replaceArray(agentTasks, nextState.agentTasks);
+  mergeExecutionSnapshots(nextState.executions, compact);
+  mergeAgentTaskSnapshots(nextState.agentTasks, compact);
   replaceArray(agentHeartbeats, nextState.agentHeartbeats);
   replaceArray(schedules, nextState.schedules);
   Object.assign(platformSettings, { registrySecretId: "", imageNamespace: "deploy-platform" }, nextState.platformSettings || {});
+  currentStateRevision = Math.max(currentStateRevision, incomingRevision);
   normalizeOrganizations();
+  reconcileTaskRuntime();
   const accessibleTasks = tasks.filter(canAccessAsset);
   state.selectedId = accessibleTasks.some((task) => String(task.id) === String(previousSelectedId)) ? previousSelectedId : accessibleTasks[0]?.id || null;
+  return true;
 }
 
-async function loadPersistedState() {
-  stateLoadError = "";
+async function loadPersistedState(options = {}) {
+  const requestSequence = ++stateReadSequence;
+  const mutationEpoch = stateMutationEpoch;
   try {
-    const response = await fetch("/api/state", { cache: "no-store" });
+    const params = new URLSearchParams();
+    if (options.compact !== false) params.set("compact", "1");
+    if (!options.force && currentStateRevision > 0) params.set("revision", String(currentStateRevision));
+    const query = params.toString() ? `?${params.toString()}` : "";
+    const response = await fetch(`/api/state${query}`, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    hydrateState(await response.json());
-    return;
+    const nextState = await response.json();
+    stateLoadError = "";
+    if (nextState.unchanged) return false;
+    if (!options.force && (requestSequence < latestAppliedStateRead || mutationEpoch !== stateMutationEpoch || pendingStateWrites > 0)) return false;
+    const applied = hydrateState(nextState);
+    if (applied) {
+      latestAppliedStateRead = requestSequence;
+      cacheStateSnapshot(nextState);
+    }
+    return applied;
   } catch (error) {
     stateLoadError = error.message || "状态加载失败";
-    try {
-      const localState = window.localStorage.getItem(APP_STATE_KEY);
-      if (localState) hydrateState(JSON.parse(localState));
-    } catch {
-      window.localStorage.removeItem(APP_STATE_KEY);
-    }
+    return false;
   }
 }
 
-function slimStateSnapshot(source = exportState()) {
-  return {
-    ...source,
-    auditLogs: (source.auditLogs || []).slice(0, 100),
-    executions: (source.executions || []).slice(0, 20).map((execution) => ({
-      ...execution,
-      logs: (execution.logs || []).slice(-5).map((log) => ({
-        time: log.time,
-        message: String(log.message || "").slice(0, 1000),
-      })),
-    })),
-    agentTasks: (source.agentTasks || []).slice(-50).map((task) => ({
-      id: task.id,
-      executionId: task.executionId,
-      taskId: task.taskId,
-      clusterName: task.clusterName,
-      status: task.status,
-      createdAt: task.createdAt,
-      updatedAt: task.updatedAt,
-      logs: (task.logs || []).slice(-3),
-    })),
-  };
-}
-
-function writeLocalState(nextState = exportState()) {
+function writeLocalState() {
   try {
     window.localStorage.removeItem(APP_STATE_KEY);
-    window.localStorage.setItem(APP_STATE_KEY, JSON.stringify(slimStateSnapshot(nextState)));
-  } catch {
-    try {
-      window.localStorage.removeItem(APP_STATE_KEY);
-    } catch {}
-  }
+  } catch {}
 }
 
 async function persistState() {
   const payload = exportState();
   writeLocalState(payload);
   pendingStateWrites += 1;
+  stateMutationEpoch += 1;
   try {
     const response = await fetch("/api/state", {
       method: "PUT",
@@ -476,8 +516,7 @@ async function persistState() {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "配置保存失败");
-    if (result.state) {
-      hydrateState(result.state);
+    if (result.state && hydrateState(result.state)) {
       cacheStateSnapshot(result.state);
     }
     return true;
@@ -487,6 +526,7 @@ async function persistState() {
     return false;
   } finally {
     pendingStateWrites = Math.max(0, pendingStateWrites - 1);
+    stateMutationEpoch += 1;
   }
 }
 
@@ -503,7 +543,7 @@ async function postJson(url, payload, method = "POST") {
     const response = await fetch(url, {
       method,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: payload === undefined ? undefined : JSON.stringify(payload),
       signal: controller.signal,
     });
     const result = await response.json().catch(() => ({}));
@@ -513,6 +553,21 @@ async function postJson(url, payload, method = "POST") {
     throw new Error(error.name === "AbortError" ? "请求超时，请检查后端服务或数据库连接是否正常" : error.message);
   } finally {
     window.clearTimeout(timeoutId);
+  }
+}
+
+async function mutateJson(url, payload, method = "POST") {
+  pendingStateWrites += 1;
+  stateMutationEpoch += 1;
+  try {
+    const result = await postJson(url, payload, method);
+    if (result.state && hydrateState(result.state)) {
+      cacheStateSnapshot(result.state);
+    }
+    return result;
+  } finally {
+    pendingStateWrites = Math.max(0, pendingStateWrites - 1);
+    stateMutationEpoch += 1;
   }
 }
 
@@ -652,7 +707,7 @@ function filteredLogLines(lines) {
 function latestLogMessage(execution) {
   const lines = executionLogLines(execution).filter((line) => line.message.trim());
   const last = lines.at(-1);
-  return last ? last.message.trim() : "暂无日志";
+  return last ? last.message.trim() : String(execution?.latestLog?.message || "").trim() || "暂无日志";
 }
 
 function publishActor(task, execution = selectedExecutionForTask(task?.id)) {
@@ -715,15 +770,17 @@ function renderExecutionSummary(execution) {
   const lines = executionLogLines(execution);
   const shouldShowErrors = ["failed", "partial"].includes(execution?.status);
   const errors = shouldShowErrors ? importantLogLines(lines) : [];
+  const summaryErrors = !errors.length && shouldShowErrors && Array.isArray(execution?.errorSummary) ? execution.errorSummary : [];
   const hint = executionHint(lines);
-  if (!errors.length && !hint) {
+  if (!errors.length && !summaryErrors.length && !hint) {
     return `<div class="empty-state compact"><strong>暂未发现关键错误</strong><span>完整输出可以在下方日志查看器中查看。</span></div>`;
   }
+  const renderedErrors = errors.length ? errors : summaryErrors.map((line) => ({ message: line.message || "" }));
   return `
-    <div class="issue-summary ${errors.length ? "has-error" : ""}">
+    <div class="issue-summary ${renderedErrors.length ? "has-error" : ""}">
       <div class="issue-title">
-        <i data-lucide="${errors.length ? "triangle-alert" : "info"}"></i>
-        <strong>${errors.length ? "失败摘要" : "诊断提示"}</strong>
+        <i data-lucide="${renderedErrors.length ? "triangle-alert" : "info"}"></i>
+        <strong>${renderedErrors.length ? "失败摘要" : "诊断提示"}</strong>
       </div>
       ${
         hint
@@ -731,8 +788,8 @@ function renderExecutionSummary(execution) {
           : ""
       }
       ${
-        errors.length
-          ? `<ul>${errors.map((line) => `<li>${escapeHtml(line.message.trim())}</li>`).join("")}</ul>`
+        renderedErrors.length
+          ? `<ul>${renderedErrors.map((line) => `<li>${escapeHtml(line.message.trim())}</li>`).join("")}</ul>`
           : ""
       }
     </div>
@@ -1089,7 +1146,7 @@ function renderMetrics() {
   document.getElementById("metricTotal").textContent = visibleTasks.length;
   document.getElementById("metricSuccess").textContent = visibleTasks.filter((task) => task.status === "success").length;
   document.getElementById("metricPartial").textContent = visibleTasks.filter((task) => task.status === "partial").length;
-  document.getElementById("metricAlerts").textContent = visibleTasks.reduce((total, task) => total + task.alerts, 0);
+  document.getElementById("metricAlerts").textContent = visibleTasks.filter(isTaskActive).length;
 }
 
 function renderRows() {
@@ -1097,6 +1154,9 @@ function renderRows() {
   state.selectedTaskIds.forEach((id) => {
     if (!existingIds.has(id)) state.selectedTaskIds.delete(id);
   });
+  Array.from(state.selectedTaskIds)
+    .slice(MAX_BATCH_DEPLOY_TASKS)
+    .forEach((id) => state.selectedTaskIds.delete(id));
   const rows = filteredTasks();
   if (rows.length === 0) {
     taskRows.innerHTML = `<div class="empty-row">暂无发布任务</div>`;
@@ -1112,7 +1172,7 @@ function renderRows() {
       (task) => `
       <div class="task-row ${String(task.id) === String(state.selectedId) ? "selected" : ""}" role="row" data-task-id="${task.id}">
         <div>
-          <input type="checkbox" data-task-select="${task.id}" ${state.selectedTaskIds.has(String(task.id)) ? "checked" : ""} aria-label="选择 ${task.name}" />
+          <input type="checkbox" data-task-select="${task.id}" ${state.selectedTaskIds.has(String(task.id)) ? "checked" : ""} ${canOperateAsset("task.deploy", task) && !isTaskActive(task) ? "" : "disabled"} aria-label="选择 ${task.name}" />
         </div>
         <div class="task-main">
           <strong>${task.name}</strong>
@@ -1171,12 +1231,17 @@ function renderRows() {
     `,
     )
     .join("");
-  const visibleIds = rows.map((task) => String(task.id));
+  const visibleIds = rows
+    .filter((task) => canOperateAsset("task.deploy", task) && !isTaskActive(task))
+    .map((task) => String(task.id));
   const checkedVisibleIds = visibleIds.filter((id) => state.selectedTaskIds.has(id));
   selectAllTasks.checked = visibleIds.length > 0 && checkedVisibleIds.length === visibleIds.length;
   selectAllTasks.indeterminate = checkedVisibleIds.length > 0 && checkedVisibleIds.length < visibleIds.length;
   selectAllTasks.disabled = !hasPermission("task.deploy") || visibleIds.length === 0;
   batchDeploy.disabled = !hasPermission("task.deploy") || state.selectedTaskIds.size === 0;
+  if (batchDeployText) {
+    batchDeployText.textContent = state.selectedTaskIds.size ? `批量发布 ${state.selectedTaskIds.size}/${MAX_BATCH_DEPLOY_TASKS}` : "批量发布";
+  }
 }
 
 function renderDetail() {
@@ -1940,7 +2005,7 @@ function renderChannelView() {
       <div class="simple-row">
         <div>
           <strong>${channel.name}</strong>
-          <span>${channelLabel(channel.type)} · ${channel.target} · ${channel.secret ? "已配置密钥" : "未配置密钥"}</span>
+          <span>${channelLabel(channel.type)} · ${channel.target} · ${channel.hasSecret || channel.secret ? "已配置密钥" : "未配置密钥"}</span>
         </div>
         <div class="row-actions">
           <span class="role-chip">${channelLabel(channel.type)}</span>
@@ -1970,7 +2035,7 @@ function renderSecretView() {
       <div class="simple-row">
         <div>
           <strong>${secret.name}</strong>
-          <span>${organizationName(secret.organizationId)} · ${secretTypeLabel(secret.type)} · ${secret.target || "未设置地址"} · ${secret.username || "未设置用户名"} · ${secret.secret ? "已保存秘钥" : "未保存秘钥"}</span>
+          <span>${organizationName(secret.organizationId)} · ${secretTypeLabel(secret.type)} · ${secret.target || "未设置地址"} · ${secret.username || "未设置用户名"} · ${secret.hasSecret || secret.secret ? "已保存秘钥" : "未保存秘钥"}</span>
         </div>
         <div class="row-actions">
           <button class="ghost-button" type="button" data-secret-edit="${secret.id}" ${canOperateAsset("secret.manage", secret) ? "" : "disabled"}>
@@ -2004,7 +2069,7 @@ function renderImagePullSecretOptions() {
 }
 
 function renderPlatformSettings() {
-  if (!platformRegistrySecret || !platformImageNamespace) return;
+  if (!platformRegistrySecret || !platformImageNamespace || platformSettingsDirty) return;
   platformRegistrySecret.innerHTML = imagePullSecretOptions(platformSettings.registrySecretId, "使用环境变量配置");
   platformImageNamespace.value = platformSettings.imageNamespace || "deploy-platform";
 }
@@ -2422,16 +2487,12 @@ async function saveTask(event) {
   const submitter = event.submitter;
   if (submitter) submitter.disabled = true;
   try {
-    const response = await fetch(taskId ? `/api/tasks/${taskId}` : "/api/tasks", {
-      method: taskId ? "PUT" : "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ actor: state.currentUser?.username || "system", task: taskPayload }),
-    });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "任务保存失败");
-    hydrateState(result.state);
+    const result = await mutateJson(
+      taskId ? `/api/tasks/${taskId}` : "/api/tasks",
+      { actor: state.currentUser?.username || "system", task: taskPayload },
+      taskId ? "PUT" : "POST",
+    );
     state.selectedId = result.task?.id || taskId;
-    cacheStateSnapshot(result.state);
     render();
     closeDrawer();
   } catch (error) {
@@ -2450,10 +2511,25 @@ function renderConfigPreview() {
 
 async function refreshRemoteState(options = {}) {
   if (pendingStateWrites > 0 && !options.force) return;
-  rememberLogFollowState();
-  await loadPersistedState();
-  render();
-  followLatestLog();
+  if (document.hidden && !options.force) return;
+  if (refreshPromise) {
+    if (!options.force) return refreshPromise;
+    await refreshPromise;
+  }
+  refreshPromise = (async () => {
+    rememberLogFollowState();
+    const changed = await loadPersistedState(options);
+    if (changed) {
+      render();
+      followLatestLog();
+    }
+    return changed;
+  })();
+  try {
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
+  }
 }
 
 async function openBranchDialog(taskId) {
@@ -2537,33 +2613,36 @@ async function runTask(taskId, branch) {
     window.alert("当前用户组无权发布该任务");
     return;
   }
-  const response = await fetch(`/api/tasks/${taskId}/run`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ actor: state.currentUser?.username || "system", branch }),
-  });
-  const result = await response.json();
-  if (!response.ok) {
+  confirmBranchDeploy.disabled = true;
+  try {
+    await mutateJson(`/api/tasks/${taskId}/run`, { actor: state.currentUser?.username || "system", branch });
+    state.selectedTaskIds.delete(String(taskId));
+    render();
+    closeBranchDialog(false);
+    if (state.batchQueue.length > 0) {
+      window.setTimeout(() => openBranchDialog(state.batchQueue.shift()), 250);
+    } else {
+      window.setTimeout(refreshRemoteState, 1500);
+    }
+  } catch (error) {
     state.batchQueue = [];
-    window.alert(result.error || "发布请求失败");
-    return;
-  }
-  hydrateState(result.state);
-  state.selectedTaskIds.delete(String(taskId));
-  render();
-  closeBranchDialog(false);
-  if (state.batchQueue.length > 0) {
-    window.setTimeout(() => openBranchDialog(state.batchQueue.shift()), 250);
-  } else {
-    window.setTimeout(refreshRemoteState, 1500);
+    window.alert(error.message || "发布请求失败");
+  } finally {
+    if (branchDialog.open) confirmBranchDeploy.disabled = false;
   }
 }
 
 function startBatchDeploy() {
   if (!requirePermission("task.deploy")) return;
-  const taskIds = Array.from(state.selectedTaskIds).filter((id) => tasks.some((task) => String(task.id) === id && canOperateAsset("task.deploy", task)));
+  const taskIds = Array.from(state.selectedTaskIds).filter((id) =>
+    tasks.some((task) => String(task.id) === id && canOperateAsset("task.deploy", task) && !isTaskActive(task)),
+  );
   if (taskIds.length === 0) {
     window.alert("请先选择要发布的任务");
+    return;
+  }
+  if (taskIds.length > MAX_BATCH_DEPLOY_TASKS) {
+    window.alert(`批量发布一次最多选择 ${MAX_BATCH_DEPLOY_TASKS} 个任务`);
     return;
   }
   openBatchDialog(taskIds);
@@ -2586,7 +2665,7 @@ async function openBatchDialog(taskIds) {
       `,
     )
     .join("");
-  batchStatus.textContent = "正在读取仓库分支...";
+  batchStatus.textContent = `正在读取仓库分支，本次将发布 ${selectedTasks.length}/${MAX_BATCH_DEPLOY_TASKS} 个任务`;
   confirmBatchDeploy.disabled = true;
   batchDialog.showModal();
   let failed = 0;
@@ -2602,7 +2681,7 @@ async function openBatchDialog(taskIds) {
     }),
   );
   const okCount = selectedTasks.length - failed;
-  batchStatus.textContent = failed ? `已读取 ${okCount} 个任务分支，${failed} 个失败` : `已读取 ${okCount} 个任务分支`;
+  batchStatus.textContent = failed ? `已读取 ${okCount} 个任务分支，${failed} 个失败` : `已读取 ${okCount} 个任务分支，可同时发布`;
   confirmBatchDeploy.disabled = failed > 0 || okCount === 0;
 }
 
@@ -2613,21 +2692,23 @@ async function submitBatchDeploy(event) {
     taskId: select.dataset.batchBranch,
     branch: select.value,
   }));
-  const response = await fetch("/api/tasks/batch-run", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ actor: state.currentUser?.username || "system", items }),
-  });
-  const result = await response.json();
-  if (!response.ok) {
-    window.alert(result.error || "批量发布请求失败");
+  if (items.length > MAX_BATCH_DEPLOY_TASKS) {
+    window.alert(`批量发布一次最多选择 ${MAX_BATCH_DEPLOY_TASKS} 个任务`);
     return;
   }
-  hydrateState(result.state);
-  items.forEach((item) => state.selectedTaskIds.delete(String(item.taskId)));
-  render();
-  closeBatchDialog();
-  window.setTimeout(refreshRemoteState, 1500);
+  const submitter = event.submitter;
+  if (submitter) submitter.disabled = true;
+  try {
+    await mutateJson("/api/tasks/batch-run", { actor: state.currentUser?.username || "system", items });
+    items.forEach((item) => state.selectedTaskIds.delete(String(item.taskId)));
+    render();
+    closeBatchDialog();
+    window.setTimeout(refreshRemoteState, 1500);
+  } catch (error) {
+    window.alert(error.message || "批量发布请求失败");
+  } finally {
+    if (submitter && batchDialog.open) submitter.disabled = false;
+  }
 }
 
 async function openScheduleDialog(taskId) {
@@ -2659,55 +2740,41 @@ async function saveSchedule(event) {
   event.preventDefault();
   if (!requirePermission("task.deploy")) return;
   const taskId = scheduleForm.elements.taskId.value;
-  const response = await fetch(`/api/tasks/${taskId}/schedule`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  const submitter = event.submitter;
+  if (submitter) submitter.disabled = true;
+  try {
+    await mutateJson(`/api/tasks/${taskId}/schedule`, {
       actor: state.currentUser?.username || "system",
       branch: scheduleForm.elements.branch.value,
       scheduledAt: scheduleForm.elements.scheduledAt.value,
-    }),
-  });
-  const result = await response.json();
-  if (!response.ok) {
-    window.alert(result.error || "保存定时发布失败");
-    return;
+    });
+    render();
+    closeScheduleDialog();
+  } catch (error) {
+    window.alert(error.message || "保存定时发布失败");
+  } finally {
+    if (submitter && scheduleDialog.open) submitter.disabled = false;
   }
-  hydrateState(result.state);
-  render();
-  closeScheduleDialog();
 }
 
 async function cancelSchedule(scheduleId) {
   if (!requirePermission("task.deploy")) return;
-  const response = await fetch(`/api/schedules/${scheduleId}/cancel`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ actor: state.currentUser?.username || "system" }),
-  });
-  const result = await response.json();
-  if (!response.ok) {
-    window.alert(result.error || "取消定时发布失败");
-    return;
+  try {
+    await mutateJson(`/api/schedules/${scheduleId}/cancel`, { actor: state.currentUser?.username || "system" });
+    render();
+  } catch (error) {
+    window.alert(error.message || "取消定时发布失败");
   }
-  hydrateState(result.state);
-  render();
 }
 
 async function cancelExecution(executionId) {
   if (!requirePermission("task.deploy")) return;
-  const response = await fetch(`/api/executions/${executionId}/cancel`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ actor: state.currentUser?.username || "system" }),
-  });
-  const result = await response.json();
-  if (!response.ok) {
-    window.alert(result.error || "取消发布失败");
-    return;
+  try {
+    await mutateJson(`/api/executions/${executionId}/cancel`, { actor: state.currentUser?.username || "system" });
+    render();
+  } catch (error) {
+    window.alert(error.message || "取消发布失败");
   }
-  hydrateState(result.state);
-  render();
 }
 
 async function deleteTask(taskId) {
@@ -2720,15 +2787,13 @@ async function deleteTask(taskId) {
   }
   if (!window.confirm(`确认删除任务 ${task.name}？删除后会同时清理该任务的执行记录和定时计划。`)) return;
   const actor = encodeURIComponent(state.currentUser?.username || "system");
-  const response = await fetch(`/api/tasks/${taskId}?actor=${actor}`, { method: "DELETE" });
-  const result = await response.json();
-  if (!response.ok) {
-    window.alert(result.error || "删除任务失败");
-    return;
+  try {
+    await mutateJson(`/api/tasks/${taskId}?actor=${actor}`, undefined, "DELETE");
+    state.selectedTaskIds.delete(String(taskId));
+    render();
+  } catch (error) {
+    window.alert(error.message || "删除任务失败");
   }
-  hydrateState(result.state);
-  state.selectedTaskIds.delete(String(taskId));
-  render();
 }
 
 async function saveCluster(event) {
@@ -3043,7 +3108,8 @@ async function savePlatformSettings(event) {
   platformSettings.registrySecretId = platformSettingsForm.elements.registrySecretId.value;
   platformSettings.imageNamespace = (platformSettingsForm.elements.imageNamespace.value || "deploy-platform").trim().replace(/^\/+|\/+$/g, "") || "deploy-platform";
   addAudit("保存镜像仓库配置", `${secretName(platformSettings.registrySecretId)} / ${platformSettings.imageNamespace}`);
-  await saveStateAndRender();
+  const saved = await saveStateAndRender();
+  if (saved) platformSettingsDirty = false;
   if (submitter) submitter.disabled = false;
 }
 
@@ -3074,9 +3140,7 @@ async function saveSecret(event) {
       secret: formData.get("secret"),
       knownHosts: formData.get("knownHosts"),
     };
-    const result = await postJson("/api/secrets", { actor: state.currentUser?.username || "system", secret: payload });
-    hydrateState(result.state);
-    cacheStateSnapshot(result.state);
+    await mutateJson("/api/secrets", { actor: state.currentUser?.username || "system", secret: payload });
     form.reset();
     render();
     closeCreateDialog(secretCreateDialog, form);
@@ -3144,9 +3208,7 @@ async function saveEditedSecret(event) {
       secret: editSecretForm.elements.secret.value,
       knownHosts: editSecretForm.elements.knownHosts.value,
     };
-    const result = await postJson(`/api/secrets/${secret.id}`, { actor: state.currentUser?.username || "system", secret: payload }, "PUT");
-    hydrateState(result.state);
-    cacheStateSnapshot(result.state);
+    await mutateJson(`/api/secrets/${secret.id}`, { actor: state.currentUser?.username || "system", secret: payload }, "PUT");
     render();
     closeSecretDialog();
   } catch (error) {
@@ -3184,20 +3246,12 @@ async function deleteSecret(secretId) {
     window.alert("平台默认推送镜像仓库正在使用该秘钥，请先在秘钥管理中切换仓库配置");
     return;
   }
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), STATE_SAVE_TIMEOUT_MS);
   try {
     const actor = encodeURIComponent(state.currentUser?.username || "system");
-    const response = await fetch(`/api/secrets/${secretId}?actor=${actor}`, { method: "DELETE", signal: controller.signal });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || "删除秘钥失败");
-    hydrateState(result.state);
-    cacheStateSnapshot(result.state);
+    await mutateJson(`/api/secrets/${secretId}?actor=${actor}`, undefined, "DELETE");
     render();
   } catch (error) {
-    window.alert(error.name === "AbortError" ? "请求超时，请检查后端服务或数据库连接是否正常" : error.message);
-  } finally {
-    window.clearTimeout(timeoutId);
+    window.alert(error.message);
   }
 }
 
@@ -3536,11 +3590,15 @@ function render() {
   renderOrganizationView();
   renderAccessView();
   renderAuditView();
-  renderNotifyChannelOptions(taskForm.elements.notifyChannel?.value || taskForm.elements.notifyTarget?.value || "");
-  renderClusters();
-  renderGitCredentialOptions();
-  renderImagePullSecretOptions();
-  renderOrganizationOptions();
+  const taskEditorOpen = drawer.classList.contains("open");
+  const formDialogOpen = Boolean(document.querySelector("dialog[open] form"));
+  if (!taskEditorOpen) {
+    renderNotifyChannelOptions(taskForm.elements.notifyChannel?.value || taskForm.elements.notifyTarget?.value || "");
+    renderClusters();
+    renderGitCredentialOptions();
+  }
+  if (!taskEditorOpen && !clusterCreateDialog.open && !clusterDialog.open) renderImagePullSecretOptions();
+  if (!taskEditorOpen && !formDialogOpen) renderOrganizationOptions();
   renderPlatformSettings();
   syncSecretNamePlaceholder();
   lucide.createIcons();
@@ -3548,7 +3606,7 @@ function render() {
 }
 
 function syncAutoRefresh() {
-  const hasActiveTask = tasks.some((task) => isTaskActive(task));
+  const hasActiveTask = tasks.some((task) => isTaskActive(task)) || executions.some((execution) => isTaskActive(execution));
   if (hasActiveTask && !refreshTimer) {
     refreshTimer = window.setInterval(refreshRemoteState, 3000);
   }
@@ -3583,7 +3641,7 @@ async function login(event) {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "登录失败");
-    loginResult = { user: result.user, remoteState: result.state };
+    loginResult = { user: result.user };
   } catch (error) {
     loginResult = {
       error: error.message === "Failed to fetch" ? "无法连接后端登录接口，请检查服务是否正常运行" : error.message,
@@ -3596,8 +3654,8 @@ async function login(event) {
   }
   const user = loginResult.user;
   state.currentUser = authUserSnapshot(user);
-  if (loginResult.remoteState) hydrateState(loginResult.remoteState);
   window.localStorage.setItem(APP_USER_KEY, JSON.stringify(state.currentUser));
+  await refreshRemoteState({ force: true });
   loginError.hidden = true;
   setView(preferredViewFromRoute("tasks"), { replace: !routeFromPath() });
 }
@@ -3627,6 +3685,16 @@ function logout() {
 loginForm.addEventListener("submit", login);
 document.getElementById("logoutButton").addEventListener("click", logout);
 document.getElementById("openCreate").addEventListener("click", openDrawer);
+refreshButton.addEventListener("click", async () => {
+  refreshButton.disabled = true;
+  refreshButton.classList.add("is-loading");
+  try {
+    await refreshRemoteState({ force: true });
+  } finally {
+    refreshButton.disabled = false;
+    refreshButton.classList.remove("is-loading");
+  }
+});
 document.getElementById("closeCreate").addEventListener("click", closeDrawer);
 backdrop.addEventListener("click", closeDrawer);
 document.getElementById("openClusterCreate").addEventListener("click", () => openCreateDialog(clusterCreateDialog, "cluster.manage", document.getElementById("clusterForm")));
@@ -3653,6 +3721,9 @@ document.getElementById("clusterForm").addEventListener("submit", saveCluster);
 document.getElementById("templateForm").addEventListener("submit", saveTemplate);
 document.getElementById("channelForm").addEventListener("submit", saveChannel);
 platformSettingsForm.addEventListener("submit", savePlatformSettings);
+platformSettingsForm.addEventListener("input", () => {
+  platformSettingsDirty = true;
+});
 secretForm.addEventListener("submit", saveSecret);
 document.getElementById("userForm").addEventListener("submit", saveUser);
 organizationForm.addEventListener("submit", saveOrganization);
@@ -3725,14 +3796,19 @@ document.addEventListener(
 );
 
 selectAllTasks.addEventListener("change", (event) => {
-  const visibleIds = filteredTasks().map((task) => String(task.id));
+  const visibleIds = filteredTasks()
+    .filter((task) => canOperateAsset("task.deploy", task) && !isTaskActive(task))
+    .map((task) => String(task.id));
   visibleIds.forEach((id) => {
     if (event.target.checked) {
-      state.selectedTaskIds.add(id);
+      if (state.selectedTaskIds.size < MAX_BATCH_DEPLOY_TASKS) state.selectedTaskIds.add(id);
     } else {
       state.selectedTaskIds.delete(id);
     }
   });
+  if (event.target.checked && visibleIds.length > MAX_BATCH_DEPLOY_TASKS) {
+    window.alert(`批量发布一次最多选择 ${MAX_BATCH_DEPLOY_TASKS} 个任务，已自动选择前 ${MAX_BATCH_DEPLOY_TASKS} 个可发布任务`);
+  }
   renderRows();
 });
 
@@ -3756,6 +3832,11 @@ document.addEventListener("change", async (event) => {
   if (taskCheckbox) {
     const taskId = String(taskCheckbox.dataset.taskSelect);
     if (taskCheckbox.checked) {
+      if (state.selectedTaskIds.size >= MAX_BATCH_DEPLOY_TASKS) {
+        taskCheckbox.checked = false;
+        window.alert(`批量发布一次最多选择 ${MAX_BATCH_DEPLOY_TASKS} 个任务`);
+        return;
+      }
       state.selectedTaskIds.add(taskId);
     } else {
       state.selectedTaskIds.delete(taskId);
@@ -4035,6 +4116,10 @@ window.addEventListener("popstate", () => {
   } else {
     setView("tasks", { updateRoute: false });
   }
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && state.currentUser) refreshRemoteState({ force: true });
 });
 
 init();

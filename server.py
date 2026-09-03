@@ -4,13 +4,17 @@ import hashlib
 import hmac
 import json
 import os
+import queue
 import re
+import signal
 import shutil
 import sqlite3
 import subprocess
 import threading
 import time
 import uuid
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -48,8 +52,11 @@ CLEAN_WORKSPACE_AFTER_BUILD = os.environ.get("CLEAN_WORKSPACE_AFTER_BUILD", "tru
 CLEAN_LOCAL_IMAGE_AFTER_BUILD = os.environ.get("CLEAN_LOCAL_IMAGE_AFTER_BUILD", "true").lower() != "false"
 DOCKER_PRUNE_AFTER_BUILD = os.environ.get("DOCKER_PRUNE_AFTER_BUILD", "false").lower() == "true"
 CLIENT_LOG_TAIL = int(os.environ.get("CLIENT_LOG_TAIL", "30"))
+MAX_CONCURRENT_EXECUTIONS = max(1, int(os.environ.get("MAX_CONCURRENT_EXECUTIONS", "5")))
+BUILD_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_EXECUTIONS, thread_name_prefix="deploy-build")
 
 DEFAULT_STATE = {
+    "revision": 0,
     "roles": {
         "platform_admin": {
             "label": "平台管理员",
@@ -262,8 +269,25 @@ def preserve_existing_user_passwords(next_state, current_state=None):
         incoming_password = user.get("password")
         current_password = current_passwords.get(username)
         default_password = default_passwords.get(username)
+        if current_password and not incoming_password:
+            user["password"] = current_password
+            continue
         if current_password and default_password and incoming_password == default_password and current_password != incoming_password:
             user["password"] = current_password
+    return next_state
+
+
+def preserve_sensitive_values(next_state, current_state=None):
+    current_state = current_state if current_state is not None else read_raw_state()
+    if not current_state:
+        return next_state
+    for key in ("secrets", "notifyChannels"):
+        current_items = {str(item.get("id")): item for item in current_state.get(key, [])}
+        for item in next_state.get(key, []):
+            current = current_items.get(str(item.get("id")))
+            item.pop("hasSecret", None)
+            if current and not item.get("secret") and current.get("secret"):
+                item["secret"] = current["secret"]
     return next_state
 
 
@@ -271,50 +295,108 @@ def preserve_runtime_fields(next_state, current_state=None):
     current_state = current_state if current_state is not None else read_raw_state()
     if not current_state:
         return next_state
-    current_executions = {str(item.get("id")): item for item in current_state.get("executions", [])}
-    for execution in next_state.get("executions", []):
-        current = current_executions.get(str(execution.get("id")))
+    current_tasks = {str(item.get("id")): item for item in current_state.get("tasks", [])}
+    runtime_task_fields = ("status", "stage", "progress", "lastRun", "lastBranch", "lastActor", "alerts", "schedule")
+    for task in next_state.get("tasks", []):
+        current = current_tasks.get(str(task.get("id")))
         if not current:
             continue
-        if len(execution.get("logs") or []) < len(current.get("logs") or []):
-            execution["logs"] = current.get("logs") or []
-        execution.pop("logCount", None)
+        for field in runtime_task_fields:
+            if field in current:
+                task[field] = copy.deepcopy(current[field])
 
-    current_agent_tasks = {str(item.get("id")): item for item in current_state.get("agentTasks", [])}
-    for agent_task in next_state.get("agentTasks", []):
-        current = current_agent_tasks.get(str(agent_task.get("id")))
-        if not current:
-            continue
-        if not agent_task.get("payload") and current.get("payload"):
-            agent_task["payload"] = current.get("payload")
-        if len(agent_task.get("logs") or []) < len(current.get("logs") or []):
-            agent_task["logs"] = current.get("logs") or []
-        agent_task.pop("logCount", None)
+    # Executions, Agent work and schedules are server-owned runtime data. Browser
+    # configuration saves only carry compact snapshots and must never replace them.
+    for key in ("executions", "agentTasks", "agentHeartbeats", "schedules"):
+        next_state[key] = copy.deepcopy(current_state.get(key, []))
     return next_state
 
 
-def client_state(state):
+def compact_log_entry(log):
+    lines = [line.strip() for line in str((log or {}).get("message") or "").splitlines() if line.strip()]
+    message = lines[-1] if lines else str((log or {}).get("message") or "")
+    return {"time": (log or {}).get("time") or "", "message": message[:1200]}
+
+
+def compact_error_logs(logs):
+    errors = []
+    seen = set()
+    pattern = re.compile(r"\[ERROR\]|\berror\b|fatal:|\bfailed\b|\bfailure\b|build failure|not found|blocked mirror|could not|forbidden|denied|拒绝|失败|异常", re.I)
+    for log in reversed(logs):
+        for line in reversed(str((log or {}).get("message") or "").splitlines()):
+            text = line.strip()
+            if not text or text in seen or not pattern.search(text):
+                continue
+            seen.add(text)
+            errors.append({"time": (log or {}).get("time") or "", "message": text[:1200]})
+            if len(errors) >= 5:
+                return list(reversed(errors))
+    return list(reversed(errors))
+
+
+def execution_summary(execution, compact=False):
+    logs = execution.get("logs") if isinstance(execution.get("logs"), list) else []
+    item = {key: copy.deepcopy(value) for key, value in execution.items() if key != "logs"}
+    item["logCount"] = len(logs)
+    if logs:
+        item["latestLog"] = compact_log_entry(logs[-1]) if compact else copy.deepcopy(logs[-1])
+    if compact:
+        item["errorSummary"] = compact_error_logs(logs)
+        item["logs"] = []
+    else:
+        item["logs"] = copy.deepcopy(logs[-CLIENT_LOG_TAIL:])
+    return item
+
+
+def agent_task_summary(agent_task, compact=False):
+    logs = agent_task.get("logs") if isinstance(agent_task.get("logs"), list) else []
+    item = {key: copy.deepcopy(value) for key, value in agent_task.items() if key not in {"logs", "payload"}}
+    item["logCount"] = len(logs)
+    if not compact:
+        item["logs"] = copy.deepcopy(logs[-5:])
+    return item
+
+
+def client_state(state, compact=False):
     data = {}
     for key, value in state.items():
-        if key in {"executions", "agentTasks"}:
+        if key in {"executions", "agentTasks", "secrets", "notifyChannels", "users", "auditLogs"}:
             continue
         data[key] = copy.deepcopy(value)
 
-    data["executions"] = []
-    for execution in state.get("executions", []):
-        logs = execution.get("logs") if isinstance(execution.get("logs"), list) else []
-        item = {key: copy.deepcopy(value) for key, value in execution.items() if key != "logs"}
-        item["logCount"] = len(logs)
-        item["logs"] = copy.deepcopy(logs[-CLIENT_LOG_TAIL:])
-        data["executions"].append(item)
+    data["users"] = []
+    for user in state.get("users", []):
+        item = {key: copy.deepcopy(value) for key, value in user.items() if key != "password"}
+        data["users"].append(item)
 
-    data["agentTasks"] = []
-    for agent_task in state.get("agentTasks", []):
-        logs = agent_task.get("logs") if isinstance(agent_task.get("logs"), list) else []
-        item = {key: copy.deepcopy(value) for key, value in agent_task.items() if key not in {"logs", "payload"}}
-        item["logCount"] = len(logs)
-        item["logs"] = copy.deepcopy(logs[-5:])
-        data["agentTasks"].append(item)
+    data["secrets"] = []
+    for secret in state.get("secrets", []):
+        item = {key: copy.deepcopy(value) for key, value in secret.items() if key != "secret"}
+        item["secret"] = ""
+        item["hasSecret"] = bool(secret.get("secret"))
+        data["secrets"].append(item)
+
+    data["notifyChannels"] = []
+    for channel in state.get("notifyChannels", []):
+        item = {key: copy.deepcopy(value) for key, value in channel.items() if key != "secret"}
+        item["secret"] = ""
+        item["hasSecret"] = bool(channel.get("secret"))
+        data["notifyChannels"].append(item)
+
+    executions = state.get("executions", [])
+    if compact:
+        executions = executions[:50]
+    data["executions"] = [execution_summary(execution, compact=compact) for execution in executions]
+
+    agent_tasks = state.get("agentTasks", [])
+    if compact:
+        agent_tasks = agent_tasks[:50]
+    data["agentTasks"] = [agent_task_summary(agent_task, compact=compact) for agent_task in agent_tasks]
+    if compact:
+        data["auditLogs"] = copy.deepcopy(state.get("auditLogs", [])[:50])
+    else:
+        data["auditLogs"] = copy.deepcopy(state.get("auditLogs", []))
+    data["compact"] = bool(compact)
     return data
 
 
@@ -346,11 +428,15 @@ def read_state():
         return merge_defaults(json.loads(row[0]))
 
 
-def write_state(state):
-    current_state = read_raw_state()
+def write_state(state, current_state=None):
+    current_state = current_state if current_state is not None else read_raw_state()
     state = merge_defaults(state)
     state = preserve_existing_user_passwords(state, current_state)
+    state = preserve_sensitive_values(state, current_state)
     state = preserve_runtime_fields(state, current_state)
+    current_revision = int((current_state or {}).get("revision") or 0)
+    incoming_revision = int(state.get("revision") or 0)
+    state["revision"] = max(current_revision, incoming_revision) + 1
     payload = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
     with STATE_LOCK:
         if use_postgres():
@@ -368,11 +454,15 @@ def write_state(state):
                 )
 
 
-def mutate_state(fn):
-    state = read_state()
-    result = fn(state)
-    write_state(state)
-    return result, state
+def mutate_state(fn, detect_changes=False):
+    with STATE_LOCK:
+        state = read_state()
+        previous = canonical_json(state) if detect_changes else None
+        result = fn(state)
+        if detect_changes and canonical_json(state) == previous:
+            return result, state
+        write_state(state, current_state=state)
+        return result, state
 
 
 def append_log(execution_id, message):
@@ -389,6 +479,11 @@ def set_execution_status(execution_id, status, message=None, image=None, stage=N
         execution = find_by_id(state["executions"], execution_id)
         if not execution:
             return
+        current_status = execution.get("status")
+        if current_status == "cancelled" and status != "cancelled":
+            return
+        if current_status in {"success", "partial", "failed"} and status != current_status:
+            return
         execution["status"] = status
         execution["updatedAt"] = now_text()
         if stage:
@@ -400,7 +495,7 @@ def set_execution_status(execution_id, status, message=None, image=None, stage=N
         if message:
             execution.setdefault("logs", []).append({"time": now_text(), "message": message})
         task = find_by_id(state["tasks"], execution["taskId"])
-        if task:
+        if task and execution_is_latest_for_task(state, execution):
             task["status"] = status
             task["lastRun"] = now_text()
             if stage:
@@ -414,6 +509,26 @@ def set_execution_status(execution_id, status, message=None, image=None, stage=N
 def find_by_id(items, item_id):
     item_id = str(item_id)
     return next((item for item in items if str(item.get("id")) == item_id), None)
+
+
+def latest_execution_for_task(state, task_id):
+    return next((item for item in state.get("executions", []) if str(item.get("taskId")) == str(task_id)), None)
+
+
+def execution_is_latest_for_task(state, execution):
+    latest = latest_execution_for_task(state, execution.get("taskId"))
+    return bool(latest and str(latest.get("id")) == str(execution.get("id")))
+
+
+def active_execution_for_task(state, task_id):
+    return next(
+        (
+            item
+            for item in state.get("executions", [])
+            if str(item.get("taskId")) == str(task_id) and is_active_status(item.get("status"))
+        ),
+        None,
+    )
 
 
 def find_user(state, username):
@@ -678,11 +793,11 @@ def validate_cluster_names(next_state):
         seen[key] = True
 
 
-def validate_state_update(next_state, actor):
+def validate_state_update(next_state, actor, current_state=None):
     validate_cluster_names(next_state)
     if not actor or actor == "system":
         return
-    current_state = read_state()
+    current_state = current_state if current_state is not None else read_state()
     validate_group_state_changes(current_state, next_state, actor)
     validate_user_state_changes(current_state, next_state, actor)
     validate_asset_state_changes(current_state, next_state, actor)
@@ -905,10 +1020,13 @@ def run_sdk_command(execution_id, task, command, src_dir, build_env):
     if effective_command != command:
         append_log(execution_id, "已为 Node 构建启用 Corepack，支持 package.json 脚本中调用 pnpm/yarn。")
     docker_src_dir = HOST_WORKSPACE_DIR / execution_id / "src"
+    container_name = f"deploy-build-{safe_name(execution_id)}"
     docker_cmd = [
         "docker",
         "run",
         "--rm",
+        "--name",
+        container_name,
         "-v",
         f"{docker_src_dir}:/workspace",
         *cache_mounts,
@@ -920,7 +1038,11 @@ def run_sdk_command(execution_id, task, command, src_dir, build_env):
         "-lc",
         effective_command,
     ]
-    return run_command_stream(docker_cmd, execution_id)
+
+    def remove_build_container():
+        run_command(["docker", "rm", "-f", container_name])
+
+    return run_command_stream(docker_cmd, execution_id, on_cancel=remove_build_container)
 
 
 def registry_config(state):
@@ -1015,7 +1137,7 @@ def run_command(args, cwd=None, input_text=None, env=None):
     return process.returncode, process.stdout
 
 
-def run_command_stream(args, execution_id, cwd=None, env=None, redact=None):
+def run_command_stream(args, execution_id, cwd=None, env=None, redact=None, on_cancel=None):
     process = subprocess.Popen(
         args,
         cwd=cwd,
@@ -1024,40 +1146,81 @@ def run_command_stream(args, execution_id, cwd=None, env=None, redact=None):
         stderr=subprocess.STDOUT,
         bufsize=1,
         env=env,
+        start_new_session=True,
     )
-    output = []
+    output = deque(maxlen=5000)
     batch = []
+    output_queue = queue.Queue()
+    output_finished = object()
     last_cancel_check = 0
+    last_flush = time.monotonic()
 
     def flush():
-        nonlocal batch
+        nonlocal batch, last_flush
         if not batch:
             return
         text = "\n".join(batch)
         append_log(execution_id, redact(text) if redact else text)
         batch = []
+        last_flush = time.monotonic()
+
+    def read_output():
+        try:
+            for raw_line in process.stdout or []:
+                output_queue.put(raw_line)
+        finally:
+            output_queue.put(output_finished)
+
+    def terminate_process():
+        if process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                process.kill()
+
+    threading.Thread(target=read_output, daemon=True).start()
 
     try:
-        for raw_line in process.stdout or []:
-            line = raw_line.rstrip("\n")
-            output.append(raw_line)
-            batch.append(line)
-            if len(batch) >= 20:
+        reader_finished = False
+        while not reader_finished:
+            try:
+                raw_line = output_queue.get(timeout=0.5)
+            except queue.Empty:
+                raw_line = None
+            if raw_line is output_finished:
+                reader_finished = True
+            elif raw_line is not None:
+                output.append(raw_line)
+                batch.append(raw_line.rstrip("\n"))
+
+            current_time = time.monotonic()
+            if batch and (len(batch) >= 20 or current_time - last_flush >= 1):
                 flush()
-            current_time = time.time()
-            if current_time - last_cancel_check > 1:
+            if current_time - last_cancel_check >= 0.5:
                 last_cancel_check = current_time
                 if is_execution_cancelled(execution_id):
-                    process.terminate()
                     try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
+                        if on_cancel:
+                            on_cancel()
+                    finally:
+                        terminate_process()
                     raise RuntimeError("发布已取消")
         flush()
         return process.wait(), "".join(output)
     finally:
+        if process.poll() is None:
+            terminate_process()
         flush()
+        if process.stdout:
+            process.stdout.close()
 
 
 def cleanup_build_artifacts(execution_id, work_dir, image=None, image_built=False):
@@ -1489,6 +1652,10 @@ def dispatch_agent_tasks(execution_id, task, image):
         execution = find_by_id(state["executions"], execution_id)
         if not execution:
             return
+        if execution.get("status") == "cancelled":
+            raise RuntimeError("发布已取消")
+        if execution.get("status") in {"success", "partial", "failed"}:
+            return
         dispatched_clusters = []
         for target in task.get("clusters", []):
             agent_task_id = uuid.uuid4().hex[:12]
@@ -1536,7 +1703,7 @@ def dispatch_agent_tasks(execution_id, task, image):
         execution["progress"] = 88
         execution.setdefault("logs", []).append({"time": now_text(), "message": f"已创建 Agent 发布任务: {', '.join(dispatched_clusters)}"})
         task_ref = find_by_id(state["tasks"], task["id"])
-        if task_ref:
+        if task_ref and execution_is_latest_for_task(state, execution):
             task_ref["status"] = "deploying"
             task_ref["lastRun"] = now_text()
             task_ref["stage"] = "Agent 部署"
@@ -1672,6 +1839,8 @@ def build_and_dispatch(execution_id):
     execution = find_by_id(state["executions"], execution_id)
     if not execution:
         return
+    if execution.get("status") == "cancelled":
+        return
     task = find_by_id(state["tasks"], execution["taskId"])
     if not task:
         set_execution_status(execution_id, "failed", "任务不存在")
@@ -1685,6 +1854,7 @@ def build_and_dispatch(execution_id):
     failure_event = "BUILD_FAILED"
     try:
         deploy_rule = task_deploy_rule(task)
+        append_log(execution_id, f"已获得执行槽，当前平台最多同时发布 {MAX_CONCURRENT_EXECUTIONS} 个任务")
         set_execution_status(execution_id, "building", "开始拉取代码", stage="拉取代码", progress=10)
         if work_dir.exists():
             shutil.rmtree(work_dir)
@@ -1698,8 +1868,12 @@ def build_and_dispatch(execution_id):
         clone_repo = authenticated_repo_url(task["repo"], git_secret)
         clone_env = clone_environment(work_dir, git_secret)
         clone_cmd = ["git", "clone", "--depth", "1", "--branch", branch, clone_repo, str(src_dir)]
-        code, output = run_command(clone_cmd, env=clone_env)
-        append_log(execution_id, redact_secret_text(output, git_secret))
+        code, output = run_command_stream(
+            clone_cmd,
+            execution_id,
+            env=clone_env,
+            redact=lambda text: redact_secret_text(text, git_secret),
+        )
         if code != 0:
             raise RuntimeError("代码拉取失败")
         ensure_execution_active(execution_id)
@@ -1866,6 +2040,7 @@ def cancel_execution(execution_id, actor):
         task = find_by_id(state["tasks"], execution["taskId"])
         if task:
             require_actor_asset_access(state, actor, "task.deploy", task, "取消发布")
+        if task and execution_is_latest_for_task(state, execution):
             task["status"] = "cancelled"
             task["stage"] = "已取消"
             task["progress"] = execution["progress"]
@@ -2056,6 +2231,13 @@ def normalize_secret_payload(payload, keep_existing_secret=False):
     return normalized
 
 
+def public_secret_config(secret):
+    item = {key: copy.deepcopy(value) for key, value in (secret or {}).items() if key != "secret"}
+    item["secret"] = ""
+    item["hasSecret"] = bool((secret or {}).get("secret"))
+    return item
+
+
 def secret_name_exists(state, name, ignore_id=None):
     normalized_name = str(name or "").strip().lower()
     return any(str(item.get("name") or "").strip().lower() == normalized_name and str(item.get("id")) != str(ignore_id or "") for item in state.get("secrets", []))
@@ -2132,16 +2314,21 @@ def create_execution(task_id, actor, branch):
         require_actor_asset_access(state, actor, "task.deploy", task, "发布")
         if not branch:
             raise ValueError("请选择发布分支")
+        active = active_execution_for_task(state, task["id"])
+        if active:
+            raise ValueError(f"任务正在执行中: {active.get('id')} / {active.get('stage') or active.get('status')}")
         return create_execution_record(state, task, actor, branch)
 
     execution, state = mutate_state(update)
-    threading.Thread(target=build_and_dispatch, args=(execution["id"],), daemon=True).start()
+    BUILD_EXECUTOR.submit(build_and_dispatch, execution["id"])
     return execution, state
 
 
 def create_batch_executions(items, actor):
     if not isinstance(items, list) or not items:
         raise ValueError("请选择要批量发布的任务")
+    if len(items) > MAX_CONCURRENT_EXECUTIONS:
+        raise ValueError(f"批量发布一次最多选择 {MAX_CONCURRENT_EXECUTIONS} 个任务")
 
     def update(state):
         executions = []
@@ -2153,12 +2340,15 @@ def create_batch_executions(items, actor):
             branch = item.get("branch")
             if not branch:
                 raise ValueError(f"{task['name']} 未选择发布分支")
+            active = active_execution_for_task(state, task["id"])
+            if active:
+                raise ValueError(f"任务 {task['name']} 正在执行中: {active.get('id')}")
             executions.append(create_execution_record(state, task, actor, branch, "批量发布"))
         return executions
 
     executions, state = mutate_state(update)
     for execution in executions:
-        threading.Thread(target=build_and_dispatch, args=(execution["id"],), daemon=True).start()
+        BUILD_EXECUTOR.submit(build_and_dispatch, execution["id"])
     return executions, state
 
 
@@ -2245,6 +2435,9 @@ def trigger_due_schedules():
                     schedule["error"] = "任务不存在"
                     schedule["updatedAt"] = now_text()
                     continue
+                active = active_execution_for_task(state, task["id"])
+                if active:
+                    raise RuntimeError(f"任务已有执行中的发布: {active.get('id')}")
                 execution = create_execution_record(state, task, schedule.get("actor") or "scheduler", schedule.get("branch"), "定时发布")
                 schedule["status"] = "triggered"
                 schedule["executionId"] = execution["id"]
@@ -2262,7 +2455,7 @@ def trigger_due_schedules():
 
     mutate_state(update)
     for execution_id in due_execution_ids:
-        threading.Thread(target=build_and_dispatch, args=(execution_id,), daemon=True).start()
+        BUILD_EXECUTOR.submit(build_and_dispatch, execution_id)
 
 
 def execution_has_agent_tasks(state, execution_id):
@@ -2271,8 +2464,8 @@ def execution_has_agent_tasks(state, execution_id):
 
 def recover_waiting_deployments():
     recovery_items = []
-
-    def collect(state):
+    with STATE_LOCK:
+        state = read_state()
         now = datetime.now()
         for execution in state.get("executions", []):
             if execution.get("status") != "building":
@@ -2287,9 +2480,7 @@ def recover_waiting_deployments():
             task = find_by_id(state.get("tasks", []), execution.get("taskId"))
             if task:
                 recovery_items.append((execution.get("id"), copy.deepcopy(task), execution.get("image")))
-        return None
 
-    mutate_state(collect)
     for execution_id, task, image in recovery_items:
         try:
             append_log(execution_id, "检测到等待部署阶段未创建 Agent 任务，自动补发")
@@ -2311,16 +2502,17 @@ def scheduler_loop():
 def mark_agent_task_running(agent_task, agent_instance=None):
     def update(state):
         item = find_by_id(state["agentTasks"], agent_task["id"])
-        if item and item["status"] in {"pending", "running"}:
-            item["status"] = "running"
-            item["updatedAt"] = now_text()
-            if agent_instance:
-                item["assignedAgent"] = agent_instance
+        if not item or item.get("status") not in {"pending", "running"}:
+            return
+        item["status"] = "running"
+        item["updatedAt"] = now_text()
+        if agent_instance:
+            item["assignedAgent"] = agent_instance
         execution = find_by_id(state["executions"], agent_task["executionId"])
-        if execution:
+        if execution and execution.get("status") in ACTIVE_STATUSES:
             execution.setdefault("clusterResults", {})[agent_task["clusterName"]] = "running"
 
-    mutate_state(update)
+    mutate_state(update, detect_changes=True)
 
 
 def agent_task_matches_cluster(item, cluster):
@@ -2352,6 +2544,7 @@ def next_agent_task_for_cluster(agent_tasks, cluster):
 
 def update_agent_result(agent_task_id, status, logs, agent_instance=None):
     notification = None
+    status = status if status in {"success", "failed"} else "failed"
 
     def update(state):
         nonlocal notification
@@ -2361,6 +2554,8 @@ def update_agent_result(agent_task_id, status, logs, agent_instance=None):
         assigned_agent = item.get("assignedAgent")
         if assigned_agent and agent_instance and assigned_agent != agent_instance:
             item.setdefault("logs", []).append({"time": now_text(), "message": f"忽略非当前 Agent 实例回报: {agent_instance}"})
+            return item
+        if item.get("status") in {"success", "failed", "cancelled"}:
             return item
         item["status"] = status
         item["updatedAt"] = now_text()
@@ -2377,7 +2572,7 @@ def update_agent_result(agent_task_id, status, logs, agent_instance=None):
                 execution["stage"] = "发布完成"
                 execution["progress"] = 100
                 task = find_by_id(state["tasks"], execution["taskId"])
-                if task:
+                if task and execution_is_latest_for_task(state, execution):
                     task["status"] = "success"
                     task["stage"] = "发布完成"
                     task["progress"] = 100
@@ -2387,7 +2582,7 @@ def update_agent_result(agent_task_id, status, logs, agent_instance=None):
                 execution["stage"] = "部署异常"
                 execution["progress"] = 100 if execution["status"] == "partial" else max(90, int(execution.get("progress") or 90))
                 task = find_by_id(state["tasks"], execution["taskId"])
-                if task:
+                if task and execution_is_latest_for_task(state, execution):
                     task["status"] = execution["status"]
                     task["stage"] = execution["stage"]
                     task["progress"] = execution["progress"]
@@ -2462,7 +2657,14 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"status": "ok", "database": "postgres" if use_postgres() else "sqlite"})
             return
         if parsed.path == "/api/state":
-            self.send_json(client_state(read_state()))
+            state = read_state()
+            query = parse_qs(parsed.query)
+            compact = query.get("compact", [""])[0] in {"1", "true", "yes"}
+            requested_revision = query.get("revision", [""])[0]
+            if requested_revision and requested_revision == str(state.get("revision") or 0):
+                self.send_json({"unchanged": True, "revision": state.get("revision") or 0})
+                return
+            self.send_json(client_state(state, compact=compact))
             return
         match = re.match(r"^/api/executions/([^/]+)/logs$", parsed.path)
         if match:
@@ -2502,7 +2704,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, status=401)
                 return
             cookie = f"deploy_platform_session={user.get('token')}; Path=/; SameSite=Lax; HttpOnly"
-            self.send_json({"user": user, "state": client_state(state)}, headers={"Set-Cookie": cookie})
+            self.send_json({"user": user}, headers={"Set-Cookie": cookie})
             return
         if parsed.path == "/api/auth/session":
             body = self.read_json_body()
@@ -2524,7 +2726,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"task": task, "state": client_state(state)})
+            self.send_json({"task": task, "state": client_state(state, compact=True)})
             return
         if parsed.path == "/api/secrets":
             body = self.read_json_body()
@@ -2533,7 +2735,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"secret": secret, "state": client_state(state)})
+            self.send_json({"secret": public_secret_config(secret), "state": client_state(state, compact=True)})
             return
         if parsed.path == "/api/tasks/batch-run":
             body = self.read_json_body()
@@ -2542,7 +2744,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"executions": executions, "state": client_state(state)})
+            self.send_json({"executions": executions, "state": client_state(state, compact=True)})
             return
         match = re.match(r"^/api/tasks/([^/]+)/run$", parsed.path)
         if match:
@@ -2552,7 +2754,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"execution": execution, "state": client_state(state)})
+            self.send_json({"execution": execution, "state": client_state(state, compact=True)})
             return
         match = re.match(r"^/api/tasks/([^/]+)/schedule$", parsed.path)
         if match:
@@ -2562,7 +2764,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"schedule": schedule, "state": client_state(state)})
+            self.send_json({"schedule": schedule, "state": client_state(state, compact=True)})
             return
         match = re.match(r"^/api/executions/([^/]+)/cancel$", parsed.path)
         if match:
@@ -2572,7 +2774,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"execution": execution, "state": client_state(state)})
+            self.send_json({"execution": execution, "state": client_state(state, compact=True)})
             return
         match = re.match(r"^/api/schedules/([^/]+)/cancel$", parsed.path)
         if match:
@@ -2582,7 +2784,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"schedule": schedule, "state": client_state(state)})
+            self.send_json({"schedule": schedule, "state": client_state(state, compact=True)})
             return
         if parsed.path == "/api/repositories/branches":
             body = self.read_json_body()
@@ -2632,7 +2834,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"task": task, "state": client_state(state)})
+            self.send_json({"task": task, "state": client_state(state, compact=True)})
             return
         match = re.match(r"^/api/secrets/([^/]+)$", parsed.path)
         if match:
@@ -2642,7 +2844,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"secret": secret, "state": client_state(state)})
+            self.send_json({"secret": public_secret_config(secret), "state": client_state(state, compact=True)})
             return
         self.send_error(404)
 
@@ -2656,7 +2858,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"task": task, "state": client_state(state)})
+            self.send_json({"task": task, "state": client_state(state, compact=True)})
             return
         match = re.match(r"^/api/secrets/([^/]+)$", parsed.path)
         if match:
@@ -2666,7 +2868,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"secret": secret, "state": client_state(state)})
+            self.send_json({"secret": public_secret_config(secret), "state": client_state(state, compact=True)})
             return
         if parsed.path != "/api/state":
             self.send_error(404)
@@ -2679,13 +2881,18 @@ class Handler(SimpleHTTPRequestHandler):
             else:
                 actor = None
                 state = body
-            state = merge_defaults(state)
-            validate_state_update(state, actor)
-            write_state(state)
+            with STATE_LOCK:
+                current_state = read_state()
+                state = merge_defaults(state)
+                state = preserve_existing_user_passwords(state, current_state)
+                state = preserve_sensitive_values(state, current_state)
+                state = preserve_runtime_fields(state, current_state)
+                validate_state_update(state, actor, current_state=current_state)
+                write_state(state, current_state=current_state)
         except Exception as exc:
             self.send_json({"error": str(exc)}, status=400)
             return
-        self.send_json({"ok": True, "state": client_state(read_state())})
+        self.send_json({"ok": True, "state": client_state(state, compact=True)})
 
     def send_json(self, payload, status=200, headers=None):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
