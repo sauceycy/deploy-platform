@@ -52,7 +52,8 @@ CLEAN_WORKSPACE_AFTER_BUILD = os.environ.get("CLEAN_WORKSPACE_AFTER_BUILD", "tru
 CLEAN_LOCAL_IMAGE_AFTER_BUILD = os.environ.get("CLEAN_LOCAL_IMAGE_AFTER_BUILD", "true").lower() != "false"
 DOCKER_PRUNE_AFTER_BUILD = os.environ.get("DOCKER_PRUNE_AFTER_BUILD", "false").lower() == "true"
 CLIENT_LOG_TAIL = int(os.environ.get("CLIENT_LOG_TAIL", "30"))
-MAX_CONCURRENT_EXECUTIONS = max(1, int(os.environ.get("MAX_CONCURRENT_EXECUTIONS", "5")))
+MAX_CONCURRENT_EXECUTIONS = max(1, int(os.environ.get("MAX_CONCURRENT_EXECUTIONS", "1")))
+MAVEN_DOWNLOAD_THREADS = max(1, int(os.environ.get("MAVEN_DOWNLOAD_THREADS", "8")))
 BUILD_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_EXECUTIONS, thread_name_prefix="deploy-build")
 
 DEFAULT_STATE = {
@@ -118,6 +119,14 @@ STATE_LOCK = threading.RLock()
 
 def now_text():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_duration(seconds):
+    seconds = max(0, int(seconds or 0))
+    minutes, rest = divmod(seconds, 60)
+    if minutes:
+        return f"{minutes}分{rest}秒"
+    return f"{rest}秒"
 
 
 def parse_schedule_time(value):
@@ -894,6 +903,24 @@ def apply_maven_settings_to_command(command, settings_path):
     return f"{prefix}{binary} -s {settings_path}{rest}", True
 
 
+def apply_maven_fast_options(command):
+    match = re.match(r"^(\s*)((?:\./)?mvnw|mvn)(\s|$)", str(command or ""))
+    if not match:
+        return command, []
+    prefix, binary = match.group(1), match.group(2)
+    rest = command[match.end(2) :]
+    options = []
+    if not re.search(r"(^|\s)-B(\s|$)", command):
+        options.append("-B")
+    if not re.search(r"(^|\s)-ntp(\s|$)", command):
+        options.append("-ntp")
+    if "maven.artifact.threads" not in command:
+        options.append(f"-Dmaven.artifact.threads={MAVEN_DOWNLOAD_THREADS}")
+    if not options:
+        return command, []
+    return f"{prefix}{binary} {' '.join(options)}{rest}", options
+
+
 def parse_key_value_env(value, label="环境变量", key_pattern=r"^[A-Za-z_][A-Za-z0-9_]*$", key_hint="KEY"):
     env = {}
     for line_number, raw_line in enumerate(str(value or "").splitlines(), start=1):
@@ -1134,6 +1161,7 @@ def run_command(args, cwd=None, input_text=None, env=None):
 
 
 def run_command_stream(args, execution_id, cwd=None, env=None, redact=None, on_cancel=None):
+    started_at = time.monotonic()
     process = subprocess.Popen(
         args,
         cwd=cwd,
@@ -1145,20 +1173,22 @@ def run_command_stream(args, execution_id, cwd=None, env=None, redact=None, on_c
         start_new_session=True,
     )
     output = deque(maxlen=5000)
-    batch = []
+    batch = deque(maxlen=5000)
+    dropped_lines = 0
     output_queue = queue.Queue()
     output_finished = object()
     last_cancel_check = 0
-    last_flush = time.monotonic()
 
     def flush():
-        nonlocal batch, last_flush
+        nonlocal batch, dropped_lines
         if not batch:
             return
         text = "\n".join(batch)
+        if dropped_lines:
+            text = f"[deploy-platform] 前面 {dropped_lines} 行日志已省略，仅保留最后 {len(batch)} 行输出\n{text}"
         append_log(execution_id, redact(text) if redact else text)
-        batch = []
-        last_flush = time.monotonic()
+        batch.clear()
+        dropped_lines = 0
 
     def read_output():
         try:
@@ -1195,11 +1225,11 @@ def run_command_stream(args, execution_id, cwd=None, env=None, redact=None, on_c
                 reader_finished = True
             elif raw_line is not None:
                 output.append(raw_line)
+                if len(batch) == batch.maxlen:
+                    dropped_lines += 1
                 batch.append(raw_line.rstrip("\n"))
 
             current_time = time.monotonic()
-            if batch and (len(batch) >= 20 or current_time - last_flush >= 1):
-                flush()
             if current_time - last_cancel_check >= 0.5:
                 last_cancel_check = current_time
                 if is_execution_cancelled(execution_id):
@@ -1210,7 +1240,8 @@ def run_command_stream(args, execution_id, cwd=None, env=None, redact=None, on_c
                         terminate_process()
                     raise RuntimeError("发布已取消")
         flush()
-        return process.wait(), "".join(output)
+        code = process.wait()
+        return code, "".join(output), time.monotonic() - started_at
     finally:
         if process.poll() is None:
             terminate_process()
@@ -1483,18 +1514,23 @@ def generate_dockerfile(task, app_dir, src_dir):
         return generated, context_dir, static_dir.relative_to(src_dir).as_posix()
 
     if language == "java":
-        generated = src_dir / ".deploy-platform.Dockerfile"
         jars = java_artifact_candidates(task, src_dir, app_dir)
         if not jars:
             target = task.get("artifactPath") or "target/*.jar 或 **/target/*.jar"
             raise RuntimeError(f"未找到 Java 构建产物: {target}")
-        jar = jars[0].relative_to(src_dir).as_posix()
+        context_dir = src_dir / ".deploy-platform-image"
+        if context_dir.exists():
+            shutil.rmtree(context_dir, ignore_errors=True)
+        context_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(jars[0], context_dir / "app.jar")
+        generated = context_dir / "Dockerfile"
         jvm_options = normalize_jvm_options(task.get("jvmOptions"))
         java_opts_line = f"ENV JAVA_TOOL_OPTIONS={dockerfile_env_value(jvm_options)}\n" if jvm_options else "ENV JAVA_TOOL_OPTIONS=\"\"\n"
         generated.write_text(
-            f"FROM {runtime_base(task)}\nWORKDIR /app\nCOPY {jar} app.jar\n{java_opts_line}EXPOSE {port}\nENTRYPOINT [\"java\",\"-jar\",\"/app/app.jar\"]\n",
+            f"FROM {runtime_base(task)}\nWORKDIR /app\nCOPY app.jar app.jar\n{java_opts_line}EXPOSE {port}\nENTRYPOINT [\"java\",\"-jar\",\"/app/app.jar\"]\n",
             encoding="utf-8",
         )
+        return generated, context_dir, jars[0].relative_to(src_dir).as_posix()
     elif language == "golang":
         generated = app_dir / ".deploy-platform.Dockerfile"
         generated.write_text(
@@ -1864,7 +1900,7 @@ def build_and_dispatch(execution_id):
         clone_repo = authenticated_repo_url(task["repo"], git_secret)
         clone_env = clone_environment(work_dir, git_secret)
         clone_cmd = ["git", "clone", "--depth", "1", "--branch", branch, clone_repo, str(src_dir)]
-        code, output = run_command_stream(
+        code, output, elapsed = run_command_stream(
             clone_cmd,
             execution_id,
             env=clone_env,
@@ -1872,6 +1908,7 @@ def build_and_dispatch(execution_id):
         )
         if code != 0:
             raise RuntimeError("代码拉取失败")
+        append_log(execution_id, f"代码拉取耗时: {format_duration(elapsed)}")
         ensure_execution_active(execution_id)
         set_execution_status(execution_id, "building", "代码拉取完成", stage="准备编译", progress=25)
 
@@ -1889,9 +1926,10 @@ def build_and_dispatch(execution_id):
                 append_log(execution_id, f"已注入 CF Pages 部署环境变量: {', '.join(sorted(build_env.keys()))}")
             command = pages_deploy_command(pages_task)
             set_execution_status(execution_id, "deploying", f"本机执行 CF Pages 部署命令: {command}", stage="CF Pages 部署", progress=55)
-            code, output = run_sdk_command(execution_id, pages_task, command, src_dir, build_env)
+            code, output, elapsed = run_sdk_command(execution_id, pages_task, command, src_dir, build_env)
             if code != 0:
                 raise RuntimeError("CF Pages 部署命令执行失败")
+            append_log(execution_id, f"CF Pages 部署命令耗时: {format_duration(elapsed)}")
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "success", "CF Pages 部署完成", stage="发布完成", progress=100)
             send_notification(task, "BUILD_SUCCESS", "CF Pages 部署完成")
@@ -1900,6 +1938,13 @@ def build_and_dispatch(execution_id):
         command = task.get("buildCommand") or ""
         if command:
             set_execution_status(execution_id, "building", f"使用 {task.get('sdk')} 执行编译命令", stage="执行编译", progress=35)
+            command, fast_options = apply_maven_fast_options(command)
+            if fast_options:
+                append_log(execution_id, f"已启用 Maven 构建优化参数: {' '.join(fast_options)}")
+            if re.search(r"(^|\s)-U(\s|$)", command):
+                append_log(execution_id, "检测到 Maven -U 参数，本次会强制检查依赖更新；如依赖没有频繁更新，去掉 -U 可明显加快后续构建。")
+            if "-DskipTests" in command and "maven.test.skip" not in command:
+                append_log(execution_id, "检测到 -DskipTests：它只跳过测试执行，仍会编译测试代码；发布场景可考虑改用 -Dmaven.test.skip=true。")
             maven_settings_path = write_maven_settings(task, src_dir)
             if maven_settings_path:
                 original_command = command
@@ -1913,9 +1958,10 @@ def build_and_dispatch(execution_id):
             build_env = parse_build_env(task.get("buildEnv"))
             if build_env:
                 append_log(execution_id, f"已注入构建环境变量: {', '.join(sorted(build_env.keys()))}")
-            code, output = run_sdk_command(execution_id, task, command, src_dir, build_env)
+            code, output, elapsed = run_sdk_command(execution_id, task, command, src_dir, build_env)
             if code != 0:
                 raise RuntimeError("编译命令执行失败")
+            append_log(execution_id, f"编译命令耗时: {format_duration(elapsed)}")
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "building", "编译命令执行完成", stage="生成镜像", progress=55)
 
@@ -1928,9 +1974,10 @@ def build_and_dispatch(execution_id):
         if task_app_type(task) == "frontend":
             append_log(execution_id, "前端静态站点使用平台生成的 nginx 镜像，不执行项目自带 Dockerfile。")
         set_execution_status(execution_id, "building", f"开始构建镜像 {image}", stage="构建镜像", progress=65)
-        code, output = run_command_stream(["docker", "build", "-t", image, "-f", str(dockerfile), "."], execution_id, cwd=docker_context)
+        code, output, elapsed = run_command_stream(["docker", "build", "-t", image, "-f", str(dockerfile), "."], execution_id, cwd=docker_context)
         if code != 0:
             raise RuntimeError("Docker 镜像构建失败")
+        append_log(execution_id, f"Docker 镜像构建耗时: {format_duration(elapsed)}")
         image_built = True
         ensure_execution_active(execution_id)
         set_execution_status(execution_id, "building", "Docker 镜像构建完成", image=image, stage="准备推送", progress=72)
@@ -1952,9 +1999,10 @@ def build_and_dispatch(execution_id):
                     raise RuntimeError("镜像仓库登录失败")
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "building", f"推送镜像 {image}", stage="推送镜像", progress=78)
-            code, output = run_command_stream(["docker", "push", image], execution_id, env=registry_env)
+            code, output, elapsed = run_command_stream(["docker", "push", image], execution_id, env=registry_env)
             if code != 0:
                 raise RuntimeError("镜像推送失败")
+            append_log(execution_id, f"镜像推送耗时: {format_duration(elapsed)}")
             image_pushed = True
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "building", "镜像推送完成", image=image, stage="等待部署", progress=84)

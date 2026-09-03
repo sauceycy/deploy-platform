@@ -133,12 +133,13 @@ docker compose up -d --build
 
 ## 接口性能
 
-平台默认接口会返回轻量状态：执行日志只带最近 30 条，Agent 发布任务不会把完整 manifest payload 下发到浏览器。打开任务详情的「构建日志」标签时，前端会单独请求该执行记录的完整日志。
+平台默认接口会返回轻量状态：执行日志只带最近 30 条，Agent 发布任务不会把完整 manifest payload 下发到浏览器。打开任务详情的「构建日志」标签时，前端会单独请求该执行记录的完整日志。SDK 编译、Docker build、镜像推送等命令运行期间只更新阶段状态，命令结束后再写入命令输出日志，避免大量 Maven 日志反复写数据库影响构建速度。
 
 可以通过环境变量调整默认日志尾部数量：
 
 ```text
 CLIENT_LOG_TAIL=30
+MAX_CONCURRENT_EXECUTIONS=1
 ```
 
 ## Agent 部署
@@ -290,6 +291,22 @@ Git 凭据：选择 GitLab 账号密码
 发布中可以点击「取消」。如果当前正在执行 Maven/Docker 等命令，平台会在该命令返回后停止后续阶段。任务不在发布中时，可以点击「删除」清理任务配置、执行记录和定时计划。
 
 Java 任务编译时会使用 Maven + Temurin JDK 构建镜像，例如 `jdk17` 会使用 `maven:3-eclipse-temurin-17` 执行 `mvn clean package -DskipTests`；最终运行镜像仍使用 Temurin JRE。
+
+平台会自动挂载持久化 Maven 缓存到构建容器的 `/root/.m2`，并为 `mvn` / `./mvnw` 命令自动追加：
+
+```text
+-B -ntp -Dmaven.artifact.threads=8
+```
+
+这样可以减少 Maven 进度日志，并提高依赖下载并发。`MAVEN_DOWNLOAD_THREADS` 环境变量可以调整依赖下载线程数。正式发布时不建议长期保留 `-U`，它会让 Maven 每次强制检查依赖更新，后续构建会明显变慢；只有确认需要刷新 SNAPSHOT 或私服依赖时再临时加上。
+
+如果发布命令使用 `-DskipTests`，Maven 仍会执行 `testResources` 和 `testCompile`，只是跳过测试运行。纯发布场景可以改成：
+
+```text
+mvn package -Dmaven.test.skip=true -pl ruoyi-admin -am
+```
+
+平台自动生成 Java 镜像时，只会把最终 `app.jar` 放入 Docker build context，不再把整个代码仓库发送给 Docker，减少大仓库打镜像耗时。
 
 Java 任务可以在「运行配置」填写「JVM 启动参数」，例如：
 
