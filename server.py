@@ -521,14 +521,10 @@ def execution_is_latest_for_task(state, execution):
 
 
 def active_execution_for_task(state, task_id):
-    return next(
-        (
-            item
-            for item in state.get("executions", [])
-            if str(item.get("taskId")) == str(task_id) and is_active_status(item.get("status"))
-        ),
-        None,
-    )
+    latest = latest_execution_for_task(state, task_id)
+    if latest and is_active_status(latest.get("status")):
+        return latest
+    return None
 
 
 def find_user(state, username):
@@ -2052,6 +2048,54 @@ def cancel_execution(execution_id, actor):
     return execution, state
 
 
+def recover_interrupted_executions():
+    recovered = []
+
+    def update(state):
+        for execution in state.get("executions", []):
+            if not is_active_status(execution.get("status")):
+                continue
+            execution["status"] = "failed"
+            execution["stage"] = "执行中断"
+            execution["progress"] = execution.get("progress") or 0
+            execution["updatedAt"] = now_text()
+            execution.setdefault("logs", []).append(
+                {
+                    "time": now_text(),
+                    "message": "平台服务已重启，内存执行队列无法恢复，本次发布已自动释放，请重新发布",
+                }
+            )
+            recovered.append(execution.get("id"))
+            task = find_by_id(state.get("tasks", []), execution.get("taskId"))
+            if task and execution_is_latest_for_task(state, execution):
+                task["status"] = "failed"
+                task["stage"] = "执行中断"
+                task["progress"] = execution["progress"]
+                task["lastRun"] = now_text()
+        for item in state.get("agentTasks", []):
+            if item.get("status") in {"pending", "running"}:
+                item["status"] = "cancelled"
+                item["updatedAt"] = now_text()
+                item.setdefault("logs", []).append({"time": now_text(), "message": "平台服务重启，发布执行已释放"})
+        if recovered:
+            state["auditLogs"].insert(
+                0,
+                {
+                    "time": now_text(),
+                    "actor": "system",
+                    "action": "恢复执行队列",
+                    "target": f"{len(recovered)} 个执行记录",
+                    "result": "已释放",
+                },
+            )
+        return recovered
+
+    recovered, _state = mutate_state(update, detect_changes=True)
+    if recovered:
+        print(f"Recovered interrupted executions: {', '.join(str(item) for item in recovered)}", flush=True)
+    return recovered
+
+
 def delete_task(task_id, actor):
     def update(state):
         task = find_by_id(state["tasks"], task_id)
@@ -2908,6 +2952,7 @@ class Handler(SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     read_state()
+    recover_interrupted_executions()
     threading.Thread(target=scheduler_loop, daemon=True).start()
     port = int(os.environ.get("PORT", "80"))
     db_kind = "postgres" if use_postgres() else f"sqlite={DB_PATH}"
