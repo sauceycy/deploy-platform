@@ -1964,7 +1964,41 @@ def lark_notification_card(task, event, event_label, message, event_time):
     }
 
 
-def send_notification(task, event, message):
+def sign_lark_payload(payload, secret):
+    secret = str(secret or "")
+    if not secret:
+        return payload
+    timestamp = str(int(time.time()))
+    string_to_sign = f"{timestamp}\n{secret}".encode("utf-8")
+    sign = base64.b64encode(hmac.new(string_to_sign, b"", digestmod=hashlib.sha256).digest()).decode("utf-8")
+    signed = copy.deepcopy(payload)
+    signed["timestamp"] = timestamp
+    signed["sign"] = sign
+    return signed
+
+
+def resolve_notify_channel(task, channels):
+    notify = task.get("notify") if isinstance(task.get("notify"), dict) else {}
+    channel_id = str(notify.get("channelId") or "").strip()
+    target = str(notify.get("target") or "").strip()
+    channel_key = str(notify.get("channel") or "").strip()
+    if channel_id:
+        channel = next((item for item in channels if str(item.get("id")) == channel_id), None)
+        if channel:
+            return channel
+    return next(
+        (
+            item
+            for item in channels
+            if str(item.get("id")) in {target, channel_key}
+            or str(item.get("name") or "") in {target, channel_key}
+            or str(item.get("target") or "") in {target, channel_key}
+        ),
+        None,
+    )
+
+
+def send_notification(task, event, message, execution_id=None):
     event_labels = {
         "BUILD_SUCCESS": "发布成功",
         "BUILD_FAILED": "构建失败",
@@ -1976,11 +2010,12 @@ def send_notification(task, event, message):
     if enabled_events and event_label not in enabled_events:
         return
     channels = read_state().get("notifyChannels", [])
-    target = task.get("notify", {}).get("target") or ""
-    channel_key = task.get("notify", {}).get("channel") or ""
-    channel = next((item for item in channels if str(item.get("id")) in {str(target), str(channel_key)} or item.get("name") in {target, channel_key} or item.get("target") in {target, channel_key}), None)
+    target = str(task.get("notify", {}).get("target") or "").strip()
+    channel = resolve_notify_channel(task, channels)
     url = (channel or {}).get("target") or target
     if not url.startswith("http"):
+        if execution_id:
+            append_log(execution_id, "通知发送跳过: 未配置有效通知渠道或 Webhook 地址")
         return
     event_time = now_text()
     actor = task.get("lastActor") or task.get("actor") or "system"
@@ -1988,15 +2023,31 @@ def send_notification(task, event, message):
     channel_type = (channel or {}).get("type") or "webhook"
     if channel_type == "feishu":
         payload = lark_notification_card(task, event, event_label, message, event_time)
+        payload = sign_lark_payload(payload, (channel or {}).get("secret"))
     elif channel_type in {"wecom", "dingtalk"}:
         payload = {"msgtype": "text", "text": {"content": text}}
     else:
         payload = {"task": task.get("name"), "actor": actor, "event": event, "eventLabel": event_label, "message": message, "time": event_time, "text": text}
     try:
         req = Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json"})
-        urlopen(req, timeout=5).read()
-    except Exception:
-        pass
+        response_body = urlopen(req, timeout=5).read().decode("utf-8", errors="replace")
+        try:
+            response_json = json.loads(response_body or "{}")
+        except Exception:
+            response_json = {}
+        error_code = response_json.get("code", response_json.get("StatusCode", 0))
+        error_message = response_json.get("msg") or response_json.get("message") or response_json.get("StatusMessage") or response_body
+        if error_code not in {0, "0", None, ""}:
+            raise RuntimeError(f"机器人返回错误: {error_code} {error_message}")
+        if execution_id:
+            append_log(execution_id, f"通知已发送: {channel.get('name') if channel else url}")
+        return response_body
+    except Exception as exc:
+        error = f"通知发送失败: {channel.get('name') if channel else url} / {exc}"
+        if execution_id:
+            append_log(execution_id, error)
+        print(error, flush=True)
+        return None
 
 
 def build_and_dispatch(execution_id):
@@ -2065,7 +2116,7 @@ def build_and_dispatch(execution_id):
             append_log(execution_id, f"CF Pages 部署命令耗时: {format_duration(elapsed)}")
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "success", "CF Pages 部署完成", stage="发布完成", progress=100)
-            send_notification(task, "BUILD_SUCCESS", "CF Pages 部署完成")
+            send_notification(task, "BUILD_SUCCESS", "CF Pages 部署完成", execution_id)
             return
 
         command = task.get("buildCommand") or ""
@@ -2154,7 +2205,7 @@ def build_and_dispatch(execution_id):
         latest = read_state()
         current = find_by_id(latest["executions"], execution_id) or {}
         set_execution_status(execution_id, "failed", str(exc), stage=current.get("stage") or "执行失败", progress=current.get("progress") or 100)
-        send_notification(task, failure_event, str(exc))
+        send_notification(task, failure_event, str(exc), execution_id)
     finally:
         cleanup_build_artifacts(execution_id, work_dir, image, image_built and image_pushed)
 
@@ -2347,6 +2398,7 @@ def normalize_task_payload(payload):
         "jvmOptions": normalize_jvm_options(payload.get("jvmOptions")),
         "clusters": normalized_clusters,
         "notify": {
+            "channelId": str(notify.get("channelId") or "").strip(),
             "channel": notify.get("channel") or "企业微信",
             "target": notify.get("target") or "",
             "events": notify.get("events") if isinstance(notify.get("events"), list) else [],
@@ -2393,6 +2445,13 @@ def save_task_config(task_id, payload, actor):
             secret = git_secret_by_id(state, task_payload.get("gitCredentialId"))
             if not user_can_access_asset(state, actor_user, secret):
                 raise ValueError(f"当前用户组无权绑定该 Git 凭据: {secret.get('name')}")
+        notify_channel_id = (task_payload.get("notify") or {}).get("channelId")
+        if notify_channel_id:
+            notify_channel = find_by_id(state.get("notifyChannels", []), notify_channel_id)
+            if not notify_channel:
+                raise ValueError("通知渠道不存在")
+            if not user_can_access_asset(state, actor_user, notify_channel):
+                raise ValueError("当前用户组无权绑定该通知渠道")
         for target in task_payload.get("clusters", []):
             cluster = next((item for item in state.get("clusters", []) if item.get("name") == target.get("name")), None)
             if cluster and not user_can_access_asset(state, actor_user, cluster):
@@ -2802,7 +2861,7 @@ def update_agent_result(agent_task_id, status, logs, agent_instance=None):
                     task["status"] = "success"
                     task["stage"] = "发布完成"
                     task["progress"] = 100
-                    notification = (copy.deepcopy(task), "BUILD_SUCCESS", f"集群 {item['clusterName']} 部署完成")
+                    notification = (copy.deepcopy(task), "BUILD_SUCCESS", f"集群 {item['clusterName']} 部署完成", execution.get("id"))
             elif any(value == "failed" for value in statuses):
                 execution["status"] = "partial" if any(value == "success" for value in statuses) else "failed"
                 execution["stage"] = "部署异常"
@@ -2812,7 +2871,7 @@ def update_agent_result(agent_task_id, status, logs, agent_instance=None):
                     task["status"] = execution["status"]
                     task["stage"] = execution["stage"]
                     task["progress"] = execution["progress"]
-                    notification = (copy.deepcopy(task), "DEPLOY_FAILED", logs or f"集群 {item['clusterName']} 部署失败")
+                    notification = (copy.deepcopy(task), "DEPLOY_FAILED", logs or f"集群 {item['clusterName']} 部署失败", execution.get("id"))
         return item
 
     item, state = mutate_state(update)

@@ -2711,8 +2711,9 @@ function buildPreviewObject() {
     },
     clusters: normalizeDeployRule(formValue("deployRule")) === "cf_pages" ? [] : clusterDrafts,
     notify: {
+      channelId: selectedNotifyChannel()?.id || "",
       channel: selectedNotifyChannel()?.name || formValue("notifyChannel"),
-      target: selectedNotifyChannel()?.name || formValue("notifyTarget"),
+      target: selectedNotifyChannel()?.target || formValue("notifyTarget"),
       events: selectedEvents(),
     },
   };
