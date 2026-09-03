@@ -94,7 +94,11 @@ const APP_USER_KEY = "deploy-platform-user";
 const APP_VIEW_KEY = "deploy-platform-view";
 const STATE_SAVE_TIMEOUT_MS = 20000;
 const MAX_BATCH_DEPLOY_TASKS = 5;
+const STATE_REFRESH_INTERVAL_MS = 10000;
 let refreshTimer = null;
+let stateSocket = null;
+let stateSocketRetryTimer = null;
+let stateSocketRetryDelay = 1000;
 let refreshPromise = null;
 let stateLoadError = "";
 let pendingStateWrites = 0;
@@ -1638,12 +1642,16 @@ function renderTaskOverviewTab(task, latestExecution, activeSchedule) {
 }
 
 function renderTaskLogsTab(latestExecution) {
+  const runningHint = latestExecution && isTaskActive(latestExecution)
+    ? `<p class="form-hint">任务执行中只展示阶段状态和摘要，详细命令输出会在当前命令结束后刷新。</p>`
+    : "";
   return `
     <section class="detail-section detail-card log-detail-card">
       <div class="section-title-row">
         <h3>构建与部署日志</h3>
         <span class="muted">${latestExecution ? latestExecution.id : "暂无执行"}</span>
       </div>
+      ${runningHint}
       ${
         latestExecution
           ? renderLogViewer(latestExecution)
@@ -1655,6 +1663,7 @@ function renderTaskLogsTab(latestExecution) {
 
 async function ensureFullExecutionLogs(execution) {
   if (!execution?.id || !Number.isFinite(Number(execution.logCount))) return;
+  if (isTaskActive(execution)) return;
   if ((execution.logs || []).length >= Number(execution.logCount)) return;
   if (loadingExecutionLogs.has(String(execution.id))) return;
   loadingExecutionLogs.add(String(execution.id));
@@ -3606,14 +3615,120 @@ function render() {
 }
 
 function syncAutoRefresh() {
+  if (state.currentUser && !document.hidden) connectStateSocket();
   const hasActiveTask = tasks.some((task) => isTaskActive(task)) || executions.some((execution) => isTaskActive(execution));
+  if (stateSocket && stateSocket.readyState === WebSocket.OPEN) {
+    if (refreshTimer) {
+      window.clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+    return;
+  }
   if (hasActiveTask && !refreshTimer) {
-    refreshTimer = window.setInterval(refreshRemoteState, 3000);
+    refreshTimer = window.setInterval(refreshRemoteState, STATE_REFRESH_INTERVAL_MS);
   }
   if (!hasActiveTask && refreshTimer) {
     window.clearInterval(refreshTimer);
     refreshTimer = null;
   }
+}
+
+function wsUrl() {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/api/ws`;
+}
+
+function closeStateSocket() {
+  if (stateSocket) {
+    try {
+      stateSocket.onopen = null;
+      stateSocket.onmessage = null;
+      stateSocket.onclose = null;
+      stateSocket.onerror = null;
+      stateSocket.close();
+    } catch {}
+    stateSocket = null;
+  }
+  if (stateSocketRetryTimer) {
+    window.clearTimeout(stateSocketRetryTimer);
+    stateSocketRetryTimer = null;
+  }
+}
+
+function scheduleStateSocketReconnect() {
+  if (!state.currentUser || document.hidden) return;
+  if (stateSocketRetryTimer) return;
+  stateSocketRetryTimer = window.setTimeout(() => {
+    stateSocketRetryTimer = null;
+    connectStateSocket();
+  }, stateSocketRetryDelay);
+  stateSocketRetryDelay = Math.min(stateSocketRetryDelay * 2, 30000);
+}
+
+function applySocketMessage(message) {
+  if (!message || typeof message !== "object") return;
+  if (message.type === "state" && message.state) {
+    const changed = hydrateState(message.state);
+    if (changed) {
+      render();
+      followLatestLog();
+    }
+    return;
+  }
+  if (message.type === "execution_log") {
+    const execution = executions.find((item) => String(item.id) === String(message.executionId));
+    if (!execution || !message.log) return;
+    execution.logs = Array.isArray(execution.logs) ? execution.logs : [];
+    execution.logs.push(message.log);
+    execution.logCount = Number(message.logCount || execution.logs.length);
+    execution.latestLog = message.log;
+    if (state.view === "taskDetail" && state.detailTab === "logs") {
+      const focusedExecution = detailExecutionForTask(execution.taskId);
+      if (focusedExecution && String(focusedExecution.id) === String(execution.id)) {
+        renderTaskDetailPage();
+        lucide.createIcons();
+        followLatestLog();
+      }
+    }
+    return;
+  }
+}
+
+function connectStateSocket() {
+  if (!state.currentUser || typeof WebSocket === "undefined") return false;
+  if (stateSocket && (stateSocket.readyState === WebSocket.OPEN || stateSocket.readyState === WebSocket.CONNECTING)) {
+    return true;
+  }
+  closeStateSocket();
+  try {
+    stateSocket = new WebSocket(wsUrl());
+  } catch {
+    scheduleStateSocketReconnect();
+    return false;
+  }
+  stateSocketRetryDelay = 1000;
+  stateSocket.onmessage = (event) => {
+    try {
+      applySocketMessage(JSON.parse(event.data));
+    } catch {}
+  };
+  stateSocket.onclose = () => {
+    stateSocket = null;
+    scheduleStateSocketReconnect();
+    syncAutoRefresh();
+  };
+  stateSocket.onerror = () => {
+    try {
+      stateSocket.close();
+    } catch {}
+  };
+  stateSocket.onopen = () => {
+    if (refreshTimer) {
+      window.clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+  };
+  return true;
 }
 
 function authUserSnapshot(user) {
@@ -3677,6 +3792,7 @@ async function restoreSession(savedUser) {
 function logout() {
   window.localStorage.removeItem(APP_USER_KEY);
   state.currentUser = null;
+  closeStateSocket();
   postJson("/api/auth/logout", {}).catch(() => {});
   closeDrawer();
   renderAuth();
@@ -4119,7 +4235,17 @@ window.addEventListener("popstate", () => {
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && state.currentUser) refreshRemoteState({ force: true });
+  if (document.hidden) {
+    if (refreshTimer) {
+      window.clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+    return;
+  }
+  if (state.currentUser) {
+    connectStateSocket();
+    refreshRemoteState({ force: true });
+  }
 });
 
 init();

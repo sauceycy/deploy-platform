@@ -133,13 +133,26 @@ docker compose up -d --build
 
 ## 接口性能
 
-平台默认接口会返回轻量状态：执行日志只带最近 30 条，Agent 发布任务不会把完整 manifest payload 下发到浏览器。打开任务详情的「构建日志」标签时，前端会单独请求该执行记录的完整日志。SDK 编译、Docker build、镜像推送等命令运行期间只更新阶段状态，命令结束后再写入命令输出日志，避免大量 Maven 日志反复写数据库影响构建速度。
+平台默认接口会返回轻量状态：执行日志只带最近 30 条，Agent 发布任务不会把完整 manifest payload 下发到浏览器。登录后浏览器会优先连接 `/api/ws`，由后端通过 WebSocket 推送状态变化和执行日志增量；如果 WebSocket 连接失败，前端会自动回退为低频 HTTP 轮询。打开任务详情的「构建日志」标签时，前端会单独请求该执行记录的完整日志。SDK 编译、Docker build、镜像推送等命令运行期间只更新阶段状态，命令结束后再写入命令输出日志，避免大量 Maven 日志反复写数据库影响构建速度。
 
 可以通过环境变量调整默认日志尾部数量：
 
 ```text
 CLIENT_LOG_TAIL=30
 MAX_CONCURRENT_EXECUTIONS=1
+```
+
+如果平台前面有 Nginx 反向代理，需要为 WebSocket 增加 Upgrade 头：
+
+```nginx
+location /api/ws {
+    proxy_pass http://127.0.0.1:8099;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 3600s;
+}
 ```
 
 ## Agent 部署

@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+import socket
 import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -115,6 +116,8 @@ DEFAULT_STATE = {
 }
 
 STATE_LOCK = threading.RLock()
+WS_CLIENTS = set()
+WS_LOCK = threading.RLock()
 
 
 def now_text():
@@ -437,7 +440,7 @@ def read_state():
         return merge_defaults(json.loads(row[0]))
 
 
-def write_state(state, current_state=None):
+def write_state(state, current_state=None, broadcast=True):
     current_state = current_state if current_state is not None else read_raw_state()
     state = merge_defaults(state)
     state = preserve_existing_user_passwords(state, current_state)
@@ -461,16 +464,80 @@ def write_state(state, current_state=None):
                     "INSERT INTO app_state (key, value) VALUES ('state', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     (payload,),
                 )
+    if broadcast:
+        broadcast_state(state)
 
 
-def mutate_state(fn, detect_changes=False):
+def websocket_accept_key(key):
+    digest = hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def websocket_frame(payload):
+    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    length = len(data)
+    if length < 126:
+        header = bytes([0x81, length])
+    elif length < 65536:
+        header = bytes([0x81, 126, (length >> 8) & 0xFF, length & 0xFF])
+    else:
+        header = bytes(
+            [
+                0x81,
+                127,
+                (length >> 56) & 0xFF,
+                (length >> 48) & 0xFF,
+                (length >> 40) & 0xFF,
+                (length >> 32) & 0xFF,
+                (length >> 24) & 0xFF,
+                (length >> 16) & 0xFF,
+                (length >> 8) & 0xFF,
+                length & 0xFF,
+            ]
+        )
+    return header + data
+
+
+def read_exact(conn, length):
+    data = bytearray()
+    while len(data) < length:
+        chunk = conn.recv(length - len(data))
+        if not chunk:
+            raise ConnectionError("websocket closed")
+        data.extend(chunk)
+    return bytes(data)
+
+
+def broadcast_ws(payload):
+    frame = websocket_frame(payload)
+    with WS_LOCK:
+        clients = list(WS_CLIENTS)
+    stale = []
+    for client in clients:
+        try:
+            client.connection.sendall(frame)
+        except Exception:
+            stale.append(client)
+    if stale:
+        with WS_LOCK:
+            for client in stale:
+                WS_CLIENTS.discard(client)
+
+
+def broadcast_state(state):
+    if not WS_CLIENTS:
+        return
+    broadcast_ws({"type": "state", "state": client_state(state, compact=True)})
+
+
+def mutate_state(fn, detect_changes=False, broadcast=True):
     with STATE_LOCK:
         state = read_state()
         previous = canonical_json(state) if detect_changes else None
         result = fn(state)
         if detect_changes and canonical_json(state) == previous:
             return result, state
-        write_state(state, current_state=state)
+        write_state(state, current_state=state, broadcast=broadcast)
         return result, state
 
 
@@ -478,9 +545,23 @@ def append_log(execution_id, message):
     def update(state):
         execution = find_by_id(state["executions"], execution_id)
         if execution:
-            execution.setdefault("logs", []).append({"time": now_text(), "message": message})
+            log_entry = {"time": now_text(), "message": message}
+            execution.setdefault("logs", []).append(log_entry)
+            return execution, log_entry
+        return None, None
 
-    mutate_state(update)
+    result, _ = mutate_state(update, broadcast=False)
+    execution, log_entry = result or (None, None)
+    if execution and log_entry:
+        broadcast_ws(
+            {
+                "type": "execution_log",
+                "executionId": execution.get("id"),
+                "taskId": execution.get("taskId"),
+                "log": log_entry,
+                "logCount": len(execution.get("logs") or []),
+            }
+        )
 
 
 def set_execution_status(execution_id, status, message=None, image=None, stage=None, progress=None):
@@ -2743,10 +2824,79 @@ class Handler(SimpleHTTPRequestHandler):
             return False
         return True
 
+    def require_session_user(self):
+        try:
+            user, _ = session_user(self.cookie_value("deploy_platform_session"))
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, status=401)
+            return None
+        return user
+
+    def websocket_handshake(self):
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        if not key:
+            self.send_error(400)
+            return False
+        accept = websocket_accept_key(key)
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+        return True
+
+    def websocket_send(self, payload):
+        frame = websocket_frame(payload)
+        self.connection.sendall(frame)
+
+    def websocket_serve(self, initial_state):
+        if not self.websocket_handshake():
+            return
+        with WS_LOCK:
+            WS_CLIENTS.add(self)
+        try:
+            self.websocket_send({"type": "state", "state": client_state(initial_state, compact=True)})
+            self.connection.settimeout(1.0)
+            while True:
+                try:
+                    chunk = read_exact(self.connection, 2)
+                    if not chunk:
+                        break
+                    opcode = chunk[0] & 0x0F
+                    length = chunk[1] & 0x7F
+                    if length == 126:
+                        length = int.from_bytes(read_exact(self.connection, 2), "big")
+                    elif length == 127:
+                        length = int.from_bytes(read_exact(self.connection, 8), "big")
+                    masked = bool(chunk[1] & 0x80)
+                    mask = read_exact(self.connection, 4) if masked else b""
+                    payload = bytearray(read_exact(self.connection, length)) if length else bytearray()
+                    if masked and payload:
+                        for i in range(len(payload)):
+                            payload[i] ^= mask[i % 4]
+                    if opcode == 0x8:
+                        break
+                except socket.timeout:
+                    continue
+        finally:
+            with WS_LOCK:
+                WS_CLIENTS.discard(self)
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
             self.send_json({"status": "ok", "database": "postgres" if use_postgres() else "sqlite"})
+            return
+        if parsed.path == "/api/ws":
+            user = self.require_session_user()
+            if not user:
+                return
+            state = read_state()
+            self.websocket_serve(state)
             return
         if parsed.path == "/api/state":
             state = read_state()
