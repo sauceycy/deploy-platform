@@ -523,6 +523,18 @@
               <span>Pages 部署命令</span>
               <input name="pagesDeployCommand" placeholder="npm run deploy" />
             </label>
+            <label class="wide-field pages-deploy-field" hidden>
+              <span>Cloudflare Account ID</span>
+              <select name="cloudflareAccountIdSecretId" id="cloudflareAccountIdSecretSelect">
+                <option value="">不使用秘钥</option>
+              </select>
+            </label>
+            <label class="wide-field pages-deploy-field" hidden>
+              <span>Cloudflare API Token</span>
+              <select name="cloudflareApiTokenSecretId" id="cloudflareApiTokenSecretSelect">
+                <option value="">不使用秘钥</option>
+              </select>
+            </label>
             <label class="wide-field artifact-path-field">
               <span id="artifactPathLabel">JAR 包路径</span>
               <input name="artifactPath" id="artifactPathInput" placeholder="ruoyi-admin/target/*.jar" />
@@ -870,6 +882,8 @@
               <option value="registry">镜像仓库账号</option>
               <option value="agent_token">Agent Token 记录</option>
               <option value="webhook">Webhook Secret</option>
+              <option value="cloudflare_account_id">Cloudflare Account ID</option>
+              <option value="cloudflare_api_token">Cloudflare API Token</option>
             </select>
           </label>
           <label>
@@ -1030,6 +1044,8 @@
             <option value="registry">镜像仓库账号</option>
             <option value="agent_token">Agent Token 记录</option>
             <option value="webhook">Webhook Secret</option>
+            <option value="cloudflare_account_id">Cloudflare Account ID</option>
+            <option value="cloudflare_api_token">Cloudflare API Token</option>
           </select>
         </label>
         <label>

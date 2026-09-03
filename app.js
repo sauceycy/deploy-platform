@@ -172,6 +172,8 @@ const deployRuleSelect = document.getElementById("deployRuleSelect");
 const appTypeSelect = document.getElementById("appTypeSelect");
 const taskTemplateSelect = document.getElementById("taskTemplateSelect");
 const pagesPackageManagerSelect = document.getElementById("pagesPackageManagerSelect");
+const cloudflareAccountIdSecretSelect = document.getElementById("cloudflareAccountIdSecretSelect");
+const cloudflareApiTokenSecretSelect = document.getElementById("cloudflareApiTokenSecretSelect");
 const taskForm = document.getElementById("taskForm");
 const taskOrganizationSelect = document.getElementById("taskOrganizationSelect");
 const clusterOrganizationSelect = document.getElementById("clusterOrganizationSelect");
@@ -978,7 +980,7 @@ function appTypeLabel(type) {
 }
 
 function defaultPagesDeployCommand(packageManager) {
-  return packageManager === "pnpm" ? "pnpm deploy" : "npm run deploy";
+  return packageManager === "pnpm" ? "pnpm run deploy" : "npm run deploy";
 }
 
 function channelLabel(type) {
@@ -1051,6 +1053,8 @@ function secretTypeLabel(type) {
     registry: "镜像仓库账号",
     agent_token: "Agent Token 记录",
     webhook: "Webhook Secret",
+    cloudflare_account_id: "Cloudflare Account ID",
+    cloudflare_api_token: "Cloudflare API Token",
   }[type] || type;
 }
 
@@ -1062,6 +1066,8 @@ function secretNamePlaceholder(type) {
     registry: "例如 aliyun-acr-pull",
     agent_token: "例如 trade-test-agent-token",
     webhook: "例如 deploy-alert-webhook",
+    cloudflare_account_id: "例如 cf-account-id",
+    cloudflare_api_token: "例如 cf-api-token",
   }[type] || "例如 my-secret";
 }
 
@@ -1097,6 +1103,18 @@ function syncSecretFieldHints(form, type) {
       secret: "镜像仓库密码或访问令牌",
       knownHosts: "镜像仓库不需要填写",
     },
+    cloudflare_account_id: {
+      target: "留空即可",
+      username: "留空即可",
+      secret: "粘贴 Cloudflare Account ID",
+      knownHosts: "留空即可",
+    },
+    cloudflare_api_token: {
+      target: "留空即可",
+      username: "留空即可",
+      secret: "粘贴 Cloudflare API Token",
+      knownHosts: "留空即可",
+    },
   }[type] || {};
   if (form.elements.target) form.elements.target.placeholder = hints.target || "地址或用途";
   if (form.elements.username) form.elements.username.placeholder = hints.username || "用户名";
@@ -1115,6 +1133,24 @@ function gitCredentialOptions(selectedId = "") {
     `<option value="">不使用凭据</option>`,
     ...gitSecrets.map((item) => `<option value="${item.id}" ${String(item.id) === String(selectedId) ? "selected" : ""}>${item.name} / ${secretTypeLabel(item.type)}</option>`),
   ].join("");
+}
+
+function secretOptionsByTypes(types, selectedId = "", emptyLabel = "不使用秘钥") {
+  const allowedTypes = Array.isArray(types) ? types : [types];
+  const visibleSecrets = secrets.filter((item) => allowedTypes.includes(item.type) && (canAccessAsset(item) || String(item.id) === String(selectedId)));
+  return [
+    `<option value="">${emptyLabel}</option>`,
+    ...visibleSecrets.map((item) => `<option value="${item.id}" ${String(item.id) === String(selectedId) ? "selected" : ""}>${item.name} / ${secretTypeLabel(item.type)}</option>`),
+  ].join("");
+}
+
+function renderCloudflareSecretOptions() {
+  if (cloudflareAccountIdSecretSelect) {
+    cloudflareAccountIdSecretSelect.innerHTML = secretOptionsByTypes("cloudflare_account_id", taskForm.elements.cloudflareAccountIdSecretId?.value || "");
+  }
+  if (cloudflareApiTokenSecretSelect) {
+    cloudflareApiTokenSecretSelect.innerHTML = secretOptionsByTypes("cloudflare_api_token", taskForm.elements.cloudflareApiTokenSecretId?.value || "");
+  }
 }
 
 function imagePullSecretOptions(selectedId = "", emptyLabel = "不使用拉取秘钥") {
@@ -2477,7 +2513,15 @@ function syncDeployRuleFields() {
     field.hidden = isPages;
   });
 
-  ["buildCommand", "containerPort", "servicePort", "replicas", "healthPath", "runtimeEnv", "jvmOptions"].forEach((name) => {
+  [
+    "buildCommand",
+    "containerPort",
+    "servicePort",
+    "replicas",
+    "healthPath",
+    "runtimeEnv",
+    "jvmOptions",
+  ].forEach((name) => {
     const field = taskForm.elements[name];
     if (field) field.disabled = isPages;
   });
@@ -2491,6 +2535,10 @@ function syncDeployRuleFields() {
     if (field) field.disabled = !isPages;
   });
   if (taskForm.elements.pagesDeployCommand) taskForm.elements.pagesDeployCommand.required = isPages;
+  if (taskForm.elements.cloudflareAccountIdSecretId) taskForm.elements.cloudflareAccountIdSecretId.required = false;
+  if (taskForm.elements.cloudflareApiTokenSecretId) taskForm.elements.cloudflareApiTokenSecretId.required = false;
+  if (taskForm.elements.cloudflareAccountIdSecretId) taskForm.elements.cloudflareAccountIdSecretId.disabled = !isPages;
+  if (taskForm.elements.cloudflareApiTokenSecretId) taskForm.elements.cloudflareApiTokenSecretId.disabled = !isPages;
 
   if (isPages || isFrontend) {
     taskForm.elements.language.value = "node";
@@ -2516,6 +2564,7 @@ function syncDeployRuleFields() {
     const deployCommand = taskForm.elements.pagesDeployCommand;
     if (deployCommand && !deployCommand.value) deployCommand.value = defaultPagesDeployCommand(packageManager);
   }
+  renderCloudflareSecretOptions();
   renderClusters();
 }
 
@@ -2534,12 +2583,15 @@ function resetTaskForm() {
   taskForm.elements.buildEnv.value = "";
   taskForm.elements.pagesPackageManager.value = "npm";
   taskForm.elements.pagesDeployCommand.value = defaultPagesDeployCommand("npm");
+  taskForm.elements.cloudflareAccountIdSecretId.value = "";
+  taskForm.elements.cloudflareApiTokenSecretId.value = "";
   taskForm.elements.mavenRepoUrl.value = "";
   taskForm.elements.mavenMirrorOf.value = "maven-public";
   taskForm.elements.runtimeEnv.value = "";
   taskForm.elements.jvmOptions.value = "";
   renderNotifyChannelOptions("", true);
   renderGitCredentialOptions("");
+  renderCloudflareSecretOptions();
   clusterDrafts.splice(0, clusterDrafts.length);
   updateSdkOptions("java", true);
   syncDeployRuleFields();
@@ -2587,6 +2639,8 @@ function openTaskEditor(taskId) {
   taskForm.elements.buildEnv.value = task.buildEnv || "";
   taskForm.elements.pagesPackageManager.value = task.pagesPackageManager || "npm";
   taskForm.elements.pagesDeployCommand.value = task.pagesDeployCommand || defaultPagesDeployCommand(task.pagesPackageManager || "npm");
+  taskForm.elements.cloudflareAccountIdSecretId.value = task.cloudflareAccountIdSecretId || "";
+  taskForm.elements.cloudflareApiTokenSecretId.value = task.cloudflareApiTokenSecretId || "";
   taskForm.elements.mavenRepoUrl.value = task.mavenRepoUrl || "";
   taskForm.elements.mavenMirrorOf.value = task.mavenMirrorOf || "maven-public";
   taskForm.elements.runtimeEnv.value = task.runtimeEnv || "";
@@ -2597,6 +2651,7 @@ function openTaskEditor(taskId) {
   taskForm.elements.healthPath.value = task.healthPath || "";
   taskForm.elements.notifyTarget.value = task.notify?.target || "";
   renderNotifyChannelOptions(task.notify?.target || task.notify?.channel || "", !task.notify?.target);
+  renderCloudflareSecretOptions();
   taskForm.elements.notifyBuildFail.checked = task.notify?.events?.includes("构建失败") ?? true;
   taskForm.elements.notifyDeployFail.checked = task.notify?.events?.includes("部署失败") ?? true;
   taskForm.elements.notifyHealthFail.checked = task.notify?.events?.includes("健康检查失败") ?? true;
@@ -2698,6 +2753,8 @@ function buildPreviewObject() {
       env: formValue("buildEnv"),
       pagesPackageManager: formValue("pagesPackageManager") || "npm",
       pagesDeployCommand: formValue("pagesDeployCommand"),
+      cloudflareAccountIdSecretId: normalizeDeployRule(formValue("deployRule")) === "cf_pages" ? formValue("cloudflareAccountIdSecretId") : "",
+      cloudflareApiTokenSecretId: normalizeDeployRule(formValue("deployRule")) === "cf_pages" ? formValue("cloudflareApiTokenSecretId") : "",
       mavenRepoUrl: formValue("mavenRepoUrl"),
       mavenMirrorOf: formValue("mavenMirrorOf") || "maven-public",
     },
@@ -2747,6 +2804,8 @@ async function saveTask(event) {
     buildEnv: preview.build.env,
     pagesPackageManager: preview.build.pagesPackageManager,
     pagesDeployCommand: preview.build.pagesDeployCommand,
+    cloudflareAccountIdSecretId: preview.build.cloudflareAccountIdSecretId,
+    cloudflareApiTokenSecretId: preview.build.cloudflareApiTokenSecretId,
     mavenRepoUrl: preview.build.mavenRepoUrl,
     mavenMirrorOf: preview.build.mavenMirrorOf,
     containerPort: preview.runtime.containerPort,
@@ -3529,11 +3588,21 @@ async function deleteSecret(secretId) {
     return;
   }
   const usedByTask = tasks.find((task) => String(task.gitCredentialId) === String(secretId));
+  const usedByCloudflareAccount = tasks.find((task) => String(task.cloudflareAccountIdSecretId) === String(secretId));
+  const usedByCloudflareToken = tasks.find((task) => String(task.cloudflareApiTokenSecretId) === String(secretId));
   const usedByImagePull = tasks.find((task) => (task.clusters || []).some((cluster) => String(cluster.imagePullSecretId) === String(secretId)));
   const usedByCluster = clusters.find((cluster) => String(cluster.imagePullSecretId) === String(secretId));
   const usedByPlatformRegistry = String(platformSettings.registrySecretId) === String(secretId);
   if (usedByTask) {
     window.alert(`任务 ${usedByTask.name} 正在使用该秘钥，请先编辑任务取消绑定`);
+    return;
+  }
+  if (usedByCloudflareAccount) {
+    window.alert(`任务 ${usedByCloudflareAccount.name} 正在使用该 Cloudflare Account ID 秘钥，请先编辑任务取消绑定`);
+    return;
+  }
+  if (usedByCloudflareToken) {
+    window.alert(`任务 ${usedByCloudflareToken.name} 正在使用该 Cloudflare API Token 秘钥，请先编辑任务取消绑定`);
     return;
   }
   if (usedByImagePull) {
@@ -3896,6 +3965,7 @@ function render() {
   const formDialogOpen = Boolean(document.querySelector("dialog[open] form"));
   if (!taskEditorOpen) {
     renderNotifyChannelOptions(taskForm.elements.notifyChannel?.value || taskForm.elements.notifyTarget?.value || "");
+    renderCloudflareSecretOptions();
     renderClusters();
     renderGitCredentialOptions();
     renderTaskTemplateOptions();

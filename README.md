@@ -224,6 +224,8 @@ dev-agent-token
 - 镜像仓库账号
 - Agent Token 记录
 - Webhook Secret
+- Cloudflare Account ID
+- Cloudflare API Token
 
 私有 Git 仓库建议这样配置：
 
@@ -282,6 +284,12 @@ Git 凭据：选择 GitLab 账号密码
 ```
 
 如果 GitLab 开启了双因素认证，账号密码通常不能直接用于 Git HTTP 拉取，请改用 Project Access Token / Personal Access Token，并选择 `Git HTTPS Token`。
+
+Cloudflare Pages 发布建议这样配置：
+
+1. 在「秘钥管理」新增 `Cloudflare Account ID` 和 `Cloudflare API Token`
+2. 在 CF Pages 任务里分别选择这两个秘钥
+3. 平台会在执行 `wrangler pages deploy` 时注入 `CLOUDFLARE_ACCOUNT_ID` 和 `CLOUDFLARE_API_TOKEN`
 
 ## 发布流程
 

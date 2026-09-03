@@ -1141,7 +1141,7 @@ def task_app_type(task):
 
 
 def default_pages_deploy_command(package_manager):
-    return "pnpm deploy" if package_manager == "pnpm" else "npm run deploy"
+    return "pnpm run deploy" if package_manager == "pnpm" else "npm run deploy"
 
 
 def pages_package_manager(task):
@@ -1155,6 +1155,31 @@ def pages_deploy_command(task):
     if package_manager == "pnpm" and "corepack" not in command and re.search(r"(^|[;&|]\s*)pnpm(\s|$)", command):
         return f"corepack enable && {command}"
     return command
+
+
+def cloudflare_pages_env(state, task):
+    env = {}
+    account_id_secret_id = str(task.get("cloudflareAccountIdSecretId") or "").strip()
+    api_token_secret_id = str(task.get("cloudflareApiTokenSecretId") or "").strip()
+    if account_id_secret_id:
+        account_id_secret = secret_by_id(state, account_id_secret_id)
+        if not account_id_secret:
+            raise RuntimeError("Cloudflare Account ID 秘钥不存在")
+        if account_id_secret.get("type") != "cloudflare_account_id":
+            raise RuntimeError("Cloudflare Account ID 秘钥类型不正确")
+        if not account_id_secret.get("secret"):
+            raise RuntimeError("Cloudflare Account ID 秘钥内容不能为空")
+        env["CLOUDFLARE_ACCOUNT_ID"] = str(account_id_secret.get("secret") or "")
+    if api_token_secret_id:
+        api_token_secret = secret_by_id(state, api_token_secret_id)
+        if not api_token_secret:
+            raise RuntimeError("Cloudflare API Token 秘钥不存在")
+        if api_token_secret.get("type") != "cloudflare_api_token":
+            raise RuntimeError("Cloudflare API Token 秘钥类型不正确")
+        if not api_token_secret.get("secret"):
+            raise RuntimeError("Cloudflare API Token 秘钥内容不能为空")
+        env["CLOUDFLARE_API_TOKEN"] = str(api_token_secret.get("secret") or "")
+    return env
 
 
 def is_node_task(task):
@@ -2106,6 +2131,7 @@ def build_and_dispatch(execution_id):
             if not str(pages_task.get("sdk") or "").startswith("node"):
                 pages_task["sdk"] = "node22"
             build_env = parse_build_env(task.get("buildEnv"))
+            build_env.update(cloudflare_pages_env(state, task))
             if build_env:
                 append_log(execution_id, f"已注入 CF Pages 部署环境变量: {', '.join(sorted(build_env.keys()))}")
             command = pages_deploy_command(pages_task)
@@ -2396,6 +2422,8 @@ def normalize_task_payload(payload):
         "healthPath": str(payload.get("healthPath") or "").strip(),
         "runtimeEnv": str(payload.get("runtimeEnv") or ""),
         "jvmOptions": normalize_jvm_options(payload.get("jvmOptions")),
+        "cloudflareAccountIdSecretId": str(payload.get("cloudflareAccountIdSecretId") or "").strip(),
+        "cloudflareApiTokenSecretId": str(payload.get("cloudflareApiTokenSecretId") or "").strip(),
         "clusters": normalized_clusters,
         "notify": {
             "channelId": str(notify.get("channelId") or "").strip(),
@@ -2419,6 +2447,9 @@ def normalize_task_payload(payload):
         task_payload["artifactPath"] = ""
         task_payload["runtimeEnv"] = ""
         task_payload["jvmOptions"] = ""
+    else:
+        task_payload["cloudflareAccountIdSecretId"] = ""
+        task_payload["cloudflareApiTokenSecretId"] = ""
     return task_payload
 
 
@@ -2445,6 +2476,20 @@ def save_task_config(task_id, payload, actor):
             secret = git_secret_by_id(state, task_payload.get("gitCredentialId"))
             if not user_can_access_asset(state, actor_user, secret):
                 raise ValueError(f"当前用户组无权绑定该 Git 凭据: {secret.get('name')}")
+        for field_name, expected_type, label in (
+            ("cloudflareAccountIdSecretId", "cloudflare_account_id", "Cloudflare Account ID"),
+            ("cloudflareApiTokenSecretId", "cloudflare_api_token", "Cloudflare API Token"),
+        ):
+            secret_id = str(task_payload.get(field_name) or "").strip()
+            if not secret_id:
+                continue
+            secret = find_by_id(state.get("secrets", []), secret_id)
+            if not secret:
+                raise ValueError(f"{label} 秘钥不存在")
+            if secret.get("type") != expected_type:
+                raise ValueError(f"{label} 秘钥类型不正确")
+            if not user_can_access_asset(state, actor_user, secret):
+                raise ValueError(f"当前用户组无权绑定该 {label} 秘钥")
         notify_channel_id = (task_payload.get("notify") or {}).get("channelId")
         if notify_channel_id:
             notify_channel = find_by_id(state.get("notifyChannels", []), notify_channel_id)
@@ -2496,7 +2541,16 @@ def normalize_secret_payload(payload, keep_existing_secret=False):
     secret_type = str(payload.get("type") or "git_https_token").strip()
     if not name:
         raise ValueError("秘钥名称不能为空")
-    if secret_type not in {"git_https_token", "git_http_password", "git_ssh_key", "registry", "agent_token", "webhook"}:
+    if secret_type not in {
+        "git_https_token",
+        "git_http_password",
+        "git_ssh_key",
+        "registry",
+        "agent_token",
+        "webhook",
+        "cloudflare_account_id",
+        "cloudflare_api_token",
+    }:
         raise ValueError("秘钥类型不正确")
     normalized = {
         "name": name,
@@ -2574,6 +2628,12 @@ def delete_secret_config(secret_id, actor):
         task_with_git = next((task for task in state.get("tasks", []) if str(task.get("gitCredentialId")) == str(secret_id)), None)
         if task_with_git:
             raise ValueError(f"任务 {task_with_git.get('name')} 正在使用该 Git 凭据，请先取消绑定")
+        task_with_cloudflare_account = next((task for task in state.get("tasks", []) if str(task.get("cloudflareAccountIdSecretId")) == str(secret_id)), None)
+        if task_with_cloudflare_account:
+            raise ValueError(f"任务 {task_with_cloudflare_account.get('name')} 正在使用该 Cloudflare Account ID 秘钥，请先取消绑定")
+        task_with_cloudflare_token = next((task for task in state.get("tasks", []) if str(task.get("cloudflareApiTokenSecretId")) == str(secret_id)), None)
+        if task_with_cloudflare_token:
+            raise ValueError(f"任务 {task_with_cloudflare_token.get('name')} 正在使用该 Cloudflare API Token 秘钥，请先取消绑定")
         task_with_pull_secret = next((task for task in state.get("tasks", []) if any(str(cluster.get("imagePullSecretId")) == str(secret_id) for cluster in task.get("clusters", []))), None)
         if task_with_pull_secret:
             raise ValueError(f"任务 {task_with_pull_secret.get('name')} 正在使用该镜像拉取秘钥，请先取消绑定")
