@@ -1,4 +1,5 @@
 import base64
+import atexit
 import copy
 import hashlib
 import hmac
@@ -118,6 +119,13 @@ DEFAULT_STATE = {
 STATE_LOCK = threading.RLock()
 WS_CLIENTS = set()
 WS_LOCK = threading.RLock()
+STATE_CACHE = None
+STATE_WRITE_LOCK = threading.RLock()
+STATE_WRITE_EVENT = threading.Event()
+STATE_WRITE_STOP = threading.Event()
+PENDING_STATE_PAYLOAD = None
+PENDING_STATE_REVISION = 0
+STATE_WRITE_ERROR = ""
 
 
 def now_text():
@@ -256,6 +264,76 @@ def read_raw_state():
     if not row:
         return None
     return merge_defaults(json.loads(row[0]))
+
+
+def persist_state_payload(payload):
+    if use_postgres():
+        with connect_postgres() as conn:
+            conn.execute(
+                "INSERT INTO app_state (key, value) VALUES ('state', %s) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value",
+                (payload,),
+            )
+            conn.commit()
+    else:
+        with connect_sqlite() as conn:
+            conn.execute(
+                "INSERT INTO app_state (key, value) VALUES ('state', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (payload,),
+            )
+
+
+def state_payload(state):
+    return json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+
+
+def enqueue_state_write(payload, revision):
+    global PENDING_STATE_PAYLOAD, PENDING_STATE_REVISION
+    with STATE_WRITE_LOCK:
+        PENDING_STATE_PAYLOAD = payload
+        PENDING_STATE_REVISION = int(revision or 0)
+        STATE_WRITE_EVENT.set()
+
+
+def state_writer_loop():
+    global PENDING_STATE_PAYLOAD, PENDING_STATE_REVISION, STATE_WRITE_ERROR
+    while not STATE_WRITE_STOP.is_set():
+        STATE_WRITE_EVENT.wait(1)
+        while True:
+            with STATE_WRITE_LOCK:
+                payload = PENDING_STATE_PAYLOAD
+                revision = PENDING_STATE_REVISION
+                PENDING_STATE_PAYLOAD = None
+                PENDING_STATE_REVISION = 0
+                STATE_WRITE_EVENT.clear()
+            if not payload:
+                break
+            try:
+                persist_state_payload(payload)
+                STATE_WRITE_ERROR = ""
+            except Exception as exc:
+                STATE_WRITE_ERROR = str(exc)
+                with STATE_WRITE_LOCK:
+                    if not PENDING_STATE_PAYLOAD or revision >= PENDING_STATE_REVISION:
+                        PENDING_STATE_PAYLOAD = payload
+                        PENDING_STATE_REVISION = revision
+                        STATE_WRITE_EVENT.set()
+                print(f"Async state write failed: {exc}", flush=True)
+                time.sleep(2)
+                break
+
+
+def flush_pending_state_write(timeout=5):
+    del timeout
+    global PENDING_STATE_PAYLOAD, PENDING_STATE_REVISION
+    with STATE_WRITE_LOCK:
+        payload = PENDING_STATE_PAYLOAD
+        PENDING_STATE_PAYLOAD = None
+        PENDING_STATE_REVISION = 0
+        STATE_WRITE_EVENT.clear()
+    if not payload:
+        return True
+    persist_state_payload(payload)
+    return True
 
 
 def default_state_copy():
@@ -405,7 +483,7 @@ def client_state(state, compact=False):
         agent_tasks = agent_tasks[:50]
     data["agentTasks"] = [agent_task_summary(agent_task, compact=compact) for agent_task in agent_tasks]
     if compact:
-        data["auditLogs"] = copy.deepcopy(state.get("auditLogs", [])[:50])
+        data["auditLogs"] = copy.deepcopy(state.get("auditLogs", [])[:500])
     else:
         data["auditLogs"] = copy.deepcopy(state.get("auditLogs", []))
     data["compact"] = bool(compact)
@@ -413,35 +491,20 @@ def client_state(state, compact=False):
 
 
 def read_state():
+    global STATE_CACHE
     with STATE_LOCK:
-        if use_postgres():
-            with connect_postgres() as conn:
-                row = conn.execute("SELECT value FROM app_state WHERE key = 'state'").fetchone()
-                if not row:
-                    state = default_state_copy()
-                    payload = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
-                    conn.execute(
-                        "INSERT INTO app_state (key, value) VALUES ('state', %s) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value",
-                        (payload,),
-                    )
-                    conn.commit()
-                    return state
-        else:
-            with connect_sqlite() as conn:
-                row = conn.execute("SELECT value FROM app_state WHERE key = 'state'").fetchone()
-                if not row:
-                    state = default_state_copy()
-                    payload = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
-                    conn.execute(
-                        "INSERT INTO app_state (key, value) VALUES ('state', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        (payload,),
-                    )
-                    return state
-        return merge_defaults(json.loads(row[0]))
+        if STATE_CACHE is None:
+            state = read_raw_state()
+            if not state:
+                state = default_state_copy()
+                persist_state_payload(state_payload(state))
+            STATE_CACHE = merge_defaults(state)
+        return copy.deepcopy(STATE_CACHE)
 
 
 def write_state(state, current_state=None, broadcast=True):
-    current_state = current_state if current_state is not None else read_raw_state()
+    global STATE_CACHE
+    current_state = current_state if current_state is not None else read_state()
     state = merge_defaults(state)
     state = preserve_existing_user_passwords(state, current_state)
     state = preserve_sensitive_values(state, current_state)
@@ -449,21 +512,10 @@ def write_state(state, current_state=None, broadcast=True):
     current_revision = int((current_state or {}).get("revision") or 0)
     incoming_revision = int(state.get("revision") or 0)
     state["revision"] = max(current_revision, incoming_revision) + 1
-    payload = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+    payload = state_payload(state)
     with STATE_LOCK:
-        if use_postgres():
-            with connect_postgres() as conn:
-                conn.execute(
-                    "INSERT INTO app_state (key, value) VALUES ('state', %s) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value",
-                    (payload,),
-                )
-                conn.commit()
-        else:
-            with connect_sqlite() as conn:
-                conn.execute(
-                    "INSERT INTO app_state (key, value) VALUES ('state', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (payload,),
-                )
+        STATE_CACHE = copy.deepcopy(state)
+    enqueue_state_write(payload, state.get("revision"))
     if broadcast:
         broadcast_state(state)
 
@@ -2272,6 +2324,7 @@ def normalize_task_payload(payload):
         "env": str(payload.get("env") or "test").strip(),
         "tag": str(payload.get("tag") or "").strip(),
         "organizationId": str(payload.get("organizationId") or "default").strip() or "default",
+        "templateId": str(payload.get("templateId") or "").strip(),
         "deployRule": deploy_rule,
         "appType": app_type,
         "repo": str(payload.get("repo") or "").strip(),
@@ -3150,6 +3203,8 @@ class Handler(SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     read_state()
+    atexit.register(flush_pending_state_write)
+    threading.Thread(target=state_writer_loop, daemon=True).start()
     recover_interrupted_executions()
     threading.Thread(target=scheduler_loop, daemon=True).start()
     port = int(os.environ.get("PORT", "80"))

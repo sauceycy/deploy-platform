@@ -95,6 +95,8 @@ const APP_VIEW_KEY = "deploy-platform-view";
 const STATE_SAVE_TIMEOUT_MS = 20000;
 const MAX_BATCH_DEPLOY_TASKS = 5;
 const STATE_REFRESH_INTERVAL_MS = 10000;
+const LIST_PAGE_SIZE = 10;
+const AUDIT_PAGE_SIZE = 12;
 let refreshTimer = null;
 let stateSocket = null;
 let stateSocketRetryTimer = null;
@@ -121,6 +123,18 @@ const state = {
   detailTab: "overview",
   detailExecutionId: "",
   search: "",
+  auditSearch: "",
+  auditAction: "all",
+  auditResult: "all",
+  auditPage: 1,
+  lists: {
+    tasks: { page: 1 },
+    clusters: { search: "", category: "all", page: 1 },
+    templates: { search: "", category: "all", page: 1 },
+    channels: { search: "", category: "all", page: 1 },
+    secrets: { search: "", category: "all", page: 1 },
+    users: { search: "", category: "all", page: 1 },
+  },
   view: "tasks",
 };
 
@@ -128,6 +142,9 @@ const loginScreen = document.getElementById("loginScreen");
 const bootScreen = document.getElementById("bootScreen");
 const loginForm = document.getElementById("loginForm");
 const loginError = document.getElementById("loginError");
+const loginSubmit = document.getElementById("loginSubmit");
+const loginSubmitText = document.getElementById("loginSubmitText");
+const loginLoading = document.getElementById("loginLoading");
 const appShell = document.getElementById("appShell");
 const pageTitle = document.getElementById("pageTitle");
 const pageSubtitle = document.getElementById("pageSubtitle");
@@ -153,6 +170,7 @@ const languageSelect = document.getElementById("languageSelect");
 const sdkSelect = document.getElementById("sdkSelect");
 const deployRuleSelect = document.getElementById("deployRuleSelect");
 const appTypeSelect = document.getElementById("appTypeSelect");
+const taskTemplateSelect = document.getElementById("taskTemplateSelect");
 const pagesPackageManagerSelect = document.getElementById("pagesPackageManagerSelect");
 const taskForm = document.getElementById("taskForm");
 const taskOrganizationSelect = document.getElementById("taskOrganizationSelect");
@@ -210,6 +228,10 @@ const selectAllTasks = document.getElementById("selectAllTasks");
 const batchDeploy = document.getElementById("batchDeploy");
 const batchDeployText = document.getElementById("batchDeployText");
 const refreshButton = document.getElementById("refreshButton");
+const auditSearch = document.getElementById("auditSearch");
+const auditActionFilter = document.getElementById("auditActionFilter");
+const auditResultFilter = document.getElementById("auditResultFilter");
+const auditPagination = document.getElementById("auditPagination");
 
 function hasPermission(permission) {
   if (!state.currentUser) return false;
@@ -1162,8 +1184,10 @@ function renderRows() {
     .slice(MAX_BATCH_DEPLOY_TASKS)
     .forEach((id) => state.selectedTaskIds.delete(id));
   const rows = filteredTasks();
+  const pageData = paginateRows("tasks", rows);
   if (rows.length === 0) {
     taskRows.innerHTML = `<div class="empty-row">暂无发布任务</div>`;
+    renderPagination("taskPagination", "tasks", pageData);
     selectAllTasks.checked = false;
     selectAllTasks.indeterminate = false;
     selectAllTasks.disabled = true;
@@ -1171,7 +1195,7 @@ function renderRows() {
     return;
   }
 
-  taskRows.innerHTML = rows
+  taskRows.innerHTML = pageData.rows
     .map(
       (task) => `
       <div class="task-row ${String(task.id) === String(state.selectedId) ? "selected" : ""}" role="row" data-task-id="${task.id}">
@@ -1235,7 +1259,7 @@ function renderRows() {
     `,
     )
     .join("");
-  const visibleIds = rows
+  const visibleIds = pageData.rows
     .filter((task) => canOperateAsset("task.deploy", task) && !isTaskActive(task))
     .map((task) => String(task.id));
   const checkedVisibleIds = visibleIds.filter((id) => state.selectedTaskIds.has(id));
@@ -1246,6 +1270,7 @@ function renderRows() {
   if (batchDeployText) {
     batchDeployText.textContent = state.selectedTaskIds.size ? `批量发布 ${state.selectedTaskIds.size}/${MAX_BATCH_DEPLOY_TASKS}` : "批量发布";
   }
+  renderPagination("taskPagination", "tasks", pageData);
 }
 
 function renderDetail() {
@@ -1914,6 +1939,59 @@ function emptyState(text) {
   return `<div class="empty-state"><strong>${text}</strong></div>`;
 }
 
+function listState(key) {
+  state.lists[key] = state.lists[key] || { search: "", category: "all", page: 1 };
+  return state.lists[key];
+}
+
+function textIncludes(values, query) {
+  if (!query) return true;
+  return values.some((value) => String(value || "").toLowerCase().includes(query));
+}
+
+function paginateRows(key, rows, pageSize = LIST_PAGE_SIZE) {
+  const list = listState(key);
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  list.page = Math.min(Math.max(1, Number(list.page || 1)), pageCount);
+  return {
+    page: list.page,
+    pageCount,
+    rows: rows.slice((list.page - 1) * pageSize, list.page * pageSize),
+    total: rows.length,
+  };
+}
+
+function renderPagination(targetId, key, pageData) {
+  const target = document.getElementById(targetId);
+  if (!target) return;
+  const start = pageData.total === 0 ? 0 : (pageData.page - 1) * LIST_PAGE_SIZE + 1;
+  const end = Math.min(pageData.total, pageData.page * LIST_PAGE_SIZE);
+  target.innerHTML = `
+    <span>共 ${pageData.total} 条，当前 ${start}-${end}</span>
+    <div class="pagination-actions">
+      <button class="ghost-button" type="button" data-list-page="${key}" data-page-direction="prev" ${pageData.page <= 1 ? "disabled" : ""}>
+        <i data-lucide="chevron-left"></i>
+        <span>上一页</span>
+      </button>
+      <strong>${pageData.page} / ${pageData.pageCount}</strong>
+      <button class="ghost-button" type="button" data-list-page="${key}" data-page-direction="next" ${pageData.page >= pageData.pageCount ? "disabled" : ""}>
+        <span>下一页</span>
+        <i data-lucide="chevron-right"></i>
+      </button>
+    </div>
+  `;
+}
+
+function renderCategoryOptions(selectId, options, selected, allLabel = "全部分类") {
+  const select = document.getElementById(selectId);
+  if (!select) return selected;
+  const validValues = options.map((item) => item.value);
+  const nextSelected = selected === "all" || validValues.includes(selected) ? selected : "all";
+  select.innerHTML = [`<option value="all">${allLabel}</option>`, ...options.map((item) => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`)].join("");
+  select.value = nextSelected;
+  return nextSelected;
+}
+
 function heartbeatForCluster(clusterName) {
   return agentHeartbeats.find((item) => item.cluster === clusterName);
 }
@@ -1925,12 +2003,38 @@ function clusterAgentState(cluster) {
 
 function renderClusterView() {
   const body = document.getElementById("clusterBody");
-  const visibleClusters = clusters.filter(canAccessAsset);
+  const filters = listState("clusters");
+  const query = filters.search.trim().toLowerCase();
+  filters.category = renderCategoryOptions(
+    "clusterCategoryFilter",
+    [
+      { value: "online", label: "Agent 在线" },
+      { value: "offline", label: "Agent 未连接" },
+      ...Array.from(new Set(clusters.map((cluster) => cluster.env).filter(Boolean))).map((env) => ({ value: `env:${env}`, label: `环境 ${env}` })),
+    ],
+    filters.category,
+  );
+  const visibleClusters = clusters.filter((cluster) => {
+    if (!canAccessAsset(cluster)) return false;
+    const agentState = clusterAgentState(cluster);
+    const matchedCategory =
+      filters.category === "all" ||
+      (filters.category === "online" && agentState.status === "success") ||
+      (filters.category === "offline" && agentState.status !== "success") ||
+      filters.category === `env:${cluster.env}`;
+    const matchedSearch = textIncludes(
+      [cluster.name, organizationName(cluster.organizationId), cluster.region, cluster.env, cluster.namespace, secretName(cluster.imagePullSecretId), (cluster.nodes || []).map((node) => `${node.name} ${node.ip}`).join(" ")],
+      query,
+    );
+    return matchedCategory && matchedSearch;
+  });
+  const pageData = paginateRows("clusters", visibleClusters);
   if (visibleClusters.length === 0) {
     body.innerHTML = emptyState("暂无集群");
+    renderPagination("clusterPagination", "clusters", pageData);
     return;
   }
-  body.innerHTML = visibleClusters
+  body.innerHTML = pageData.rows
     .map(
       (cluster) => {
         const agentState = clusterAgentState(cluster);
@@ -1978,37 +2082,104 @@ function renderClusterView() {
       },
     )
     .join("");
+  renderPagination("clusterPagination", "clusters", pageData);
 }
 
 function renderTemplateView() {
   const body = document.getElementById("templateBody");
-  if (buildTemplates.length === 0) {
-    body.innerHTML = emptyState("暂无构建模板");
+  const filters = listState("templates");
+  const query = filters.search.trim().toLowerCase();
+  filters.category = renderCategoryOptions(
+    "templateCategoryFilter",
+    [
+      ...Array.from(new Set(buildTemplates.map((template) => template.language).filter(Boolean))).map((language) => ({ value: `lang:${language}`, label: languageLabel(language) })),
+      ...Array.from(new Set(buildTemplates.map((template) => template.deployRule || "k8s"))).map((rule) => ({ value: `rule:${rule}`, label: deployRuleLabel(rule) })),
+    ],
+    filters.category,
+  );
+  const visibleTemplates = buildTemplates.filter((template) => {
+    const matchedCategory = filters.category === "all" || filters.category === `lang:${template.language}` || filters.category === `rule:${template.deployRule || "k8s"}`;
+    const matchedSearch = textIncludes([template.name, template.language, template.sdk, template.command, template.workdir, template.artifactPath, template.mavenRepoUrl, template.pagesDeployCommand], query);
+    return matchedCategory && matchedSearch;
+  });
+  const pageData = paginateRows("templates", visibleTemplates);
+  if (visibleTemplates.length === 0) {
+    body.innerHTML = emptyState("暂无任务模板");
+    renderPagination("templatePagination", "templates", pageData);
     return;
   }
-  body.innerHTML = buildTemplates
+  body.innerHTML = pageData.rows
     .map(
       (template) => `
       <div class="simple-row">
         <div>
           <strong>${template.name}</strong>
-          <span>${languageLabel(template.language)} · ${template.sdk} · ${template.command}</span>
+          <span>${deployRuleLabel(template.deployRule || "k8s")} · ${appTypeLabel(template.appType || "backend")} · ${languageLabel(template.language)} · ${template.sdk} · ${template.command}</span>
         </div>
         <span class="language-chip ${template.language}">${languageLabel(template.language)}</span>
       </div>
     `,
     )
     .join("");
+  renderPagination("templatePagination", "templates", pageData);
+}
+
+function renderTaskTemplateOptions(selectedId = taskTemplateSelect?.value || "") {
+  if (!taskTemplateSelect) return;
+  taskTemplateSelect.innerHTML = [
+    `<option value="">自定义配置</option>`,
+    ...buildTemplates.map((template) => `<option value="${template.id}" ${String(template.id) === String(selectedId) ? "selected" : ""}>${template.name}</option>`),
+  ].join("");
+}
+
+function applyTaskTemplate(templateId) {
+  const template = buildTemplates.find((item) => String(item.id) === String(templateId));
+  if (!template) return;
+  const setValue = (name, value) => {
+    if (!taskForm.elements[name] || value === undefined || value === null || value === "") return;
+    taskForm.elements[name].value = value;
+  };
+  setValue("deployRule", template.deployRule || "k8s");
+  setValue("appType", template.appType || "backend");
+  setValue("workdir", template.workdir || ".");
+  setValue("language", template.language || "java");
+  updateSdkOptions(taskForm.elements.language.value || "java", true);
+  setValue("sdk", template.sdk);
+  setValue("buildCommand", template.command);
+  setValue("artifactPath", template.artifactPath);
+  setValue("containerPort", template.containerPort);
+  setValue("servicePort", template.servicePort);
+  setValue("replicas", template.replicas);
+  setValue("healthPath", template.healthPath);
+  setValue("pagesPackageManager", template.pagesPackageManager || "npm");
+  setValue("pagesDeployCommand", template.pagesDeployCommand || defaultPagesDeployCommand(template.pagesPackageManager || "npm"));
+  setValue("mavenRepoUrl", template.mavenRepoUrl);
+  setValue("mavenMirrorOf", template.mavenMirrorOf || "maven-public");
+  syncDeployRuleFields();
 }
 
 function renderChannelView() {
   const body = document.getElementById("channelBody");
-  const visibleChannels = notifyChannels.filter(canAccessAsset);
+  const filters = listState("channels");
+  const query = filters.search.trim().toLowerCase();
+  filters.category = renderCategoryOptions(
+    "channelCategoryFilter",
+    Array.from(new Set(notifyChannels.map((channel) => channel.type).filter(Boolean))).map((type) => ({ value: type, label: channelLabel(type) })),
+    filters.category,
+  );
+  const visibleChannels = notifyChannels.filter((channel) => {
+    if (!canAccessAsset(channel)) return false;
+    const matchedCategory = filters.category === "all" || channel.type === filters.category;
+    const matchedSearch = textIncludes([channel.name, channelLabel(channel.type), channel.target, channel.hasSecret || channel.secret ? "已配置密钥" : "未配置密钥"], query);
+    return matchedCategory && matchedSearch;
+  });
+  const pageData = paginateRows("channels", visibleChannels);
   if (visibleChannels.length === 0) {
     body.innerHTML = emptyState("暂无通知渠道");
+    renderPagination("channelPagination", "channels", pageData);
     return;
   }
-  body.innerHTML = visibleChannels
+  body.innerHTML = pageData.rows
     .map(
       (channel) => `
       <div class="simple-row">
@@ -2029,16 +2200,31 @@ function renderChannelView() {
     `,
     )
     .join("");
+  renderPagination("channelPagination", "channels", pageData);
 }
 
 function renderSecretView() {
   const body = document.getElementById("secretBody");
-  const visibleSecrets = secrets.filter(canAccessAsset);
+  const filters = listState("secrets");
+  const query = filters.search.trim().toLowerCase();
+  filters.category = renderCategoryOptions(
+    "secretCategoryFilter",
+    Array.from(new Set(secrets.map((secret) => secret.type).filter(Boolean))).map((type) => ({ value: type, label: secretTypeLabel(type) })),
+    filters.category,
+  );
+  const visibleSecrets = secrets.filter((secret) => {
+    if (!canAccessAsset(secret)) return false;
+    const matchedCategory = filters.category === "all" || secret.type === filters.category;
+    const matchedSearch = textIncludes([secret.name, organizationName(secret.organizationId), secretTypeLabel(secret.type), secret.target, secret.username, secret.hasSecret || secret.secret ? "已保存秘钥" : "未保存秘钥"], query);
+    return matchedCategory && matchedSearch;
+  });
+  const pageData = paginateRows("secrets", visibleSecrets);
   if (visibleSecrets.length === 0) {
     body.innerHTML = emptyState("暂无秘钥");
+    renderPagination("secretPagination", "secrets", pageData);
     return;
   }
-  body.innerHTML = visibleSecrets
+  body.innerHTML = pageData.rows
     .map(
       (secret) => `
       <div class="simple-row">
@@ -2060,6 +2246,7 @@ function renderSecretView() {
     `,
     )
     .join("");
+  renderPagination("secretPagination", "secrets", pageData);
 }
 
 function renderGitCredentialOptions(selectedId = taskForm.elements.gitCredentialId?.value || "") {
@@ -2085,7 +2272,28 @@ function renderPlatformSettings() {
 
 function renderUserView() {
   const userBody = document.getElementById("userBody");
-  const visibleUsers = hasGlobalAccess() ? users : users.filter((user) => (user.organizationIds || []).some((id) => currentUserOrgIds().includes(String(id))));
+  const filters = listState("users");
+  const query = filters.search.trim().toLowerCase();
+  filters.category = renderCategoryOptions(
+    "userCategoryFilter",
+    [
+      ...Object.entries(roles).map(([key, role]) => ({ value: `role:${key}`, label: role.label })),
+      { value: "global", label: "全局组用户" },
+      ...visibleOrganizations().map((group) => ({ value: `org:${group.id}`, label: `用户组 ${group.name}` })),
+    ],
+    filters.category,
+  );
+  const visibleUsers = (hasGlobalAccess() ? users : users.filter((user) => (user.organizationIds || []).some((id) => currentUserOrgIds().includes(String(id))))).filter((user) => {
+    const orgIds = userOrgIds(user);
+    const matchedCategory =
+      filters.category === "all" ||
+      filters.category === `role:${user.role}` ||
+      (filters.category === "global" && user.globalAccess) ||
+      orgIds.some((id) => filters.category === `org:${id}`);
+    const matchedSearch = textIncludes([user.name, user.username, roles[user.role]?.label, user.role, orgIds.map(organizationName).join(" "), user.globalAccess ? "全局组" : ""], query);
+    return matchedCategory && matchedSearch;
+  });
+  const pageData = paginateRows("users", visibleUsers);
   const roleSelect = document.getElementById("newUserRole");
   if (!userCreateDialog.open) {
     roleSelect.innerHTML = roleOptions("developer");
@@ -2094,9 +2302,10 @@ function renderUserView() {
   if (!userDialog.open) document.getElementById("editUserRole").innerHTML = roleOptions();
   if (visibleUsers.length === 0) {
     userBody.innerHTML = emptyState("暂无用户");
+    renderPagination("userPagination", "users", pageData);
     return;
   }
-  userBody.innerHTML = visibleUsers
+  userBody.innerHTML = pageData.rows
     .map(
       (user) => `
       <div class="simple-row">
@@ -2119,27 +2328,72 @@ function renderUserView() {
     `,
     )
     .join("");
+  renderPagination("userPagination", "users", pageData);
 }
 
 function renderAuditView() {
   const auditBody = document.getElementById("auditBody");
+  const actions = Array.from(new Set(auditLogs.map((log) => log.action).filter(Boolean)));
+  const results = Array.from(new Set(auditLogs.map((log) => log.result).filter(Boolean)));
+  if (auditActionFilter) {
+    auditActionFilter.innerHTML = [`<option value="all">全部动作</option>`, ...actions.map((action) => `<option value="${escapeHtml(action)}">${escapeHtml(action)}</option>`)].join("");
+    auditActionFilter.value = actions.includes(state.auditAction) ? state.auditAction : "all";
+  }
+  if (auditResultFilter) {
+    auditResultFilter.innerHTML = [`<option value="all">全部结果</option>`, ...results.map((result) => `<option value="${escapeHtml(result)}">${escapeHtml(result)}</option>`)].join("");
+    auditResultFilter.value = results.includes(state.auditResult) ? state.auditResult : "all";
+  }
+  if (auditSearch && auditSearch.value !== state.auditSearch) auditSearch.value = state.auditSearch;
   if (auditLogs.length === 0) {
     auditBody.innerHTML = emptyState("暂无审计记录");
+    if (auditPagination) auditPagination.innerHTML = "";
     return;
   }
-  auditBody.innerHTML = auditLogs
+  const keyword = state.auditSearch.trim().toLowerCase();
+  const filteredLogs = auditLogs.filter((log) => {
+    const matchedAction = state.auditAction === "all" || log.action === state.auditAction;
+    const matchedResult = state.auditResult === "all" || log.result === state.auditResult;
+    const haystack = [log.time, log.actor, log.action, log.target, log.result].join(" ").toLowerCase();
+    return matchedAction && matchedResult && (!keyword || haystack.includes(keyword));
+  });
+  const pageCount = Math.max(1, Math.ceil(filteredLogs.length / AUDIT_PAGE_SIZE));
+  state.auditPage = Math.min(Math.max(1, state.auditPage), pageCount);
+  const pageLogs = filteredLogs.slice((state.auditPage - 1) * AUDIT_PAGE_SIZE, state.auditPage * AUDIT_PAGE_SIZE);
+  if (pageLogs.length === 0) {
+    auditBody.innerHTML = emptyState("没有匹配的审计记录");
+  } else {
+    auditBody.innerHTML = pageLogs
     .map(
       (log) => `
       <div class="audit-row">
-        <span>${log.time}</span>
-        <strong>${log.actor}</strong>
-        <span>${log.action}</span>
-        <span>${log.target}</span>
-        <span>${log.result}</span>
+        <span>${escapeHtml(log.time)}</span>
+        <strong>${escapeHtml(log.actor)}</strong>
+        <span>${escapeHtml(log.action)}</span>
+        <span>${escapeHtml(log.target)}</span>
+        <span>${escapeHtml(log.result)}</span>
       </div>
     `,
     )
     .join("");
+  }
+  if (auditPagination) {
+    const start = filteredLogs.length === 0 ? 0 : (state.auditPage - 1) * AUDIT_PAGE_SIZE + 1;
+    const end = Math.min(filteredLogs.length, state.auditPage * AUDIT_PAGE_SIZE);
+    auditPagination.innerHTML = `
+      <span>共 ${filteredLogs.length} 条，当前 ${start}-${end}</span>
+      <div class="pagination-actions">
+        <button class="ghost-button" type="button" data-audit-page="prev" ${state.auditPage <= 1 ? "disabled" : ""}>
+          <i data-lucide="chevron-left"></i>
+          <span>上一页</span>
+        </button>
+        <strong>${state.auditPage} / ${pageCount}</strong>
+        <button class="ghost-button" type="button" data-audit-page="next" ${state.auditPage >= pageCount ? "disabled" : ""}>
+          <span>下一页</span>
+          <i data-lucide="chevron-right"></i>
+        </button>
+      </div>
+    `;
+  }
 }
 
 function renderClusters() {
@@ -2265,6 +2519,8 @@ function resetTaskForm() {
   taskForm.elements.taskId.value = "";
   taskOrganizationSelect.innerHTML = organizationOptions();
   taskForm.elements.organizationId.value = visibleOrganizations()[0]?.id || "default";
+  renderTaskTemplateOptions("");
+  taskForm.elements.templateId.value = "";
   taskForm.elements.deployRule.value = "k8s";
   taskForm.elements.appType.value = "backend";
   taskForm.elements.env.value = "test";
@@ -2310,6 +2566,8 @@ function openTaskEditor(taskId) {
   taskForm.elements.tag.value = task.tag || "";
   taskOrganizationSelect.innerHTML = organizationOptions(task.organizationId || "default");
   taskForm.elements.organizationId.value = task.organizationId || "default";
+  renderTaskTemplateOptions(task.templateId || "");
+  taskForm.elements.templateId.value = task.templateId || "";
   taskForm.elements.deployRule.value = normalizeDeployRule(task.deployRule);
   taskForm.elements.appType.value = normalizeDeployRule(task.deployRule) === "cf_pages" ? "frontend" : normalizeAppType(task.appType);
   taskForm.elements.repo.value = task.repo || "";
@@ -2420,6 +2678,7 @@ function buildPreviewObject() {
       organizationId: formValue("organizationId"),
       deployRule: normalizeDeployRule(formValue("deployRule")),
       appType: normalizeDeployRule(formValue("deployRule")) === "cf_pages" ? "frontend" : normalizeAppType(formValue("appType")),
+      templateId: formValue("templateId"),
     },
     repository: {
       url: formValue("repo"),
@@ -2469,6 +2728,7 @@ async function saveTask(event) {
     env: preview.task.env,
     tag: preview.task.tag,
     organizationId: preview.task.organizationId || "default",
+    templateId: preview.task.templateId,
     deployRule: preview.task.deployRule,
     appType: preview.task.appType,
     repo: preview.repository.url,
@@ -3002,12 +3262,24 @@ async function saveTemplate(event) {
   const template = {
     id: Date.now(),
     name: formData.get("name"),
+    deployRule: normalizeDeployRule(formData.get("deployRule")),
+    appType: normalizeDeployRule(formData.get("deployRule")) === "cf_pages" ? "frontend" : normalizeAppType(formData.get("appType")),
     language: formData.get("language"),
     sdk: formData.get("sdk"),
     command: formData.get("command"),
+    workdir: formData.get("workdir") || ".",
+    artifactPath: formData.get("artifactPath") || "",
+    containerPort: formData.get("containerPort") || "",
+    servicePort: formData.get("servicePort") || "",
+    replicas: formData.get("replicas") || "",
+    healthPath: formData.get("healthPath") || "",
+    pagesPackageManager: formData.get("pagesPackageManager") || "npm",
+    pagesDeployCommand: formData.get("pagesDeployCommand") || "",
+    mavenRepoUrl: formData.get("mavenRepoUrl") || "",
+    mavenMirrorOf: formData.get("mavenMirrorOf") || "maven-public",
   };
   buildTemplates.unshift(template);
-  addAudit("添加构建模板", template.name);
+  addAudit("添加任务模板", template.name);
   const saved = await persistState();
   if (saved) {
     form.reset();
@@ -3439,7 +3711,7 @@ const viewConfig = {
   tasks: { title: "发布任务", subtitle: "任务、集群、权限与审计" },
   taskDetail: { title: "任务详情", subtitle: "发布进度、日志、配置、集群与历史" },
   clusters: { title: "集群管理", subtitle: "Agent 接入与部署目标", permission: "cluster.view" },
-  templates: { title: "构建模板", subtitle: "语言、SDK 与默认构建命令", permission: "template.view" },
+  templates: { title: "任务模板", subtitle: "常用任务配置与构建默认值", permission: "template.view" },
   channels: { title: "通知渠道", subtitle: "告警机器人、邮件与 Webhook", permission: "channel.view" },
   secrets: { title: "秘钥管理", subtitle: "Git 凭据、镜像仓库与 Agent Token", permission: "secret.view" },
   users: { title: "用户管理", subtitle: "账号、姓名与角色绑定", permission: "user.view" },
@@ -3605,6 +3877,7 @@ function render() {
     renderNotifyChannelOptions(taskForm.elements.notifyChannel?.value || taskForm.elements.notifyTarget?.value || "");
     renderClusters();
     renderGitCredentialOptions();
+    renderTaskTemplateOptions();
   }
   if (!taskEditorOpen && !clusterCreateDialog.open && !clusterDialog.open) renderImagePullSecretOptions();
   if (!taskEditorOpen && !formDialogOpen) renderOrganizationOptions();
@@ -3742,12 +4015,24 @@ function authUserSnapshot(user) {
   };
 }
 
+function setLoginLoading(loading, text = "正在验证登录状态...") {
+  if (loginSubmit) loginSubmit.disabled = loading;
+  if (loginSubmitText) loginSubmitText.textContent = loading ? "登录中..." : "登录";
+  if (loginLoading) {
+    loginLoading.hidden = !loading;
+    const textNode = loginLoading.querySelector("span:last-child");
+    if (textNode) textNode.textContent = text;
+  }
+}
+
 async function login(event) {
   event.preventDefault();
   const formData = new FormData(loginForm);
   const username = String(formData.get("username") || "").trim();
   const password = String(formData.get("password") || "");
   let loginResult;
+  setLoginLoading(true);
+  loginError.hidden = true;
   try {
     const response = await fetch("/api/auth/login", {
       method: "POST",
@@ -3762,6 +4047,7 @@ async function login(event) {
       error: error.message === "Failed to fetch" ? "无法连接后端登录接口，请检查服务是否正常运行" : error.message,
     };
   }
+  setLoginLoading(false);
   if (!loginResult.user) {
     loginError.textContent = loginResult.error || "登录失败";
     loginError.hidden = false;
@@ -3860,6 +4146,9 @@ languageSelect.addEventListener("change", (event) => {
 
 deployRuleSelect.addEventListener("change", syncDeployRuleFields);
 appTypeSelect.addEventListener("change", syncDeployRuleFields);
+taskTemplateSelect.addEventListener("change", (event) => {
+  applyTaskTemplate(event.target.value);
+});
 
 pagesPackageManagerSelect.addEventListener("change", (event) => {
   const deployCommand = taskForm.elements.pagesDeployCommand;
@@ -3878,7 +4167,63 @@ document.getElementById("editSecretType").addEventListener("change", (event) => 
 
 taskSearch.addEventListener("input", (event) => {
   state.search = event.target.value;
+  listState("tasks").page = 1;
   renderRows();
+});
+
+function bindListFilters(key, searchId, categoryId, renderFn) {
+  const searchInput = document.getElementById(searchId);
+  const categorySelect = document.getElementById(categoryId);
+  searchInput?.addEventListener("input", (event) => {
+    const filters = listState(key);
+    filters.search = event.target.value;
+    filters.page = 1;
+    renderFn();
+    lucide.createIcons();
+  });
+  categorySelect?.addEventListener("change", (event) => {
+    const filters = listState(key);
+    filters.category = event.target.value;
+    filters.page = 1;
+    renderFn();
+    lucide.createIcons();
+  });
+}
+
+bindListFilters("clusters", "clusterSearch", "clusterCategoryFilter", renderClusterView);
+bindListFilters("templates", "templateSearch", "templateCategoryFilter", renderTemplateView);
+bindListFilters("channels", "channelSearch", "channelCategoryFilter", renderChannelView);
+bindListFilters("secrets", "secretSearch", "secretCategoryFilter", renderSecretView);
+bindListFilters("users", "userSearch", "userCategoryFilter", renderUserView);
+
+auditSearch.addEventListener("input", (event) => {
+  state.auditSearch = event.target.value;
+  state.auditPage = 1;
+  renderAuditView();
+  lucide.createIcons();
+});
+
+auditActionFilter.addEventListener("change", (event) => {
+  state.auditAction = event.target.value;
+  state.auditPage = 1;
+  renderAuditView();
+  lucide.createIcons();
+});
+
+auditResultFilter.addEventListener("change", (event) => {
+  state.auditResult = event.target.value;
+  state.auditPage = 1;
+  renderAuditView();
+  lucide.createIcons();
+});
+
+document.getElementById("clearAuditFilters").addEventListener("click", () => {
+  state.auditSearch = "";
+  state.auditAction = "all";
+  state.auditResult = "all";
+  state.auditPage = 1;
+  renderAuditView();
+  lucide.createIcons();
 });
 
 document.addEventListener("input", (event) => {
@@ -3935,6 +4280,7 @@ document.querySelectorAll(".segment").forEach((button) => {
     document.querySelectorAll(".segment").forEach((item) => item.classList.remove("active"));
     button.classList.add("active");
     state.filter = button.dataset.filter;
+    listState("tasks").page = 1;
     renderRows();
   });
 });
@@ -4022,6 +4368,22 @@ document.addEventListener("click", (event) => {
   const detailBackButton = event.target.closest("[data-detail-back]");
   if (detailBackButton) {
     setView("tasks");
+    return;
+  }
+
+  const listPageButton = event.target.closest("[data-list-page]");
+  if (listPageButton) {
+    const filters = listState(listPageButton.dataset.listPage);
+    filters.page += listPageButton.dataset.pageDirection === "next" ? 1 : -1;
+    render();
+    return;
+  }
+
+  const auditPageButton = event.target.closest("[data-audit-page]");
+  if (auditPageButton) {
+    state.auditPage += auditPageButton.dataset.auditPage === "next" ? 1 : -1;
+    renderAuditView();
+    lucide.createIcons();
     return;
   }
 

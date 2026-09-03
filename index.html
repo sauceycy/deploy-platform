@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>应用发布任务平台预览</title>
-    <link rel="stylesheet" href="./styles.css?v=20260903-1" />
+    <link rel="stylesheet" href="./styles.css?v=20260903-2" />
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
   </head>
   <body>
@@ -41,10 +41,14 @@
             <input name="password" type="password" autocomplete="current-password" required />
           </label>
           <p class="login-error" id="loginError" hidden>账号或密码不正确</p>
-          <button class="primary-button" type="submit">
+          <button class="primary-button" id="loginSubmit" type="submit">
             <i data-lucide="log-in"></i>
-            <span>登录</span>
+            <span id="loginSubmitText">登录</span>
           </button>
+          <div class="login-loading" id="loginLoading" hidden>
+            <span class="mini-spinner" aria-hidden="true"></span>
+            <span>正在验证登录状态...</span>
+          </div>
           <p class="login-note">请使用平台管理员分配的账号登录。</p>
         </form>
       </div>
@@ -71,7 +75,7 @@
           </button>
           <button class="nav-item" type="button" data-view="templates" data-permission-required="template.view">
             <i data-lucide="boxes"></i>
-            <span>构建模板</span>
+            <span>任务模板</span>
           </button>
           <button class="nav-item" type="button" data-view="channels" data-permission-required="channel.view">
             <i data-lucide="bell-ring"></i>
@@ -180,6 +184,7 @@
                 </div>
                 <div id="taskRows"></div>
               </div>
+              <div class="pagination-bar" id="taskPagination"></div>
             </div>
 
             <aside class="detail-panel list-detail-panel" id="detailPanel" aria-label="任务详情" hidden></aside>
@@ -220,7 +225,15 @@
               <code>docker-compose.yml: AGENT_SHARED_TOKEN</code>
               <code>k8s-agent.yaml: AGENT_TOKEN</code>
             </div>
+            <div class="management-toolbar">
+              <label class="search-box">
+                <i data-lucide="search"></i>
+                <input id="clusterSearch" type="search" placeholder="搜索集群、地域、namespace、秘钥" />
+              </label>
+              <select id="clusterCategoryFilter" aria-label="集群分类"></select>
+            </div>
             <div class="simple-table" id="clusterBody"></div>
+            <div class="pagination-bar" id="clusterPagination"></div>
           </section>
         </section>
 
@@ -228,15 +241,23 @@
           <section class="management-panel">
             <div class="panel-title split-title">
               <div>
-                <h2>构建模板</h2>
-                <span>语言、SDK 与默认构建命令</span>
+                <h2>任务模板</h2>
+                <span>沉淀常用发布任务配置</span>
               </div>
               <button class="primary-button" id="openTemplateCreate" type="button" data-permission-required="template.manage">
                 <i data-lucide="plus"></i>
                 <span>添加模板</span>
               </button>
             </div>
+            <div class="management-toolbar">
+              <label class="search-box">
+                <i data-lucide="search"></i>
+                <input id="templateSearch" type="search" placeholder="搜索模板、SDK、命令、路径" />
+              </label>
+              <select id="templateCategoryFilter" aria-label="模板分类"></select>
+            </div>
             <div class="simple-table" id="templateBody"></div>
+            <div class="pagination-bar" id="templatePagination"></div>
           </section>
         </section>
 
@@ -252,7 +273,15 @@
                 <span>添加渠道</span>
               </button>
             </div>
+            <div class="management-toolbar">
+              <label class="search-box">
+                <i data-lucide="search"></i>
+                <input id="channelSearch" type="search" placeholder="搜索渠道、类型、通知目标" />
+              </label>
+              <select id="channelCategoryFilter" aria-label="通知分类"></select>
+            </div>
             <div class="simple-table" id="channelBody"></div>
+            <div class="pagination-bar" id="channelPagination"></div>
           </section>
         </section>
 
@@ -293,7 +322,15 @@
                 <strong>Agent Token 实际配置位置</strong>
                 <span>平台服务端在 docker-compose.yml 的 AGENT_SHARED_TOKEN，集群 Agent 在 k8s-agent.yaml 的 AGENT_TOKEN，两边必须一致。这里可以记录 token 名称和用途，但运行时仍以环境变量为准。</span>
               </div>
+              <div class="management-toolbar">
+                <label class="search-box">
+                  <i data-lucide="search"></i>
+                  <input id="secretSearch" type="search" placeholder="搜索秘钥、类型、地址、用户名、用户组" />
+                </label>
+                <select id="secretCategoryFilter" aria-label="秘钥分类"></select>
+              </div>
               <div class="simple-table" id="secretBody"></div>
+              <div class="pagination-bar" id="secretPagination"></div>
             </div>
           </section>
         </section>
@@ -310,7 +347,15 @@
                 <span>添加用户</span>
               </button>
             </div>
+            <div class="management-toolbar">
+              <label class="search-box">
+                <i data-lucide="search"></i>
+                <input id="userSearch" type="search" placeholder="搜索姓名、账号、角色、用户组" />
+              </label>
+              <select id="userCategoryFilter" aria-label="用户分类"></select>
+            </div>
             <div class="simple-table" id="userBody"></div>
+            <div class="pagination-bar" id="userPagination"></div>
           </section>
         </section>
 
@@ -340,6 +385,18 @@
               <h2>审计记录</h2>
               <span>关键操作记录</span>
             </div>
+            <div class="audit-toolbar">
+              <label class="search-box audit-search">
+                <i data-lucide="search"></i>
+                <input id="auditSearch" type="search" placeholder="搜索操作人、动作、对象、结果" />
+              </label>
+              <select id="auditActionFilter" aria-label="审计动作分类"></select>
+              <select id="auditResultFilter" aria-label="审计结果分类"></select>
+              <button class="ghost-button" id="clearAuditFilters" type="button">
+                <i data-lucide="rotate-ccw"></i>
+                <span>重置</span>
+              </button>
+            </div>
             <div class="audit-table">
               <div class="audit-row table-head">
                 <span>时间</span>
@@ -350,6 +407,7 @@
               </div>
               <div id="auditBody"></div>
             </div>
+            <div class="pagination-bar" id="auditPagination"></div>
           </section>
         </section>
       </main>
@@ -409,6 +467,12 @@
               <select name="appType" id="appTypeSelect">
                 <option value="backend" selected>后端服务</option>
                 <option value="frontend">前端静态站点</option>
+              </select>
+            </label>
+            <label class="wide-field">
+              <span>任务模板</span>
+              <select name="templateId" id="taskTemplateSelect">
+                <option value="">自定义配置</option>
               </select>
             </label>
           </div>
@@ -633,8 +697,8 @@
     <dialog class="config-dialog form-dialog wide-dialog" id="templateCreateDialog">
       <div class="dialog-header">
         <div>
-          <h2>添加模板</h2>
-          <span>沉淀常用语言、SDK 和构建命令</span>
+          <h2>添加任务模板</h2>
+          <span>沉淀常用任务配置，创建任务时可一键套用</span>
         </div>
         <button class="icon-button" data-dialog-close="templateCreateDialog" type="button" title="关闭">
           <i data-lucide="x"></i>
@@ -659,9 +723,66 @@
             <span>SDK</span>
             <input name="sdk" placeholder="例如 jdk17" required />
           </label>
+          <label>
+            <span>部署规则</span>
+            <select name="deployRule">
+              <option value="k8s" selected>K8s 服务发布</option>
+              <option value="cf_pages">CF Pages 部署</option>
+            </select>
+          </label>
+          <label>
+            <span>应用类型</span>
+            <select name="appType">
+              <option value="backend" selected>后端服务</option>
+              <option value="frontend">前端静态站点</option>
+            </select>
+          </label>
+          <label>
+            <span>编译工作路径</span>
+            <input name="workdir" placeholder="." />
+          </label>
           <label class="wide-field">
             <span>默认构建命令</span>
             <input name="command" placeholder="mvn clean package -DskipTests" required />
+          </label>
+          <label class="wide-field">
+            <span>默认产物路径</span>
+            <input name="artifactPath" placeholder="ruoyi-admin/target/*.jar 或 dist" />
+          </label>
+          <label>
+            <span>容器端口</span>
+            <input name="containerPort" type="number" min="1" max="65535" placeholder="8080" />
+          </label>
+          <label>
+            <span>Service 端口</span>
+            <input name="servicePort" type="number" min="1" max="65535" placeholder="80" />
+          </label>
+          <label>
+            <span>副本数</span>
+            <input name="replicas" type="number" min="1" max="50" placeholder="1" />
+          </label>
+          <label>
+            <span>健康检查路径</span>
+            <input name="healthPath" placeholder="/actuator/health" />
+          </label>
+          <label>
+            <span>Pages 包管理器</span>
+            <select name="pagesPackageManager">
+              <option value="npm" selected>npm</option>
+              <option value="pnpm">pnpm</option>
+            </select>
+          </label>
+          <label class="wide-field">
+            <span>Pages 部署命令</span>
+            <input name="pagesDeployCommand" placeholder="npm run deploy" />
+          </label>
+          <label class="wide-field">
+            <span>Maven 私库地址</span>
+            <input name="mavenRepoUrl" placeholder="https://nexus.example.com/repository/maven-public/" />
+          </label>
+          <label>
+            <span>覆盖仓库 ID</span>
+            <input name="mavenMirrorOf" placeholder="maven-public" />
           </label>
         </div>
         <div class="drawer-actions">
@@ -670,7 +791,7 @@
           </button>
           <button class="primary-button" type="submit" data-permission-required="template.manage">
             <i data-lucide="plus"></i>
-            <span>添加模板</span>
+            <span>添加任务模板</span>
           </button>
         </div>
       </form>
@@ -1098,6 +1219,6 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=20260903-1"></script>
+    <script src="./app.js?v=20260903-2"></script>
   </body>
 </html>

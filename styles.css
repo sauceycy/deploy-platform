@@ -248,6 +248,31 @@ svg {
   text-align: center;
 }
 
+.login-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 34px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.mini-spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid var(--line);
+  border-top-color: var(--primary);
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 232px minmax(0, 1fr);
@@ -599,6 +624,35 @@ svg {
 .task-table,
 .audit-table {
   overflow-x: auto;
+}
+
+.audit-toolbar {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(150px, 0.34fr) minmax(150px, 0.34fr) auto;
+  gap: 10px;
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+  background: #fbfcfe;
+}
+
+.management-toolbar {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(170px, 0.32fr);
+  gap: 10px;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: #fbfcfe;
+}
+
+.audit-search {
+  width: 100%;
+  min-width: 0;
+}
+
+.management-toolbar .search-box {
+  width: 100%;
+  min-width: 0;
 }
 
 .task-row {
@@ -1914,6 +1968,30 @@ svg {
   border-bottom: 1px solid var(--line);
 }
 
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 54px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.pagination-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pagination-actions strong {
+  min-width: 58px;
+  color: var(--text);
+  text-align: center;
+}
+
 .drawer-backdrop {
   position: fixed;
   inset: 0;
@@ -2348,9 +2426,20 @@ pre {
   .inline-form,
   .settings-card,
   .cluster-token-note,
+  .management-toolbar,
+  .audit-toolbar,
   .compact-grid,
   .node-edit-row {
     grid-template-columns: 1fr;
+  }
+
+  .pagination-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pagination-actions {
+    justify-content: space-between;
   }
 
   .cluster-edit-row,
