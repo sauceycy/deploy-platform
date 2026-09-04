@@ -120,6 +120,7 @@ const state = {
   detailLogFilter: "all",
   detailLogQuery: "",
   logAutoFollow: true,
+  logScrollSnapshot: null,
   detailTab: "overview",
   detailExecutionId: "",
   search: "",
@@ -888,12 +889,12 @@ function renderLogViewer(execution) {
           <button class="icon-button" type="button" data-log-copy="${execution.id}" title="复制日志">
             <i data-lucide="copy"></i>
           </button>
-          <button class="icon-button ${state.logAutoFollow ? "active" : ""}" type="button" data-log-scroll title="${state.logAutoFollow ? "正在跟随最新日志" : "跳到底部并跟随最新"}">
+          <button class="icon-button ${state.logAutoFollow ? "active" : ""}" type="button" data-log-scroll title="${state.logAutoFollow ? "点击取消跟随最新日志" : "跳到底部并跟随最新日志"}">
             <i data-lucide="arrow-down-to-line"></i>
           </button>
         </div>
       </div>
-      <pre class="log-box rich-log">${
+      <pre class="log-box rich-log" data-log-execution="${execution.id}">${
         visibleLines.length
           ? visibleLines
               .map(
@@ -920,7 +921,37 @@ function rememberLogFollowState() {
   const logBox = currentLogBox();
   if (!logBox) return;
   state.logAutoFollow = isNearLogBottom(logBox);
+  state.logScrollSnapshot = {
+    view: state.view,
+    detailTab: state.detailTab,
+    executionId: logBox.dataset.logExecution || "",
+    scrollTop: logBox.scrollTop,
+    scrollHeight: logBox.scrollHeight,
+    clientHeight: logBox.clientHeight,
+    autoFollow: state.logAutoFollow,
+  };
   syncLogFollowButton();
+}
+
+function restoreLogScrollAfterRender() {
+  const snapshot = state.logScrollSnapshot;
+  window.requestAnimationFrame(() => {
+    const logBox = currentLogBox();
+    if (!logBox) return;
+    const sameLog =
+      snapshot &&
+      snapshot.view === state.view &&
+      snapshot.detailTab === state.detailTab &&
+      (!snapshot.executionId || snapshot.executionId === logBox.dataset.logExecution);
+    if (state.logAutoFollow || snapshot?.autoFollow) {
+      logBox.scrollTop = logBox.scrollHeight;
+    } else if (sameLog) {
+      const maxTop = Math.max(0, logBox.scrollHeight - logBox.clientHeight);
+      logBox.scrollTop = Math.min(snapshot.scrollTop, maxTop);
+    }
+    state.logScrollSnapshot = null;
+    syncLogFollowButton();
+  });
 }
 
 function followLatestLog(force = false) {
@@ -937,7 +968,7 @@ function syncLogFollowButton() {
   const button = logScope?.querySelector("[data-log-scroll]");
   if (!button) return;
   button.classList.toggle("active", state.logAutoFollow);
-  button.title = state.logAutoFollow ? "正在跟随最新日志" : "跳到底部并跟随最新";
+  button.title = state.logAutoFollow ? "点击取消跟随最新日志" : "跳到底部并跟随最新日志";
 }
 
 function selectedExecutionForTask(taskId) {
@@ -1741,7 +1772,7 @@ async function ensureFullExecutionLogs(execution) {
         rememberLogFollowState();
         renderTaskDetailPage();
         lucide.createIcons();
-        followLatestLog();
+        restoreLogScrollAfterRender();
       }
     }
   } catch {
@@ -2855,7 +2886,7 @@ async function refreshRemoteState(options = {}) {
     const changed = await loadPersistedState(options);
     if (changed) {
       render();
-      followLatestLog();
+      restoreLogScrollAfterRender();
     }
     return changed;
   })();
@@ -4032,10 +4063,11 @@ function scheduleStateSocketReconnect() {
 function applySocketMessage(message) {
   if (!message || typeof message !== "object") return;
   if (message.type === "state" && message.state) {
+    rememberLogFollowState();
     const changed = hydrateState(message.state);
     if (changed) {
       render();
-      followLatestLog();
+      restoreLogScrollAfterRender();
     }
     return;
   }
@@ -4049,9 +4081,10 @@ function applySocketMessage(message) {
     if (state.view === "taskDetail" && state.detailTab === "logs") {
       const focusedExecution = detailExecutionForTask(execution.taskId);
       if (focusedExecution && String(focusedExecution.id) === String(execution.id)) {
+        rememberLogFollowState();
         renderTaskDetailPage();
         lucide.createIcons();
-        followLatestLog();
+        restoreLogScrollAfterRender();
       }
     }
     return;
@@ -4325,7 +4358,7 @@ document.addEventListener("input", (event) => {
     renderDetail();
     renderTaskDetailPage();
     lucide.createIcons();
-    followLatestLog();
+    restoreLogScrollAfterRender();
     window.setTimeout(() => {
       const logScope = state.view === "taskDetail" ? taskDetailBody : detailPanel;
       const nextInput = logScope?.querySelector("[data-log-query]");
@@ -4557,7 +4590,7 @@ document.addEventListener("click", (event) => {
     renderDetail();
     renderTaskDetailPage();
     lucide.createIcons();
-    followLatestLog();
+    restoreLogScrollAfterRender();
     return;
   }
 
@@ -4572,9 +4605,9 @@ document.addEventListener("click", (event) => {
 
   const logScrollButton = event.target.closest("[data-log-scroll]");
   if (logScrollButton) {
-    state.logAutoFollow = true;
+    state.logAutoFollow = !state.logAutoFollow;
     syncLogFollowButton();
-    followLatestLog(true);
+    if (state.logAutoFollow) followLatestLog(true);
     return;
   }
 
