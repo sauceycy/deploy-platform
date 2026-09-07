@@ -1740,6 +1740,31 @@ def normalize_http_path(value):
     return path
 
 
+def normalize_health_check(value, fallback=None):
+    value = value if isinstance(value, dict) else {}
+    fallback = fallback if isinstance(fallback, dict) else {}
+    path = normalize_http_path(value.get("path") or value.get("healthPath") or fallback.get("path") or fallback.get("healthPath"))
+    enabled_value = value.get("enabled")
+    if enabled_value is None:
+        enabled_value = bool(path)
+    def to_int(field, default):
+        raw = value.get(field)
+        if raw in {None, ""}:
+            raw = fallback.get(field)
+        if raw in {None, ""}:
+            raw = default
+        return int(raw)
+    return {
+        "enabled": bool(enabled_value),
+        "path": path if bool(enabled_value) else "",
+        "initialDelaySeconds": to_int("initialDelaySeconds", 10),
+        "periodSeconds": to_int("periodSeconds", 10),
+        "timeoutSeconds": to_int("timeoutSeconds", 3),
+        "successThreshold": to_int("successThreshold", 1),
+        "failureThreshold": to_int("failureThreshold", 3),
+    }
+
+
 def generate_dockerfile(task, app_dir, src_dir):
     existing = app_dir / "Dockerfile"
     language = task.get("language")
@@ -1814,15 +1839,18 @@ def create_manifest(task, target, image, pull_secret=None):
     replicas = int(target.get("replicas") or task.get("replicas") or 1)
     container_port = int(task.get("containerPort") or 8080)
     service_port = int(task.get("servicePort") or 80)
-    health_path = normalize_http_path(task.get("healthPath"))
+    health_check = normalize_health_check(task.get("healthCheck"), task)
     readiness_probe_block = ""
-    if health_path:
+    if health_check["enabled"] and health_check["path"]:
         readiness_probe_block = f"""          readinessProbe:
             httpGet:
-              path: {json.dumps(health_path, ensure_ascii=False)}
+              path: {json.dumps(health_check['path'], ensure_ascii=False)}
               port: {container_port}
-            initialDelaySeconds: 10
-            periodSeconds: 10
+            initialDelaySeconds: {health_check['initialDelaySeconds']}
+            periodSeconds: {health_check['periodSeconds']}
+            timeoutSeconds: {health_check['timeoutSeconds']}
+            successThreshold: {health_check['successThreshold']}
+            failureThreshold: {health_check['failureThreshold']}
 """
     ingress_host = target.get("ingress") or ""
     image_pull_secret_block = ""
@@ -2557,7 +2585,7 @@ def normalize_task_payload(payload):
         "containerPort": int(payload.get("containerPort") or 8080),
         "servicePort": int(payload.get("servicePort") or 80),
         "replicas": int(payload.get("replicas") or 1),
-        "healthPath": str(payload.get("healthPath") or "").strip(),
+        "healthCheck": normalize_health_check(payload.get("healthCheck"), payload),
         "runtimeEnv": str(payload.get("runtimeEnv") or ""),
         "jvmOptions": normalize_jvm_options(payload.get("jvmOptions")),
         "cloudflareAccountIdSecretId": str(payload.get("cloudflareAccountIdSecretId") or "").strip(),
@@ -2590,6 +2618,7 @@ def normalize_task_payload(payload):
     else:
         task_payload["cloudflareAccountIdSecretId"] = ""
         task_payload["cloudflareApiTokenSecretId"] = ""
+    task_payload["healthPath"] = task_payload["healthCheck"]["path"]
     return task_payload
 
 

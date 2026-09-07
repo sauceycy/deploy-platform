@@ -89,6 +89,7 @@ const schedules = [];
 const platformSettings = { registrySecretId: "", imageNamespace: "deploy-platform" };
 const clusterDrafts = [];
 const deployConfigDrafts = [];
+let activeDeployConfigIndex = 0;
 const clusterNodeDrafts = [];
 const APP_STATE_KEY = "deploy-platform-state";
 const APP_USER_KEY = "deploy-platform-user";
@@ -185,6 +186,7 @@ const editUserOrgList = document.getElementById("editUserOrgList");
 const notifyTargetList = document.getElementById("notifyTargetList");
 const gitCredentialSelect = document.getElementById("gitCredentialSelect");
 const clusterEditor = document.getElementById("clusterEditor");
+const deployConfigTabs = document.getElementById("deployConfigTabs");
 const deployConfigEditor = document.getElementById("deployConfigEditor");
 const deployConfigSearch = document.getElementById("deployConfigSearch");
 const deployConfigBody = document.getElementById("deployConfigBody");
@@ -779,6 +781,74 @@ function envKeys(value) {
     .filter((line) => line && !line.startsWith("#") && line.includes("="))
     .map((line) => line.split("=")[0].trim())
     .filter(Boolean);
+}
+
+function numberOrDefault(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizeHealthCheckConfig(config = {}, fallback = {}) {
+  const source = config && typeof config === "object" ? (config.healthCheck && typeof config.healthCheck === "object" ? config.healthCheck : config) : {};
+  const base = fallback && typeof fallback === "object" ? (fallback.healthCheck && typeof fallback.healthCheck === "object" ? fallback.healthCheck : fallback) : {};
+  const path = String(source.path ?? source.healthPath ?? base.path ?? base.healthPath ?? "").trim();
+  const enabled = source.enabled === undefined || source.enabled === null ? Boolean(path) : Boolean(source.enabled);
+  return {
+    enabled,
+    path: enabled ? path : "",
+    initialDelaySeconds: numberOrDefault(source.initialDelaySeconds ?? base.initialDelaySeconds ?? 10, 10),
+    periodSeconds: numberOrDefault(source.periodSeconds ?? base.periodSeconds ?? 10, 10),
+    timeoutSeconds: numberOrDefault(source.timeoutSeconds ?? base.timeoutSeconds ?? 3, 3),
+    successThreshold: numberOrDefault(source.successThreshold ?? base.successThreshold ?? 1, 1),
+    failureThreshold: numberOrDefault(source.failureThreshold ?? base.failureThreshold ?? 3, 3),
+  };
+}
+
+function readHealthCheckForm(form = taskForm) {
+  if (!form?.elements) return normalizeHealthCheckConfig();
+  return normalizeHealthCheckConfig({
+    enabled: Boolean(form.elements.healthCheckEnabled?.checked),
+    path: form.elements.healthCheckPath?.value,
+    initialDelaySeconds: form.elements.healthCheckInitialDelaySeconds?.value,
+    periodSeconds: form.elements.healthCheckPeriodSeconds?.value,
+    timeoutSeconds: form.elements.healthCheckTimeoutSeconds?.value,
+    successThreshold: form.elements.healthCheckSuccessThreshold?.value,
+    failureThreshold: form.elements.healthCheckFailureThreshold?.value,
+  });
+}
+
+function fillHealthCheckForm(form, config = {}) {
+  if (!form?.elements) return;
+  const healthCheck = normalizeHealthCheckConfig(config);
+  if (form.elements.healthCheckEnabled) form.elements.healthCheckEnabled.checked = healthCheck.enabled;
+  if (form.elements.healthCheckPath) form.elements.healthCheckPath.value = healthCheck.path;
+  if (form.elements.healthCheckInitialDelaySeconds) form.elements.healthCheckInitialDelaySeconds.value = healthCheck.initialDelaySeconds;
+  if (form.elements.healthCheckPeriodSeconds) form.elements.healthCheckPeriodSeconds.value = healthCheck.periodSeconds;
+  if (form.elements.healthCheckTimeoutSeconds) form.elements.healthCheckTimeoutSeconds.value = healthCheck.timeoutSeconds;
+  if (form.elements.healthCheckSuccessThreshold) form.elements.healthCheckSuccessThreshold.value = healthCheck.successThreshold;
+  if (form.elements.healthCheckFailureThreshold) form.elements.healthCheckFailureThreshold.value = healthCheck.failureThreshold;
+}
+
+function healthCheckSummary(config = {}) {
+  const healthCheck = normalizeHealthCheckConfig(config);
+  if (!healthCheck.enabled) return "未启用";
+  if (!healthCheck.path) return "已启用但未配置路径";
+  return [
+    healthCheck.path,
+    `延迟 ${healthCheck.initialDelaySeconds}s`,
+    `周期 ${healthCheck.periodSeconds}s`,
+    `超时 ${healthCheck.timeoutSeconds}s`,
+    `成功 ${healthCheck.successThreshold}`,
+    `失败 ${healthCheck.failureThreshold}`,
+  ].join(" · ");
+}
+
+function syncHealthCheckFields(form = taskForm) {
+  if (!form?.elements) return;
+  const enabled = Boolean(form.elements.healthCheckEnabled?.checked);
+  const deployRule = normalizeDeployRule(form.elements.deployRule?.value);
+  const fields = form === taskForm ? document.getElementById("healthCheckFields") : document.getElementById("templateHealthCheckFields");
+  if (fields) fields.hidden = !enabled || deployRule === "cf_pages";
 }
 
 function executionLogLines(execution) {
@@ -1560,9 +1630,8 @@ function renderDetail() {
         <span>容器端口</span><strong>${task.containerPort}</strong>
         <span>Service</span><strong>${task.servicePort}</strong>
         <span>副本</span><strong>${task.replicas}</strong>
-        <span>健康检查</span><strong>${task.healthPath || "未设置"}</strong>
-        <span>运行环境变量</span><strong>${envKeys(task.runtimeEnv).join("、") || "未设置"}</strong>
-        ${task.language === "java" ? `<span>JAVA_TOOL_OPTIONS</span><strong>${task.jvmOptions || "未设置"}</strong>` : ""}
+        <span>健康检查</span><strong>${healthCheckSummary(task)}</strong>
+        <span>运行环境变量 / JVM</span><strong>请在配置管理中查看</strong>
       </div>
     </section>
 
@@ -1921,9 +1990,8 @@ function renderTaskConfigTab(task, activeSchedule) {
           <span>容器端口</span><strong>${task.containerPort}</strong>
           <span>Service</span><strong>${task.servicePort}</strong>
           <span>副本</span><strong>${task.replicas}</strong>
-          <span>健康检查</span><strong>${task.healthPath || "未设置"}</strong>
-          <span>运行环境变量</span><strong>${envKeys(task.runtimeEnv).join("、") || "未设置"}</strong>
-          ${task.language === "java" ? `<span>JAVA_TOOL_OPTIONS</span><strong>${task.jvmOptions || "未设置"}</strong>` : ""}
+          <span>健康检查</span><strong>${healthCheckSummary(task)}</strong>
+          <span>运行环境变量 / JVM</span><strong>请在配置管理中查看</strong>
           <span>通知渠道</span><strong>${task.notify.channel}</strong>
           <span>通知目标</span><strong>${task.notify.target || "未设置"}</strong>
           <span>通知事件</span><strong>${task.notify.events.join("、") || "未设置"}</strong>
@@ -2410,7 +2478,7 @@ function applyTaskTemplate(templateId) {
   setValue("containerPort", template.containerPort);
   setValue("servicePort", template.servicePort);
   setValue("replicas", template.replicas);
-  setValue("healthPath", template.healthPath);
+  fillHealthCheckForm(taskForm, template.healthCheck || template);
   setValue("pagesPackageManager", template.pagesPackageManager || "npm");
   setValue("pagesDeployCommand", template.pagesDeployCommand || defaultPagesDeployCommand(template.pagesPackageManager || "npm"));
   setValue("mavenRepoUrl", template.mavenRepoUrl);
@@ -2768,24 +2836,13 @@ function deployConfigClusterRow(configIndex, cluster, clusterIndex) {
   `;
 }
 
-function renderDeployConfigsEditor() {
-  if (!deployConfigEditor) return;
-  if (normalizeDeployRule(formValue("deployRule")) === "cf_pages") {
-    deployConfigEditor.innerHTML = `<div class="empty-state compact"><strong>CF Pages 暂不需要发布配置</strong><span>第一版发布配置聚焦 K8s 服务。</span></div>`;
-    return;
-  }
-  if (!deployConfigDrafts.length) {
-    deployConfigEditor.innerHTML = `<div class="empty-state compact"><strong>暂无发布配置</strong><span>点击“保存当前为配置”，为不同项目保存独立部署参数。</span></div>`;
-    return;
-  }
-  deployConfigEditor.innerHTML = deployConfigDrafts
-    .map(
-      (config, index) => `
+function deployConfigCardHtml(config, index) {
+  return `
       <div class="config-card" data-deploy-config="${index}">
         <div class="cluster-row-main">
           <div>
             <strong>${escapeHtml(deployConfigLabel(config))}</strong>
-            <span>${escapeHtml(deployConfigOrganizationIds(config).map(organizationName).join("、"))} · ${config.clusters.length} 个集群</span>
+            <span>${escapeHtml(deployConfigOrganizationIds(config).map(organizationName).join("、") || "默认用户组")} · ${config.clusters.length} 个集群</span>
           </div>
           <button class="icon-button danger-action" type="button" title="删除配置" data-remove-deploy-config="${index}">
             <i data-lucide="trash-2"></i>
@@ -2827,9 +2884,34 @@ function renderDeployConfigsEditor() {
         </div>
         ${config.clusters.map((cluster, clusterIndex) => deployConfigClusterRow(index, cluster, clusterIndex)).join("")}
       </div>
-    `,
+  `;
+}
+
+function renderDeployConfigsEditor() {
+  if (!deployConfigEditor || !deployConfigTabs) return;
+  if (normalizeDeployRule(formValue("deployRule")) === "cf_pages") {
+    deployConfigTabs.innerHTML = "";
+    deployConfigEditor.innerHTML = `<div class="empty-state compact"><strong>CF Pages 暂不需要发布配置</strong><span>第一版发布配置聚焦 K8s 服务。</span></div>`;
+    return;
+  }
+  if (!deployConfigDrafts.length) {
+    deployConfigTabs.innerHTML = "";
+    deployConfigEditor.innerHTML = `<div class="empty-state compact"><strong>暂无发布配置</strong><span>点击“保存当前为配置”，为不同项目保存独立部署参数。</span></div>`;
+    return;
+  }
+  activeDeployConfigIndex = Math.min(Math.max(activeDeployConfigIndex, 0), deployConfigDrafts.length - 1);
+  deployConfigTabs.innerHTML = deployConfigDrafts
+    .map(
+      (config, index) => `
+        <button class="deploy-config-tab ${index === activeDeployConfigIndex ? "active" : ""}" type="button" data-deploy-config-tab="${index}">
+          <span>${escapeHtml(config.name || `配置 ${index + 1}`)}</span>
+          <strong>${escapeHtml(config.env || "test")}</strong>
+        </button>
+      `,
     )
     .join("");
+  const activeConfig = deployConfigDrafts[activeDeployConfigIndex];
+  deployConfigEditor.innerHTML = activeConfig ? deployConfigCardHtml(activeConfig, activeDeployConfigIndex) : "";
   lucide.createIcons();
 }
 
@@ -2861,15 +2943,7 @@ function syncDeployRuleFields() {
     field.hidden = isPages;
   });
 
-  [
-    "buildCommand",
-    "containerPort",
-    "servicePort",
-    "replicas",
-    "healthPath",
-    "runtimeEnv",
-    "jvmOptions",
-  ].forEach((name) => {
+  ["buildCommand", "containerPort", "servicePort", "replicas"].forEach((name) => {
     const field = taskForm.elements[name];
     if (field) field.disabled = isPages;
   });
@@ -2887,6 +2961,7 @@ function syncDeployRuleFields() {
   if (taskForm.elements.cloudflareApiTokenSecretId) taskForm.elements.cloudflareApiTokenSecretId.required = false;
   if (taskForm.elements.cloudflareAccountIdSecretId) taskForm.elements.cloudflareAccountIdSecretId.disabled = !isPages;
   if (taskForm.elements.cloudflareApiTokenSecretId) taskForm.elements.cloudflareApiTokenSecretId.disabled = !isPages;
+  syncHealthCheckFields(taskForm);
 
   if (isPages || isFrontend) {
     taskForm.elements.language.value = "node";
@@ -2936,13 +3011,13 @@ function resetTaskForm() {
   taskForm.elements.cloudflareApiTokenSecretId.value = "";
   taskForm.elements.mavenRepoUrl.value = "";
   taskForm.elements.mavenMirrorOf.value = "maven-public";
-  taskForm.elements.runtimeEnv.value = "";
-  taskForm.elements.jvmOptions.value = "";
+  fillHealthCheckForm(taskForm, { enabled: true });
   renderNotifyChannelOptions("", true);
   renderGitCredentialOptions("");
   renderCloudflareSecretOptions();
   clusterDrafts.splice(0, clusterDrafts.length);
   deployConfigDrafts.splice(0, deployConfigDrafts.length);
+  activeDeployConfigIndex = 0;
   updateSdkOptions("java", true);
   syncDeployRuleFields();
 }
@@ -2993,12 +3068,10 @@ function openTaskEditor(taskId) {
   taskForm.elements.cloudflareApiTokenSecretId.value = task.cloudflareApiTokenSecretId || "";
   taskForm.elements.mavenRepoUrl.value = task.mavenRepoUrl || "";
   taskForm.elements.mavenMirrorOf.value = task.mavenMirrorOf || "maven-public";
-  taskForm.elements.runtimeEnv.value = task.runtimeEnv || "";
-  taskForm.elements.jvmOptions.value = task.jvmOptions || "";
   taskForm.elements.containerPort.value = task.containerPort || "";
   taskForm.elements.servicePort.value = task.servicePort || "";
   taskForm.elements.replicas.value = task.replicas || "";
-  taskForm.elements.healthPath.value = task.healthPath || "";
+  fillHealthCheckForm(taskForm, task.healthCheck || task);
   taskForm.elements.notifyTarget.value = task.notify?.target || "";
   renderNotifyChannelOptions(task.notify?.target || task.notify?.channel || "", !task.notify?.target);
   renderCloudflareSecretOptions();
@@ -3008,6 +3081,7 @@ function openTaskEditor(taskId) {
   taskForm.elements.notifySuccess.checked = task.notify?.events?.includes("发布成功") ?? false;
   clusterDrafts.splice(0, clusterDrafts.length, ...(task.clusters || []).map((cluster) => ({ ...cluster })));
   deployConfigDrafts.splice(0, deployConfigDrafts.length, ...normalizeDeployConfigs(task.deployConfigs, task).map((config) => ({ ...config, clusters: config.clusters.map((cluster) => ({ ...cluster })) })));
+  activeDeployConfigIndex = 0;
   syncDeployRuleFields();
   drawer.inert = false;
   backdrop.hidden = false;
@@ -3043,6 +3117,7 @@ function openCreateDialog(dialog, permission, form) {
   renderImagePullSecretOptions();
   renderUserView();
   syncSecretNamePlaceholder();
+  syncHealthCheckFields(form);
   dialog.showModal();
   window.setTimeout(() => dialog.querySelector("input, select, textarea, button")?.focus(), 0);
 }
@@ -3059,6 +3134,10 @@ function formValue(name) {
 
 function taskEnvValue(task = {}) {
   return task.env || formValue("env") || "test";
+}
+
+function taskFormHealthCheck() {
+  return readHealthCheckForm(taskForm);
 }
 
 function selectedEvents() {
@@ -3112,6 +3191,7 @@ function currentDeployConfigSnapshot() {
   collectClusterDrafts();
   const name = formValue("name") || "服务";
   const env = taskEnvValue();
+  const baseConfig = deployConfigDrafts[activeDeployConfigIndex] || {};
   return normalizeDeployConfig(
     {
       id: `cfg-${Date.now()}`,
@@ -3120,8 +3200,8 @@ function currentDeployConfigSnapshot() {
       deploymentName: name,
       organizationIds: [formValue("organizationId") || "default"],
       clusters: clusterDrafts.map((cluster) => ({ ...cluster })),
-      runtimeEnv: formValue("runtimeEnv"),
-      jvmOptions: formValue("jvmOptions"),
+      runtimeEnv: baseConfig.runtimeEnv || "",
+      jvmOptions: baseConfig.jvmOptions || "",
     },
     { name, env, organizationId: formValue("organizationId") || "default", clusters: clusterDrafts },
   );
@@ -3168,9 +3248,7 @@ function buildPreviewObject() {
       containerPort: Number(formValue("containerPort")),
       servicePort: Number(formValue("servicePort")),
       replicas: Number(formValue("replicas") || 1),
-      healthPath: formValue("healthPath"),
-      env: formValue("runtimeEnv"),
-      jvmOptions: formValue("language") === "java" ? formValue("jvmOptions") : "",
+      healthCheck: taskFormHealthCheck(),
     },
     clusters: normalizeDeployRule(formValue("deployRule")) === "cf_pages" ? [] : clusterDrafts,
     deployConfigs,
@@ -3218,9 +3296,8 @@ async function saveTask(event) {
     containerPort: preview.runtime.containerPort,
     servicePort: preview.runtime.servicePort,
     replicas: preview.runtime.replicas,
-    healthPath: preview.runtime.healthPath,
-    runtimeEnv: preview.runtime.env,
-    jvmOptions: preview.runtime.jvmOptions,
+    healthPath: preview.runtime.healthCheck.enabled ? preview.runtime.healthCheck.path : "",
+    healthCheck: preview.runtime.healthCheck,
     clusters: preview.clusters.map((cluster) => ({ ...cluster, status: cluster.status || "success" })),
     deployConfigs: preview.deployConfigs,
     notify: preview.notify,
@@ -3794,7 +3871,15 @@ async function saveTemplate(event) {
     containerPort: formData.get("containerPort") || "",
     servicePort: formData.get("servicePort") || "",
     replicas: formData.get("replicas") || "",
-    healthPath: formData.get("healthPath") || "",
+    healthCheck: {
+      enabled: Boolean(formData.get("healthCheckEnabled")),
+      path: formData.get("healthCheckPath") || "",
+      initialDelaySeconds: formData.get("healthCheckInitialDelaySeconds") || 10,
+      periodSeconds: formData.get("healthCheckPeriodSeconds") || 10,
+      timeoutSeconds: formData.get("healthCheckTimeoutSeconds") || 3,
+      successThreshold: formData.get("healthCheckSuccessThreshold") || 1,
+      failureThreshold: formData.get("healthCheckFailureThreshold") || 3,
+    },
     pagesPackageManager: formData.get("pagesPackageManager") || "npm",
     pagesDeployCommand: formData.get("pagesDeployCommand") || "",
     mavenRepoUrl: formData.get("mavenRepoUrl") || "",
@@ -4672,6 +4757,12 @@ taskForm.addEventListener("submit", saveTask);
 document.getElementById("clusterForm").addEventListener("submit", saveCluster);
 document.getElementById("templateForm").addEventListener("submit", saveTemplate);
 document.getElementById("channelForm").addEventListener("submit", saveChannel);
+taskForm.addEventListener("change", () => syncHealthCheckFields(taskForm));
+document.getElementById("templateForm").addEventListener("change", (event) => {
+  if (event.target?.name === "healthCheckEnabled" || event.target?.name?.startsWith("healthCheck")) {
+    syncHealthCheckFields(document.getElementById("templateForm"));
+  }
+});
 platformSettingsForm.addEventListener("submit", savePlatformSettings);
 platformSettingsForm.addEventListener("input", () => {
   platformSettingsDirty = true;
@@ -5092,7 +5183,21 @@ document.addEventListener("click", (event) => {
   const removeDeployConfigButton = event.target.closest("[data-remove-deploy-config]");
   if (removeDeployConfigButton && deployConfigDrafts.length > 0) {
     collectDeployConfigDrafts();
-    deployConfigDrafts.splice(Number(removeDeployConfigButton.dataset.removeDeployConfig), 1);
+    const removeIndex = Number(removeDeployConfigButton.dataset.removeDeployConfig);
+    deployConfigDrafts.splice(removeIndex, 1);
+    if (activeDeployConfigIndex >= deployConfigDrafts.length) {
+      activeDeployConfigIndex = Math.max(0, deployConfigDrafts.length - 1);
+    } else if (removeIndex < activeDeployConfigIndex) {
+      activeDeployConfigIndex -= 1;
+    }
+    renderDeployConfigsEditor();
+    return;
+  }
+
+  const deployConfigTabButton = event.target.closest("[data-deploy-config-tab]");
+  if (deployConfigTabButton) {
+    collectDeployConfigDrafts();
+    activeDeployConfigIndex = Number(deployConfigTabButton.dataset.deployConfigTab);
     renderDeployConfigsEditor();
     return;
   }
@@ -5159,7 +5264,9 @@ document.getElementById("addCluster").addEventListener("click", () => {
 });
 
 document.getElementById("addDeployConfig").addEventListener("click", () => {
+  collectDeployConfigDrafts();
   deployConfigDrafts.push(currentDeployConfigSnapshot());
+  activeDeployConfigIndex = deployConfigDrafts.length - 1;
   renderDeployConfigsEditor();
 });
 
