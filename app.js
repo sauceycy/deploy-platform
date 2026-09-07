@@ -177,8 +177,6 @@ const cloudflareAccountIdSecretSelect = document.getElementById("cloudflareAccou
 const cloudflareApiTokenSecretSelect = document.getElementById("cloudflareApiTokenSecretSelect");
 const taskForm = document.getElementById("taskForm");
 const taskOrganizationSelect = document.getElementById("taskOrganizationSelect");
-const clusterOrganizationSelect = document.getElementById("clusterOrganizationSelect");
-const secretOrganizationSelect = document.getElementById("secretOrganizationSelect");
 const newUserOrgList = document.getElementById("newUserOrgList");
 const editUserOrgList = document.getElementById("editUserOrgList");
 const notifyTargetList = document.getElementById("notifyTargetList");
@@ -208,8 +206,6 @@ const clusterDialog = document.getElementById("clusterDialog");
 const editClusterForm = document.getElementById("editClusterForm");
 const organizationForm = document.getElementById("organizationForm");
 const organizationBody = document.getElementById("organizationBody");
-const editClusterOrganizationSelect = document.getElementById("editClusterOrganizationSelect");
-const editSecretOrganizationSelect = document.getElementById("editSecretOrganizationSelect");
 const clusterNodeEditor = document.getElementById("clusterNodeEditor");
 const branchDialog = document.getElementById("branchDialog");
 const branchForm = document.getElementById("branchForm");
@@ -273,8 +269,13 @@ function currentUserGroups() {
   return organizations.filter((group) => ids.includes(String(group.id)));
 }
 
-function assetOrgId(asset) {
-  return String(asset?.organizationId || "default");
+function assetOrganizationIds(asset) {
+  const ids = Array.isArray(asset?.organizationIds) && asset.organizationIds.length ? asset.organizationIds : [asset?.organizationId || "default"];
+  return ids.map((id) => String(id || "default"));
+}
+
+function assetOrganizationLabel(asset) {
+  return assetOrganizationIds(asset).map(organizationName).join("、");
 }
 
 function canAccessOrg(orgId) {
@@ -282,7 +283,7 @@ function canAccessOrg(orgId) {
 }
 
 function canAccessAsset(asset) {
-  return canAccessOrg(assetOrgId(asset));
+  return hasGlobalAccess() || assetOrganizationIds(asset).some((orgId) => currentUserOrgIds().includes(String(orgId)));
 }
 
 function canOperateAsset(permission, asset) {
@@ -313,6 +314,27 @@ function organizationOptions(selectedId = "default") {
   const items = visibleOrganizations();
   const selected = String(selectedId || items[0]?.id || "default");
   return items.map((org) => `<option value="${org.id}" ${String(org.id) === selected ? "selected" : ""}>${org.name}</option>`).join("");
+}
+
+function renderOrganizationChecks(container, selectedIds = ["default"]) {
+  if (!container) return;
+  const currentSelected = Array.from(container.querySelectorAll("[data-asset-org]:checked")).map((input) => input.dataset.assetOrg);
+  const selected = new Set((currentSelected.length ? currentSelected : selectedIds || ["default"]).map(String));
+  container.innerHTML = visibleOrganizations()
+    .map(
+      (group) => `
+        <label class="permission-item">
+          <input type="checkbox" data-asset-org="${group.id}" ${selected.has(String(group.id)) ? "checked" : ""} />
+          <span>${group.name}</span>
+        </label>
+      `,
+    )
+    .join("");
+}
+
+function collectOrganizationIds(container) {
+  const ids = Array.from(container?.querySelectorAll("[data-asset-org]:checked") || []).map((input) => input.dataset.assetOrg);
+  return ids.length ? ids : ["default"];
 }
 
 function normalizeClusterName(value) {
@@ -1928,16 +1950,12 @@ function renderAccessView() {
 
 function renderOrganizationOptions() {
   const firstVisible = visibleOrganizations()[0]?.id || "default";
-  const selects = [
-    [taskOrganizationSelect, taskOrganizationSelect?.value || firstVisible],
-    [clusterOrganizationSelect, clusterOrganizationSelect?.value || firstVisible],
-    [secretOrganizationSelect, secretOrganizationSelect?.value || firstVisible],
-    [editClusterOrganizationSelect, editClusterOrganizationSelect?.value || firstVisible],
-    [editSecretOrganizationSelect, editSecretOrganizationSelect?.value || firstVisible],
-  ];
-  selects.forEach(([select, selected]) => {
-    if (select) select.innerHTML = organizationOptions(selected);
-  });
+  if (taskOrganizationSelect) taskOrganizationSelect.innerHTML = organizationOptions(taskOrganizationSelect.value || firstVisible);
+  renderOrganizationChecks(document.getElementById("clusterOrganizationList"), collectOrganizationIds(document.getElementById("clusterOrganizationList")));
+  renderOrganizationChecks(document.getElementById("templateOrganizationList"), collectOrganizationIds(document.getElementById("templateOrganizationList")));
+  renderOrganizationChecks(document.getElementById("secretOrganizationList"), collectOrganizationIds(document.getElementById("secretOrganizationList")));
+  renderOrganizationChecks(document.getElementById("editClusterOrganizationList"), collectOrganizationIds(document.getElementById("editClusterOrganizationList")));
+  renderOrganizationChecks(document.getElementById("editSecretOrganizationList"), collectOrganizationIds(document.getElementById("editSecretOrganizationList")));
 }
 
 function renderUserGroupChecks(container, selectedIds = ["default"]) {
@@ -1970,15 +1988,16 @@ function renderOrganizationView() {
   organizationBody.innerHTML = rows
     .map((group) => {
       const userCount = users.filter((user) => (user.organizationIds || []).includes(group.id)).length;
-      const taskCount = tasks.filter((task) => assetOrgId(task) === String(group.id)).length;
-      const secretCount = secrets.filter((secret) => assetOrgId(secret) === String(group.id)).length;
-      const clusterCount = clusters.filter((cluster) => assetOrgId(cluster) === String(group.id)).length;
+      const taskCount = tasks.filter((task) => assetOrganizationIds(task).includes(String(group.id))).length;
+      const secretCount = secrets.filter((secret) => assetOrganizationIds(secret).includes(String(group.id))).length;
+      const clusterCount = clusters.filter((cluster) => assetOrganizationIds(cluster).includes(String(group.id))).length;
+      const templateCount = buildTemplates.filter((template) => assetOrganizationIds(template).includes(String(group.id))).length;
       return `
         <div class="group-row">
           <div class="group-head">
             <div>
               <strong>${group.name}</strong>
-              <span>${group.description || "未设置描述"} · 用户 ${userCount} · 任务 ${taskCount} · 秘钥 ${secretCount} · 集群 ${clusterCount}</span>
+              <span>${group.description || "未设置描述"} · 用户 ${userCount} · 任务 ${taskCount} · 模板 ${templateCount} · 秘钥 ${secretCount} · 集群 ${clusterCount}</span>
             </div>
             <label class="check-line compact-check">
               <input type="checkbox" data-group-global="${group.id}" ${group.globalAccess ? "checked" : ""} ${hasPermission("org.manage") && hasGlobalAccess() && group.id !== "default" ? "" : "disabled"} />
@@ -2095,7 +2114,7 @@ function renderClusterView() {
       (filters.category === "offline" && agentState.status !== "success") ||
       filters.category === `env:${cluster.env}`;
     const matchedSearch = textIncludes(
-      [cluster.name, organizationName(cluster.organizationId), cluster.region, cluster.env, cluster.namespace, secretName(cluster.imagePullSecretId), (cluster.nodes || []).map((node) => `${node.name} ${node.ip}`).join(" ")],
+      [cluster.name, assetOrganizationLabel(cluster), cluster.region, cluster.env, cluster.namespace, secretName(cluster.imagePullSecretId), (cluster.nodes || []).map((node) => `${node.name} ${node.ip}`).join(" ")],
       query,
     );
     return matchedCategory && matchedSearch;
@@ -2116,7 +2135,7 @@ function renderClusterView() {
         <div class="cluster-row-main">
           <div>
             <strong>${cluster.name}</strong>
-            <span>${organizationName(cluster.organizationId)} · ${cluster.region || "未设置地域"} · ${cluster.env} · 默认 namespace ${cluster.namespace || "default"}</span>
+            <span>${assetOrganizationLabel(cluster)} · ${cluster.region || "未设置地域"} · ${cluster.env} · 默认 namespace ${cluster.namespace || "default"}</span>
           </div>
           <span class="status-chip ${agentState.status}">${agentState.label}</span>
         </div>
@@ -2161,17 +2180,18 @@ function renderTemplateView() {
   const body = document.getElementById("templateBody");
   const filters = listState("templates");
   const query = filters.search.trim().toLowerCase();
+  const accessibleTemplates = buildTemplates.filter(canAccessAsset);
   filters.category = renderCategoryOptions(
     "templateCategoryFilter",
     [
-      ...Array.from(new Set(buildTemplates.map((template) => template.language).filter(Boolean))).map((language) => ({ value: `lang:${language}`, label: languageLabel(language) })),
-      ...Array.from(new Set(buildTemplates.map((template) => template.deployRule || "k8s"))).map((rule) => ({ value: `rule:${rule}`, label: deployRuleLabel(rule) })),
+      ...Array.from(new Set(accessibleTemplates.map((template) => template.language).filter(Boolean))).map((language) => ({ value: `lang:${language}`, label: languageLabel(language) })),
+      ...Array.from(new Set(accessibleTemplates.map((template) => template.deployRule || "k8s"))).map((rule) => ({ value: `rule:${rule}`, label: deployRuleLabel(rule) })),
     ],
     filters.category,
   );
-  const visibleTemplates = buildTemplates.filter((template) => {
+  const visibleTemplates = accessibleTemplates.filter((template) => {
     const matchedCategory = filters.category === "all" || filters.category === `lang:${template.language}` || filters.category === `rule:${template.deployRule || "k8s"}`;
-    const matchedSearch = textIncludes([template.name, template.language, template.sdk, template.command, template.workdir, template.artifactPath, template.mavenRepoUrl, template.pagesDeployCommand], query);
+    const matchedSearch = textIncludes([template.name, assetOrganizationLabel(template), template.language, template.sdk, template.command, template.workdir, template.artifactPath, template.mavenRepoUrl, template.pagesDeployCommand], query);
     return matchedCategory && matchedSearch;
   });
   const pageData = paginateRows("templates", visibleTemplates);
@@ -2186,7 +2206,7 @@ function renderTemplateView() {
       <div class="simple-row">
         <div>
           <strong>${template.name}</strong>
-          <span>${deployRuleLabel(template.deployRule || "k8s")} · ${appTypeLabel(template.appType || "backend")} · ${languageLabel(template.language)} · ${template.sdk} · ${template.command}</span>
+          <span>${assetOrganizationLabel(template)} · ${deployRuleLabel(template.deployRule || "k8s")} · ${appTypeLabel(template.appType || "backend")} · ${languageLabel(template.language)} · ${template.sdk} · ${template.command}</span>
         </div>
         <span class="language-chip ${template.language}">${languageLabel(template.language)}</span>
       </div>
@@ -2198,9 +2218,10 @@ function renderTemplateView() {
 
 function renderTaskTemplateOptions(selectedId = taskTemplateSelect?.value || "") {
   if (!taskTemplateSelect) return;
+  const visibleTemplates = buildTemplates.filter((template) => canAccessAsset(template) || String(template.id) === String(selectedId));
   taskTemplateSelect.innerHTML = [
     `<option value="">自定义配置</option>`,
-    ...buildTemplates.map((template) => `<option value="${template.id}" ${String(template.id) === String(selectedId) ? "selected" : ""}>${template.name}</option>`),
+    ...visibleTemplates.map((template) => `<option value="${template.id}" ${String(template.id) === String(selectedId) ? "selected" : ""}>${template.name}</option>`),
   ].join("");
 }
 
@@ -2287,7 +2308,7 @@ function renderSecretView() {
   const visibleSecrets = secrets.filter((secret) => {
     if (!canAccessAsset(secret)) return false;
     const matchedCategory = filters.category === "all" || secret.type === filters.category;
-    const matchedSearch = textIncludes([secret.name, organizationName(secret.organizationId), secretTypeLabel(secret.type), secret.target, secret.username, secret.hasSecret || secret.secret ? "已保存秘钥" : "未保存秘钥"], query);
+    const matchedSearch = textIncludes([secret.name, assetOrganizationLabel(secret), secretTypeLabel(secret.type), secret.target, secret.username, secret.hasSecret || secret.secret ? "已保存秘钥" : "未保存秘钥"], query);
     return matchedCategory && matchedSearch;
   });
   const pageData = paginateRows("secrets", visibleSecrets);
@@ -2302,7 +2323,7 @@ function renderSecretView() {
       <div class="simple-row">
         <div>
           <strong>${secret.name}</strong>
-          <span>${organizationName(secret.organizationId)} · ${secretTypeLabel(secret.type)} · ${secret.target || "未设置地址"} · ${secret.username || "未设置用户名"} · ${secret.hasSecret || secret.secret ? "已保存秘钥" : "未保存秘钥"}</span>
+          <span>${assetOrganizationLabel(secret)} · ${secretTypeLabel(secret.type)} · ${secret.target || "未设置地址"} · ${secret.username || "未设置用户名"} · ${secret.hasSecret || secret.secret ? "已保存秘钥" : "未保存秘钥"}</span>
         </div>
         <div class="row-actions">
           <button class="ghost-button" type="button" data-secret-edit="${secret.id}" ${canOperateAsset("secret.manage", secret) ? "" : "disabled"}>
@@ -2478,6 +2499,11 @@ function renderClusters() {
     return;
   }
   const selectableClusters = clusters.filter(canAccessAsset);
+  const selectedClusterNames = new Set(clusterDrafts.map((cluster) => String(cluster.name || "").trim()).filter(Boolean));
+  const clusterOptions = [
+    ...selectableClusters,
+    ...clusters.filter((cluster) => selectedClusterNames.has(String(cluster.name || "").trim()) && !selectableClusters.some((item) => item.name === cluster.name)),
+  ];
 
   clusterEditor.innerHTML = clusterDrafts
     .map(
@@ -2486,7 +2512,12 @@ function renderClusters() {
         <label>
           <span>集群</span>
           <select data-field="name">
-            ${selectableClusters.map((item) => `<option ${item.name === cluster.name ? "selected" : ""}>${item.name}</option>`).join("")}
+            ${clusterOptions
+              .map((item) => {
+                const inaccessible = !canAccessAsset(item);
+                return `<option ${item.name === cluster.name ? "selected" : ""} value="${item.name}">${item.name}${inaccessible ? "（当前无访问权限）" : ""}</option>`;
+              })
+              .join("")}
           </select>
         </label>
         <label>
@@ -2712,6 +2743,9 @@ function openCreateDialog(dialog, permission, form) {
   if (form) form.reset();
   renderOrganizationOptions();
   renderUserGroupChecks(newUserOrgList, ["default"]);
+  if (form?.id === "clusterForm") renderOrganizationChecks(document.getElementById("clusterOrganizationList"), ["default"]);
+  if (form?.id === "templateForm") renderOrganizationChecks(document.getElementById("templateOrganizationList"), ["default"]);
+  if (form?.id === "secretForm") renderOrganizationChecks(document.getElementById("secretOrganizationList"), ["default"]);
   if (form?.elements?.globalAccess) {
     form.elements.globalAccess.checked = false;
     form.elements.globalAccess.disabled = !hasGlobalAccess();
@@ -3174,7 +3208,7 @@ async function saveCluster(event) {
   const submitter = event.submitter;
   if (submitter) submitter.disabled = true;
   const formData = new FormData(form);
-  const organizationId = formData.get("organizationId") || visibleOrganizations()[0]?.id || "default";
+  const organizationIds = collectOrganizationIds(document.getElementById("clusterOrganizationList"));
   const clusterName = normalizeClusterName(formData.get("name"));
   if (!clusterName) {
     window.alert("集群名称不能为空");
@@ -3186,7 +3220,7 @@ async function saveCluster(event) {
     if (submitter) submitter.disabled = false;
     return;
   }
-  if (!canAccessOrg(organizationId)) {
+  if (!organizationIds.every((id) => canAccessOrg(id))) {
     window.alert("当前用户组无权添加该资产到目标用户组");
     if (submitter) submitter.disabled = false;
     return;
@@ -3196,7 +3230,8 @@ async function saveCluster(event) {
     name: clusterName,
     region: formData.get("region"),
     env: formData.get("env"),
-    organizationId,
+    organizationIds,
+    organizationId: organizationIds[0] || "default",
     namespace: formData.get("namespace"),
     imagePullSecretId: formData.get("imagePullSecretId"),
     nodes: [],
@@ -3267,8 +3302,7 @@ function openClusterDialog(clusterId) {
   editClusterForm.elements.name.value = cluster.name || "";
   editClusterForm.elements.region.value = cluster.region || "";
   editClusterForm.elements.env.value = cluster.env || "dev";
-  editClusterOrganizationSelect.innerHTML = organizationOptions(cluster.organizationId || "default");
-  editClusterForm.elements.organizationId.value = cluster.organizationId || "default";
+  renderOrganizationChecks(document.getElementById("editClusterOrganizationList"), assetOrganizationIds(cluster));
   editClusterForm.elements.namespace.value = cluster.namespace || "default";
   editClusterForm.elements.imagePullSecretId.value = cluster.imagePullSecretId || "";
   clusterNodeDrafts.splice(0, clusterNodeDrafts.length, ...(cluster.nodes || []).map((node) => ({ ...node })));
@@ -3298,7 +3332,8 @@ async function saveEditedCluster(event) {
     if (submitter) submitter.disabled = false;
     return;
   }
-  if (!canAccessOrg(editClusterForm.elements.organizationId.value || "default")) {
+  const organizationIds = collectOrganizationIds(document.getElementById("editClusterOrganizationList"));
+  if (!organizationIds.every((id) => canAccessOrg(id))) {
     window.alert("当前用户组无权移动该集群到目标用户组");
     if (submitter) submitter.disabled = false;
     return;
@@ -3319,7 +3354,8 @@ async function saveEditedCluster(event) {
     name: nextName,
     region: editClusterForm.elements.region.value,
     env: editClusterForm.elements.env.value,
-    organizationId: editClusterForm.elements.organizationId.value || "default",
+    organizationIds,
+    organizationId: organizationIds[0] || "default",
     namespace: editClusterForm.elements.namespace.value || "default",
     imagePullSecretId: editClusterForm.elements.imagePullSecretId.value,
     nodes: clusterNodeDrafts.filter((node) => node.name || node.ip),
@@ -3361,9 +3397,12 @@ async function saveTemplate(event) {
   const submitter = event.submitter;
   if (submitter) submitter.disabled = true;
   const formData = new FormData(form);
+  const organizationIds = collectOrganizationIds(document.getElementById("templateOrganizationList"));
   const template = {
     id: Date.now(),
     name: formData.get("name"),
+    organizationIds,
+    organizationId: organizationIds[0] || "default",
     deployRule: normalizeDeployRule(formData.get("deployRule")),
     appType: normalizeDeployRule(formData.get("deployRule")) === "cf_pages" ? "frontend" : normalizeAppType(formData.get("appType")),
     language: formData.get("language"),
@@ -3514,8 +3553,8 @@ async function saveSecret(event) {
   try {
     const formData = new FormData(form);
     const name = String(formData.get("name") || "").trim();
-    const organizationId = formData.get("organizationId") || visibleOrganizations()[0]?.id || "default";
-    if (!canAccessOrg(organizationId)) {
+    const organizationIds = collectOrganizationIds(document.getElementById("secretOrganizationList"));
+    if (!organizationIds.every((id) => canAccessOrg(id))) {
       window.alert("当前用户组无权添加该秘钥到目标用户组");
       return;
     }
@@ -3526,7 +3565,8 @@ async function saveSecret(event) {
     const payload = {
       name,
       type: formData.get("type"),
-      organizationId,
+      organizationIds,
+      organizationId: organizationIds[0] || "default",
       target: formData.get("target"),
       username: formData.get("username"),
       secret: formData.get("secret"),
@@ -3554,8 +3594,7 @@ function openSecretDialog(secretId) {
   editSecretForm.elements.id.value = secret.id;
   editSecretForm.elements.name.value = secret.name || "";
   editSecretForm.elements.type.value = secret.type || "git_https_token";
-  editSecretOrganizationSelect.innerHTML = organizationOptions(secret.organizationId || "default");
-  editSecretForm.elements.organizationId.value = secret.organizationId || "default";
+  renderOrganizationChecks(document.getElementById("editSecretOrganizationList"), assetOrganizationIds(secret));
   editSecretForm.elements.target.value = secret.target || "";
   editSecretForm.elements.username.value = secret.username || "";
   editSecretForm.elements.secret.value = "";
@@ -3582,7 +3621,8 @@ async function saveEditedSecret(event) {
       window.alert("当前用户组无权保存该秘钥");
       return;
     }
-    if (!canAccessOrg(editSecretForm.elements.organizationId.value || "default")) {
+    const organizationIds = collectOrganizationIds(document.getElementById("editSecretOrganizationList"));
+    if (!organizationIds.every((id) => canAccessOrg(id))) {
       window.alert("当前用户组无权移动该秘钥到目标用户组");
       return;
     }
@@ -3594,7 +3634,8 @@ async function saveEditedSecret(event) {
     const payload = {
       name: nextName,
       type: editSecretForm.elements.type.value,
-      organizationId: editSecretForm.elements.organizationId.value || "default",
+      organizationIds,
+      organizationId: organizationIds[0] || "default",
       target: editSecretForm.elements.target.value,
       username: editSecretForm.elements.username.value,
       secret: editSecretForm.elements.secret.value,

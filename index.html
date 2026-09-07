@@ -680,10 +680,6 @@
             </select>
           </label>
           <label>
-            <span>所属用户组</span>
-            <select name="organizationId" id="clusterOrganizationSelect"></select>
-          </label>
-          <label>
             <span>默认 namespace</span>
             <input name="namespace" placeholder="default" />
           </label>
@@ -694,6 +690,15 @@
             </select>
           </label>
         </div>
+        <section class="dialog-section">
+          <div class="section-title-row">
+            <div>
+              <h3>所属用户组</h3>
+              <span>可同时授权多个用户组访问该集群</span>
+            </div>
+          </div>
+          <div class="permission-list compact-permission-list" id="clusterOrganizationList"></div>
+        </section>
         <div class="drawer-actions">
           <button class="ghost-button" type="button" data-dialog-close="clusterCreateDialog">
             <span>取消</span>
@@ -797,6 +802,15 @@
             <input name="mavenMirrorOf" placeholder="maven-public" />
           </label>
         </div>
+        <section class="dialog-section">
+          <div class="section-title-row">
+            <div>
+              <h3>所属用户组</h3>
+              <span>模板可授权给多个用户组复用</span>
+            </div>
+          </div>
+          <div class="permission-list compact-permission-list" id="templateOrganizationList"></div>
+        </section>
         <div class="drawer-actions">
           <button class="ghost-button" type="button" data-dialog-close="templateCreateDialog">
             <span>取消</span>
@@ -887,10 +901,6 @@
             </select>
           </label>
           <label>
-            <span>所属用户组</span>
-            <select name="organizationId" id="secretOrganizationSelect"></select>
-          </label>
-          <label>
             <span>地址 / 用途</span>
             <input name="target" placeholder="GitLab 主机、github.com、镜像仓库域名" />
           </label>
@@ -908,6 +918,15 @@
           </label>
           <p class="form-hint wide-field">自建 GitLab SSH 仓库地址通常是 git@gitlab.example.com:group/project.git；非 22 端口建议使用 ssh://git@gitlab.example.com:2222/group/project.git。</p>
         </div>
+        <section class="dialog-section">
+          <div class="section-title-row">
+            <div>
+              <h3>所属用户组</h3>
+              <span>秘钥可授权给多个用户组共同使用</span>
+            </div>
+          </div>
+          <div class="permission-list compact-permission-list" id="secretOrganizationList"></div>
+        </section>
         <div class="drawer-actions">
           <button class="ghost-button" type="button" data-dialog-close="secretCreateDialog">
             <span>取消</span>
@@ -1049,10 +1068,6 @@
           </select>
         </label>
         <label>
-          <span>所属用户组</span>
-          <select name="organizationId" id="editSecretOrganizationSelect"></select>
-        </label>
-        <label>
           <span>地址 / 用途</span>
           <input name="target" placeholder="GitLab 主机、github.com、镜像仓库域名" />
         </label>
@@ -1069,6 +1084,15 @@
           <textarea name="knownHosts" rows="4" placeholder="自建 GitLab 建议填：ssh-keyscan -p 22 gitlab.example.com 的输出"></textarea>
         </label>
         <p class="form-hint">自建 GitLab SSH 仓库地址通常是 git@gitlab.example.com:group/project.git；非 22 端口建议使用 ssh://git@gitlab.example.com:2222/group/project.git。</p>
+        <section class="dialog-section">
+          <div class="section-title-row">
+            <div>
+              <h3>所属用户组</h3>
+              <span>秘钥可授权给多个用户组共同使用</span>
+            </div>
+          </div>
+          <div class="permission-list compact-permission-list" id="editSecretOrganizationList"></div>
+        </section>
         <div class="drawer-actions">
           <button class="ghost-button" type="button" id="cancelSecretEdit">
             <span>取消</span>
@@ -1108,10 +1132,6 @@
             </select>
           </label>
           <label>
-            <span>所属用户组</span>
-            <select name="organizationId" id="editClusterOrganizationSelect"></select>
-          </label>
-          <label>
             <span>默认 namespace</span>
             <input name="namespace" />
           </label>
@@ -1122,6 +1142,15 @@
             </select>
           </label>
         </div>
+        <section class="dialog-section">
+          <div class="section-title-row">
+            <div>
+              <h3>所属用户组</h3>
+              <span>可同时授权多个用户组访问该集群</span>
+            </div>
+          </div>
+          <div class="permission-list compact-permission-list" id="editClusterOrganizationList"></div>
+        </section>
 
         <section class="dialog-section">
           <div class="section-title-row">

@@ -231,9 +231,20 @@ def normalize_group_state(state):
         user["globalAccess"] = bool(user.get("globalAccess") or user.get("role") == "platform_admin")
         if RESET_ADMIN_PASSWORD and ADMIN_PASSWORD and user.get("username") == "admin":
             user["password"] = ADMIN_PASSWORD
-    for key in ("tasks", "clusters", "secrets"):
-        for item in state.setdefault(key, []):
-            item["organizationId"] = item.get("organizationId") or "default"
+    for key in ("tasks", "clusters", "secrets", "buildTemplates"):
+        items = state.setdefault(key, [])
+        if not isinstance(items, list):
+            state[key] = items = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            org_ids = item.get("organizationIds")
+            if isinstance(org_ids, list) and org_ids:
+                normalized_org_ids = [str(value or "default").strip() or "default" for value in org_ids if str(value or "").strip()]
+            else:
+                normalized_org_ids = [str(item.get("organizationId") or "default").strip() or "default"]
+            item["organizationIds"] = normalized_org_ids or ["default"]
+            item["organizationId"] = item["organizationIds"][0]
 
 
 def use_postgres():
@@ -763,12 +774,19 @@ def user_org_ids(user):
     return [str(item) for item in ids] if isinstance(ids, list) and ids else ["default"]
 
 
+def asset_org_ids(asset):
+    ids = (asset or {}).get("organizationIds")
+    if isinstance(ids, list) and ids:
+        return [str(item or "default").strip() or "default" for item in ids if str(item or "").strip()] or ["default"]
+    return [str((asset or {}).get("organizationId") or "default").strip() or "default"]
+
+
 def asset_org_id(asset):
-    return str((asset or {}).get("organizationId") or "default")
+    return asset_org_ids(asset)[0]
 
 
 def user_can_access_asset(state, user, asset):
-    return user_has_global_access(state, user) or asset_org_id(asset) in user_org_ids(user)
+    return user_has_global_access(state, user) or bool(set(asset_org_ids(asset)).intersection(user_org_ids(user)))
 
 
 def user_permissions(state, user):
@@ -821,6 +839,7 @@ def validate_asset_state_changes(current_state, next_state, actor):
         "tasks": "task.create",
         "clusters": "cluster.manage",
         "secrets": "secret.manage",
+        "buildTemplates": "template.manage",
     }
     for key, permission in asset_permissions.items():
         current_items = {str(item.get("id")): item for item in current_state.get(key, [])}
@@ -2223,7 +2242,7 @@ def build_and_dispatch(execution_id):
         if not task.get("clusters"):
             raise RuntimeError("任务未绑定部署集群")
         ensure_execution_active(execution_id)
-        set_execution_status(execution_id, "building", "准备下发 Agent 发布任务", image=image, stage="等待部署", progress=86)
+        set_execution_status(execution_id, "deploying", "准备下发 Agent 发布任务", image=image, stage="Agent 部署", progress=86)
         dispatch_agent_tasks(execution_id, task, image)
     except Exception as exc:
         if str(exc) == "发布已取消":
