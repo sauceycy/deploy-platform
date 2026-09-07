@@ -341,6 +341,10 @@ function normalizeClusterName(value) {
   return String(value || "").trim();
 }
 
+function normalizeClusterKey(value) {
+  return normalizeClusterName(value).replace(/\s+/g, " ").toLowerCase();
+}
+
 function clusterNameExists(name, excludeId = "") {
   const normalized = normalizeClusterName(name).toLowerCase();
   return clusters.some((cluster) => String(cluster.id) !== String(excludeId) && normalizeClusterName(cluster.name).toLowerCase() === normalized);
@@ -2084,7 +2088,8 @@ function renderCategoryOptions(selectId, options, selected, allLabel = "全部�
 }
 
 function heartbeatForCluster(clusterName) {
-  return agentHeartbeats.find((item) => item.cluster === clusterName);
+  const normalized = normalizeClusterKey(clusterName);
+  return agentHeartbeats.find((item) => normalizeClusterKey(item.cluster) === normalized);
 }
 
 function clusterAgentState(cluster) {

@@ -47,6 +47,8 @@ AGENT_SHARED_TOKEN = os.environ.get("AGENT_SHARED_TOKEN", "dev-agent-token")
 SESSION_SECRET = os.environ.get("SESSION_SECRET") or AGENT_SHARED_TOKEN or "deploy-platform-session"
 AGENT_TASK_RETRY_SECONDS = int(os.environ.get("AGENT_TASK_RETRY_SECONDS", "300"))
 AGENT_TASK_TAKEOVER_SECONDS = int(os.environ.get("AGENT_TASK_TAKEOVER_SECONDS", "45"))
+AGENT_TASK_PENDING_TIMEOUT_SECONDS = int(os.environ.get("AGENT_TASK_PENDING_TIMEOUT_SECONDS", "180"))
+AGENT_HEARTBEAT_STALE_SECONDS = int(os.environ.get("AGENT_HEARTBEAT_STALE_SECONDS", "90"))
 WAITING_DEPLOY_RECOVERY_SECONDS = int(os.environ.get("WAITING_DEPLOY_RECOVERY_SECONDS", "45"))
 AUTO_CREATE_NAMESPACE = os.environ.get("AUTO_CREATE_NAMESPACE", "false").lower() == "true"
 ACTIVE_STATUSES = {"queued", "building", "deploying", "running"}
@@ -1872,7 +1874,7 @@ def dispatch_agent_tasks(execution_id, task, image):
             if not cluster_name:
                 continue
             target = {**target, "name": cluster_name}
-            cluster_ref = next((item for item in state.get("clusters", []) if str(item.get("name") or "").strip() == cluster_name), {})
+            cluster_ref = next((item for item in state.get("clusters", []) if normalize_cluster_key(item.get("name")) == normalize_cluster_key(cluster_name)), {})
             pull_secret_id = str(target.get("imagePullSecretId") or cluster_ref.get("imagePullSecretId") or "").strip()
             pull_secret = secret_by_id(state, pull_secret_id)
             if pull_secret_id and (not pull_secret or pull_secret.get("type") != "registry"):
@@ -2239,8 +2241,18 @@ def build_and_dispatch(execution_id):
             append_log(execution_id, "未配置 REGISTRY_URL，镜像只保留在本机 Docker，远端集群可能无法拉取。")
             set_execution_status(execution_id, "building", "镜像保留在本机 Docker", image=image, stage="等待部署", progress=84)
 
+        state = read_state()
         if not task.get("clusters"):
             raise RuntimeError("任务未绑定部署集群")
+        offline_clusters = []
+        for target in task.get("clusters", []):
+            cluster_name = str((target or {}).get("name") or "").strip()
+            if not cluster_name:
+                continue
+            if not cluster_agent_is_fresh(state, cluster_name):
+                offline_clusters.append(cluster_name)
+        if offline_clusters:
+            raise RuntimeError(f"{deployment_agent_issue_message('、'.join(offline_clusters))}")
         ensure_execution_active(execution_id)
         set_execution_status(execution_id, "deploying", "准备下发 Agent 发布任务", image=image, stage="Agent 部署", progress=86)
         dispatch_agent_tasks(execution_id, task, image)
@@ -2853,11 +2865,70 @@ def recover_waiting_deployments():
             set_execution_status(execution_id, "failed", f"Agent 发布任务补发失败: {exc}", stage="部署异常", progress=100)
 
 
+def recover_stuck_agent_deployments():
+    recovery_items = []
+    with STATE_LOCK:
+        state = read_state()
+        now = datetime.now()
+        for execution in state.get("executions", []):
+            if execution.get("status") != "deploying" or execution.get("stage") != "Agent 部署":
+                continue
+            agent_tasks = [item for item in state.get("agentTasks", []) if str(item.get("executionId")) == str(execution.get("id"))]
+            if not agent_tasks:
+                continue
+            stale_pending_clusters = []
+            for item in agent_tasks:
+                if item.get("status") != "pending":
+                    continue
+                created_at = parse_time_text(item.get("updatedAt") or item.get("createdAt"))
+                if not created_at:
+                    stale_pending_clusters.append(item.get("clusterName"))
+                    continue
+                if (now - created_at).total_seconds() >= AGENT_TASK_PENDING_TIMEOUT_SECONDS:
+                    stale_pending_clusters.append(item.get("clusterName"))
+            if stale_pending_clusters:
+                recovery_items.append((execution.get("id"), stale_pending_clusters))
+
+    for execution_id, stale_pending_clusters in recovery_items:
+        message = f"Agent 任务超时未领取: {', '.join(str(item) for item in stale_pending_clusters if item)}"
+        message = f"{message}。{deployment_agent_issue_message('、'.join(str(item) for item in stale_pending_clusters if item))}"
+        try:
+            append_log(execution_id, message)
+            def update(state):
+                execution = find_by_id(state.get("executions", []), execution_id)
+                if not execution or execution.get("status") not in {"deploying", "building"}:
+                    return
+                if execution.get("status") == "cancelled":
+                    return
+                execution["status"] = "failed"
+                execution["stage"] = "部署异常"
+                execution["progress"] = 100
+                execution["updatedAt"] = now_text()
+                execution.setdefault("logs", []).append({"time": now_text(), "message": message})
+                for item in state.get("agentTasks", []):
+                    if str(item.get("executionId")) != str(execution_id):
+                        continue
+                    if item.get("status") in {"pending", "running"}:
+                        item["status"] = "failed"
+                        item["updatedAt"] = now_text()
+                        item.setdefault("logs", []).append({"time": now_text(), "message": message})
+                task_ref = find_by_id(state.get("tasks", []), execution.get("taskId"))
+                if task_ref and execution_is_latest_for_task(state, execution):
+                    task_ref["status"] = "failed"
+                    task_ref["stage"] = "部署异常"
+                    task_ref["progress"] = 100
+                    task_ref["lastRun"] = now_text()
+            mutate_state(update)
+        except Exception as exc:
+            print(f"stuck deployment recovery failed: {execution_id} / {exc}", flush=True)
+
+
 def scheduler_loop():
     while True:
         try:
             trigger_due_schedules()
             recover_waiting_deployments()
+            recover_stuck_agent_deployments()
         except Exception as exc:
             print(f"schedule loop error: {exc}", flush=True)
         time.sleep(15)
@@ -2880,7 +2951,7 @@ def mark_agent_task_running(agent_task, agent_instance=None):
 
 
 def agent_task_matches_cluster(item, cluster):
-    return str(item.get("clusterName") or "").strip() == cluster
+    return normalize_cluster_key(item.get("clusterName")) == normalize_cluster_key(cluster)
 
 
 def agent_task_is_stale(item):
@@ -2904,6 +2975,28 @@ def next_agent_task_for_cluster(agent_tasks, cluster):
     if pending:
         return pending
     return next((item for item in agent_tasks if agent_task_matches_cluster(item, cluster) and item.get("status") == "running" and (agent_task_is_stale(item) or agent_task_can_be_taken_over(item))), None)
+
+
+def cluster_heartbeat_for_name(state, cluster_name):
+    return next((item for item in state.get("agentHeartbeats", []) if normalize_cluster_key(item.get("cluster")) == normalize_cluster_key(cluster_name)), None)
+
+
+def cluster_agent_is_fresh(state, cluster_name):
+    heartbeat = cluster_heartbeat_for_name(state, cluster_name)
+    if not heartbeat:
+        return False
+    last_seen = parse_time_text(heartbeat.get("time"))
+    if not last_seen:
+        return False
+    return (datetime.now() - last_seen).total_seconds() <= AGENT_HEARTBEAT_STALE_SECONDS
+
+
+def deployment_agent_issue_message(cluster_name):
+    return f"集群 {cluster_name} 的 Agent 未在线或心跳过期，请确认该集群 Agent 的 CLUSTER_NAME 和 AGENT_TOKEN 配置正确后重试"
+
+
+def normalize_cluster_key(value):
+    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
 
 
 def update_agent_result(agent_task_id, status, logs, agent_instance=None):
@@ -3246,10 +3339,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self.require_agent_token(parsed):
                 return
             body = self.read_json_body()
+            cluster = str(body.get("cluster") or "").strip()
 
             def update(state):
-                cluster = body.get("cluster")
-                state["agentHeartbeats"] = [item for item in state["agentHeartbeats"] if item.get("cluster") != cluster]
+                state["agentHeartbeats"] = [item for item in state["agentHeartbeats"] if normalize_cluster_key(item.get("cluster")) != normalize_cluster_key(cluster)]
                 state["agentHeartbeats"].append({"cluster": cluster, "time": now_text(), "version": body.get("version", "dev"), "instanceId": body.get("instanceId") or ""})
 
             mutate_state(update)
