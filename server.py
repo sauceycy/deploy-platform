@@ -89,7 +89,7 @@ DEFAULT_STATE = {
         },
         "developer": {
             "label": "开发人员",
-            "permissions": ["task.view", "task.create", "task.deploy", "cluster.view", "template.view", "channel.view", "secret.view"],
+            "permissions": ["task.view", "task.deploy", "cluster.view", "template.view", "channel.view", "secret.view"],
         },
         "auditor": {
             "label": "审计人员",
@@ -158,6 +158,72 @@ def parse_time_text(value):
         return None
 
 
+def normalize_deploy_config(config, task=None, index=0):
+    config = config if isinstance(config, dict) else {}
+    task = task if isinstance(task, dict) else {}
+    org_ids = config.get("organizationIds")
+    if isinstance(org_ids, list) and org_ids:
+        organization_ids = [str(item or "default").strip() or "default" for item in org_ids if str(item or "").strip()] or ["default"]
+    else:
+        organization_ids = [str(config.get("organizationId") or task.get("organizationId") or "default").strip() or "default"]
+    clusters = config.get("clusters") if isinstance(config.get("clusters"), list) else task.get("clusters")
+    normalized_clusters = []
+    for cluster in clusters if isinstance(clusters, list) else []:
+        if not isinstance(cluster, dict):
+            continue
+        name = str(cluster.get("name") or "").strip()
+        if not name:
+            continue
+        normalized_clusters.append(
+            {
+                **cluster,
+                "name": name,
+                "namespace": str(cluster.get("namespace") or config.get("namespace") or "default").strip() or "default",
+                "replicas": int(cluster.get("replicas") or config.get("replicas") or task.get("replicas") or 1),
+                "ingress": str(cluster.get("ingress") or "").strip(),
+                "imagePullSecretId": str(cluster.get("imagePullSecretId") or "").strip(),
+            }
+        )
+    name = str(config.get("name") or config.get("project") or task.get("env") or "默认配置").strip() or "默认配置"
+    return {
+        "id": str(config.get("id") or uuid.uuid4().hex[:12]),
+        "name": name,
+        "project": str(config.get("project") or "").strip(),
+        "env": str(config.get("env") or task.get("env") or "test").strip() or "test",
+        "deploymentName": str(config.get("deploymentName") or config.get("appName") or task.get("name") or "").strip(),
+        "organizationIds": organization_ids,
+        "organizationId": organization_ids[0],
+        "clusters": normalized_clusters,
+        "runtimeEnv": str(config.get("runtimeEnv") if config.get("runtimeEnv") is not None else task.get("runtimeEnv") or ""),
+        "jvmOptions": str(config.get("jvmOptions") if config.get("jvmOptions") is not None else task.get("jvmOptions") or ""),
+        "createdAt": str(config.get("createdAt") or now_text()),
+        "updatedAt": str(config.get("updatedAt") or now_text()),
+    }
+
+
+def normalize_deploy_configs(configs, task=None):
+    task = task if isinstance(task, dict) else {}
+    items = configs if isinstance(configs, list) else []
+    normalized = [normalize_deploy_config(item, task, index) for index, item in enumerate(items) if isinstance(item, dict)]
+    if normalized:
+        return normalized
+    return [
+        normalize_deploy_config(
+            {
+                "id": "default",
+                "name": "默认配置",
+                "env": task.get("env") or "test",
+                "deploymentName": task.get("name") or "",
+                "organizationIds": task.get("organizationIds") or [task.get("organizationId") or "default"],
+                "clusters": task.get("clusters") or [],
+                "runtimeEnv": task.get("runtimeEnv") or "",
+                "jvmOptions": task.get("jvmOptions") or "",
+            },
+            task,
+        )
+    ]
+
+
 def merge_defaults(state):
     for key, value in DEFAULT_STATE.items():
         if key not in state:
@@ -188,6 +254,8 @@ def normalize_roles_state(state):
         role["label"] = role.get("label") or default_role["label"]
         if not isinstance(role.get("permissions"), list):
             role["permissions"] = []
+        if key != "platform_admin":
+            role["permissions"] = [permission for permission in role["permissions"] if permission != "task.create"]
         if key == "platform_admin":
             role["permissions"] = list(dict.fromkeys([*role["permissions"], *default_role["permissions"]]))
     if "auditor" in roles:
@@ -212,6 +280,7 @@ def normalize_group_state(state):
         group["name"] = group.get("name") or group["id"]
         if not isinstance(group.get("permissions"), list):
             group["permissions"] = []
+        group["permissions"] = [permission for permission in group["permissions"] if permission != "task.create"]
         group["globalAccess"] = False if str(group.get("id")) == "default" else bool(group.get("globalAccess"))
     if not any(str(group.get("id")) == "default" for group in groups):
         groups.insert(0, {"id": "default", "name": "default", "description": "默认用户组", "permissions": [], "globalAccess": False})
@@ -249,6 +318,8 @@ def normalize_group_state(state):
             item["organizationId"] = item["organizationIds"][0]
             if key == "clusters":
                 item["agentToken"] = str(item.get("agentToken") or "").strip()
+            if key == "tasks":
+                item["deployConfigs"] = normalize_deploy_configs(item.get("deployConfigs"), item)
 
 
 def use_postgres():
@@ -802,6 +873,8 @@ def user_permissions(state, user):
 
 
 def user_has_permission(state, user, permission):
+    if permission == "task.create":
+        return (user or {}).get("role") == "platform_admin"
     return permission in user_permissions(state, user)
 
 
@@ -1736,7 +1809,7 @@ def generate_dockerfile(task, app_dir, src_dir):
 
 
 def create_manifest(task, target, image, pull_secret=None):
-    app = safe_name(task["name"])
+    app = safe_name(task.get("deploymentName") or task["name"])
     namespace = safe_name(target.get("namespace") or "default")
     replicas = int(target.get("replicas") or task.get("replicas") or 1)
     container_port = int(task.get("containerPort") or 8080)
@@ -1860,6 +1933,31 @@ spec:
     return "---\n".join(docs)
 
 
+def deploy_config_by_id(task, deploy_config_id):
+    configs = normalize_deploy_configs(task.get("deployConfigs"), task)
+    if deploy_config_id:
+        config = next((item for item in configs if str(item.get("id")) == str(deploy_config_id)), None)
+        if config:
+            return config
+    return configs[0] if configs else normalize_deploy_configs([], task)[0]
+
+
+def user_can_access_deploy_config(state, user, deploy_config):
+    return user_has_global_access(state, user) or bool(set(asset_org_ids(deploy_config)).intersection(user_org_ids(user)))
+
+
+def effective_task_for_deploy_config(task, deploy_config):
+    effective = copy.deepcopy(task)
+    effective["deployConfigId"] = deploy_config.get("id")
+    effective["deployConfigName"] = deploy_config.get("name")
+    effective["deploymentName"] = deploy_config.get("deploymentName") or task.get("name")
+    effective["env"] = deploy_config.get("env") or task.get("env")
+    effective["clusters"] = copy.deepcopy(deploy_config.get("clusters") or task.get("clusters") or [])
+    effective["runtimeEnv"] = deploy_config.get("runtimeEnv") if deploy_config.get("runtimeEnv") is not None else task.get("runtimeEnv") or ""
+    effective["jvmOptions"] = deploy_config.get("jvmOptions") if deploy_config.get("jvmOptions") is not None else task.get("jvmOptions") or ""
+    return effective
+
+
 def dispatch_agent_tasks(execution_id, task, image):
     def update(state):
         execution = find_by_id(state["executions"], execution_id)
@@ -1889,7 +1987,7 @@ def dispatch_agent_tasks(execution_id, task, image):
                 "image": pull_image,
                 "pushImage": image,
                 "manifest": create_manifest(task, target, pull_image, pull_secret),
-                "deployment": safe_name(task["name"]),
+                "deployment": safe_name(task.get("deploymentName") or task["name"]),
             }
             state["agentTasks"].append(
                 {
@@ -2109,6 +2207,8 @@ def build_and_dispatch(execution_id):
     if not task:
         set_execution_status(execution_id, "failed", "任务不存在")
         return
+    deploy_config = deploy_config_by_id(task, execution.get("deployConfigId"))
+    task = effective_task_for_deploy_config(task, deploy_config)
 
     work_dir = WORKSPACE_DIR / execution_id
     src_dir = work_dir / "src"
@@ -2269,13 +2369,16 @@ def build_and_dispatch(execution_id):
         cleanup_build_artifacts(execution_id, work_dir, image, image_built and image_pushed)
 
 
-def create_execution_record(state, task, actor, branch, action="触发发布"):
+def create_execution_record(state, task, actor, branch, action="触发发布", deploy_config=None):
     execution_id = uuid.uuid4().hex[:12]
     execution_actor = actor or "system"
+    deploy_config = deploy_config or deploy_config_by_id(task, None)
     execution = {
         "id": execution_id,
         "taskId": task["id"],
         "taskName": task["name"],
+        "deployConfigId": deploy_config.get("id") or "",
+        "deployConfigName": deploy_config.get("name") or "默认配置",
         "deployRule": task_deploy_rule(task),
         "branch": branch,
         "actor": execution_actor,
@@ -2283,7 +2386,7 @@ def create_execution_record(state, task, actor, branch, action="触发发布"):
         "stage": "等待执行",
         "progress": 5,
         "image": "",
-        "logs": [{"time": now_text(), "message": f"执行已进入队列，发布人: {execution_actor}"}],
+        "logs": [{"time": now_text(), "message": f"执行已进入队列，发布人: {execution_actor}，发布配置: {deploy_config.get('name') or '默认配置'}"}],
         "clusterResults": {},
         "createdAt": now_text(),
         "updatedAt": now_text(),
@@ -2295,13 +2398,15 @@ def create_execution_record(state, task, actor, branch, action="触发发布"):
     task["lastRun"] = now_text()
     task["lastBranch"] = branch
     task["lastActor"] = execution_actor
+    task["lastDeployConfigId"] = deploy_config.get("id") or ""
+    task["lastDeployConfigName"] = deploy_config.get("name") or "默认配置"
     state["auditLogs"].insert(
         0,
         {
             "time": now_text(),
             "actor": execution_actor,
             "action": action,
-            "target": f"{task['name']} / {branch}",
+            "target": f"{task['name']} / {deploy_config.get('name') or '默认配置'} / {branch}",
             "result": "已入队",
         },
     )
@@ -2465,6 +2570,8 @@ def normalize_task_payload(payload):
             "events": notify.get("events") if isinstance(notify.get("events"), list) else [],
         },
     }
+    task_payload["organizationIds"] = [task_payload["organizationId"]]
+    task_payload["deployConfigs"] = normalize_deploy_configs(payload.get("deployConfigs"), task_payload)
     if app_type == "frontend":
         task_payload["language"] = "node"
         if not task_payload["sdk"] or not task_payload["sdk"].startswith("node"):
@@ -2531,7 +2638,7 @@ def save_task_config(task_id, payload, actor):
             if not user_can_access_asset(state, actor_user, notify_channel):
                 raise ValueError("当前用户组无权绑定该通知渠道")
         for target in task_payload.get("clusters", []):
-            cluster = next((item for item in state.get("clusters", []) if item.get("name") == target.get("name")), None)
+            cluster = next((item for item in state.get("clusters", []) if normalize_cluster_key(item.get("name")) == normalize_cluster_key(target.get("name"))), None)
             if cluster and not user_can_access_asset(state, actor_user, cluster):
                 raise ValueError(f"当前用户组无权绑定集群 {cluster.get('name')}")
             pull_secret_id = target.get("imagePullSecretId")
@@ -2541,6 +2648,20 @@ def save_task_config(task_id, payload, actor):
                     raise ValueError("镜像拉取秘钥不存在")
                 if not user_can_access_asset(state, actor_user, secret):
                     raise ValueError("当前用户组无权绑定该镜像拉取秘钥")
+        for deploy_config in task_payload.get("deployConfigs", []):
+            if not user_can_access_deploy_config(state, actor_user, deploy_config):
+                raise ValueError(f"当前用户组无权保存发布配置 {deploy_config.get('name')}")
+            for target in deploy_config.get("clusters", []):
+                cluster = next((item for item in state.get("clusters", []) if normalize_cluster_key(item.get("name")) == normalize_cluster_key(target.get("name"))), None)
+                if cluster and not user_can_access_asset(state, actor_user, cluster):
+                    raise ValueError(f"当前用户组无权在配置 {deploy_config.get('name')} 中绑定集群 {cluster.get('name')}")
+                pull_secret_id = target.get("imagePullSecretId")
+                if pull_secret_id:
+                    secret = find_by_id(state.get("secrets", []), pull_secret_id)
+                    if not secret:
+                        raise ValueError("镜像拉取秘钥不存在")
+                    if not user_can_access_asset(state, actor_user, secret):
+                        raise ValueError(f"当前用户组无权在配置 {deploy_config.get('name')} 中绑定该镜像拉取秘钥")
         if task_id:
             task = find_by_id(state["tasks"], task_id)
             if not task:
@@ -2670,6 +2791,20 @@ def delete_secret_config(secret_id, actor):
         task_with_pull_secret = next((task for task in state.get("tasks", []) if any(str(cluster.get("imagePullSecretId")) == str(secret_id) for cluster in task.get("clusters", []))), None)
         if task_with_pull_secret:
             raise ValueError(f"任务 {task_with_pull_secret.get('name')} 正在使用该镜像拉取秘钥，请先取消绑定")
+        config_with_pull_secret = next(
+            (
+                task
+                for task in state.get("tasks", [])
+                if any(
+                    str(cluster.get("imagePullSecretId")) == str(secret_id)
+                    for config in normalize_deploy_configs(task.get("deployConfigs"), task)
+                    for cluster in config.get("clusters", [])
+                )
+            ),
+            None,
+        )
+        if config_with_pull_secret:
+            raise ValueError(f"任务 {config_with_pull_secret.get('name')} 的发布配置正在使用该镜像拉取秘钥，请先取消绑定")
         cluster_with_secret = next((cluster for cluster in state.get("clusters", []) if str(cluster.get("imagePullSecretId")) == str(secret_id)), None)
         if cluster_with_secret:
             raise ValueError(f"集群 {cluster_with_secret.get('name')} 正在使用该默认镜像拉取秘钥，请先取消绑定")
@@ -2684,18 +2819,22 @@ def delete_secret_config(secret_id, actor):
     return secret, state
 
 
-def create_execution(task_id, actor, branch):
+def create_execution(task_id, actor, branch, deploy_config_id=None):
     def update(state):
         task = find_by_id(state["tasks"], task_id)
         if not task:
             raise ValueError("任务不存在")
         require_actor_asset_access(state, actor, "task.deploy", task, "发布")
+        actor_user = find_user(state, actor)
+        deploy_config = deploy_config_by_id(task, deploy_config_id)
+        if not user_can_access_deploy_config(state, actor_user, deploy_config):
+            raise ValueError(f"当前用户组无权发布配置 {deploy_config.get('name')}")
         if not branch:
             raise ValueError("请选择发布分支")
         active = active_execution_for_task(state, task["id"])
         if active:
             raise ValueError(f"任务正在执行中: {active.get('id')} / {active.get('stage') or active.get('status')}")
-        return create_execution_record(state, task, actor, branch)
+        return create_execution_record(state, task, actor, branch, deploy_config=deploy_config)
 
     execution, state = mutate_state(update)
     BUILD_EXECUTOR.submit(build_and_dispatch, execution["id"])
@@ -2715,13 +2854,17 @@ def create_batch_executions(items, actor):
             if not task:
                 raise ValueError(f"任务不存在: {item.get('taskId')}")
             require_actor_asset_access(state, actor, "task.deploy", task, "发布")
+            deploy_config = deploy_config_by_id(task, item.get("deployConfigId"))
+            actor_user = find_user(state, actor)
+            if not user_can_access_deploy_config(state, actor_user, deploy_config):
+                raise ValueError(f"当前用户组无权发布任务 {task['name']} 的配置 {deploy_config.get('name')}")
             branch = item.get("branch")
             if not branch:
                 raise ValueError(f"{task['name']} 未选择发布分支")
             active = active_execution_for_task(state, task["id"])
             if active:
                 raise ValueError(f"任务 {task['name']} 正在执行中: {active.get('id')}")
-            executions.append(create_execution_record(state, task, actor, branch, "批量发布"))
+            executions.append(create_execution_record(state, task, actor, branch, "批量发布", deploy_config=deploy_config))
         return executions
 
     executions, state = mutate_state(update)
@@ -2730,7 +2873,7 @@ def create_batch_executions(items, actor):
     return executions, state
 
 
-def schedule_execution(task_id, actor, branch, scheduled_at):
+def schedule_execution(task_id, actor, branch, scheduled_at, deploy_config_id=None):
     run_at = parse_schedule_time(scheduled_at)
     if run_at <= datetime.now():
         raise ValueError("定时发布时间必须晚于当前时间")
@@ -2740,6 +2883,10 @@ def schedule_execution(task_id, actor, branch, scheduled_at):
         if not task:
             raise ValueError("任务不存在")
         require_actor_asset_access(state, actor, "task.deploy", task, "定时发布")
+        actor_user = find_user(state, actor)
+        deploy_config = deploy_config_by_id(task, deploy_config_id)
+        if not user_can_access_deploy_config(state, actor_user, deploy_config):
+            raise ValueError(f"当前用户组无权定时发布配置 {deploy_config.get('name')}")
         if not branch:
             raise ValueError("请选择发布分支")
         for item in state.setdefault("schedules", []):
@@ -2752,6 +2899,8 @@ def schedule_execution(task_id, actor, branch, scheduled_at):
             "id": schedule_id,
             "taskId": task["id"],
             "taskName": task["name"],
+            "deployConfigId": deploy_config.get("id") or "",
+            "deployConfigName": deploy_config.get("name") or "默认配置",
             "branch": branch,
             "actor": actor or "system",
             "scheduledAt": scheduled_at,
@@ -2764,10 +2913,12 @@ def schedule_execution(task_id, actor, branch, scheduled_at):
         task["schedule"] = {
             "id": schedule_id,
             "branch": branch,
+            "deployConfigId": deploy_config.get("id") or "",
+            "deployConfigName": deploy_config.get("name") or "默认配置",
             "scheduledAt": scheduled_at,
             "status": "pending",
         }
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "创建定时发布", "target": f"{task['name']} / {branch}", "result": scheduled_at})
+        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "创建定时发布", "target": f"{task['name']} / {deploy_config.get('name') or '默认配置'} / {branch}", "result": scheduled_at})
         return schedule
 
     schedule, state = mutate_state(update)
@@ -2816,7 +2967,8 @@ def trigger_due_schedules():
                 active = active_execution_for_task(state, task["id"])
                 if active:
                     raise RuntimeError(f"任务已有执行中的发布: {active.get('id')}")
-                execution = create_execution_record(state, task, schedule.get("actor") or "scheduler", schedule.get("branch"), "定时发布")
+                deploy_config = deploy_config_by_id(task, schedule.get("deployConfigId"))
+                execution = create_execution_record(state, task, schedule.get("actor") or "scheduler", schedule.get("branch"), "定时发布", deploy_config=deploy_config)
                 schedule["status"] = "triggered"
                 schedule["executionId"] = execution["id"]
                 schedule["triggeredAt"] = now_text()
@@ -3288,7 +3440,7 @@ class Handler(SimpleHTTPRequestHandler):
         if match:
             body = self.read_json_body()
             try:
-                execution, state = create_execution(match.group(1), body.get("actor"), body.get("branch"))
+                execution, state = create_execution(match.group(1), body.get("actor"), body.get("branch"), body.get("deployConfigId"))
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
@@ -3298,7 +3450,7 @@ class Handler(SimpleHTTPRequestHandler):
         if match:
             body = self.read_json_body()
             try:
-                schedule, state = schedule_execution(match.group(1), body.get("actor"), body.get("branch"), body.get("scheduledAt"))
+                schedule, state = schedule_execution(match.group(1), body.get("actor"), body.get("branch"), body.get("scheduledAt"), body.get("deployConfigId"))
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return

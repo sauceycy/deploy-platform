@@ -69,6 +69,10 @@
             <i data-lucide="list-checks"></i>
             <span>发布任务</span>
           </button>
+          <button class="nav-item" type="button" data-view="deployConfigs" data-permission-required="task.view">
+            <i data-lucide="sliders-horizontal"></i>
+            <span>配置管理</span>
+          </button>
           <button class="nav-item" type="button" data-view="clusters" data-permission-required="cluster.view">
             <i data-lucide="server-cog"></i>
             <span>集群管理</span>
@@ -193,6 +197,24 @@
 
         <section class="management-view" id="taskDetailView" hidden>
           <div id="taskDetailBody"></div>
+        </section>
+
+        <section class="management-view" id="deployConfigView" hidden>
+          <section class="management-panel">
+            <div class="panel-title split-title">
+              <div>
+                <h2>配置管理</h2>
+                <span>一个服务任务可维护多个项目/环境发布配置</span>
+              </div>
+            </div>
+            <div class="management-toolbar">
+              <label class="search-box">
+                <i data-lucide="search"></i>
+                <input id="deployConfigSearch" type="search" placeholder="搜索任务、配置、项目、环境、集群、用户组" />
+              </label>
+            </div>
+            <div class="simple-table" id="deployConfigBody"></div>
+          </section>
         </section>
 
         <section class="management-view" id="accessView" hidden>
@@ -593,6 +615,20 @@
             </button>
           </div>
           <div class="cluster-editor" id="clusterEditor"></div>
+        </section>
+
+        <section class="form-section k8s-deploy-field">
+          <div class="section-title-row">
+            <div>
+              <h3>发布配置</h3>
+              <span>保存 A/B/C/D 项目的部署名、集群、namespace 和运行环境变量</span>
+            </div>
+            <button class="mini-button" id="addDeployConfig" type="button">
+              <i data-lucide="plus"></i>
+              <span>保存当前为配置</span>
+            </button>
+          </div>
+          <div class="cluster-editor" id="deployConfigEditor"></div>
         </section>
 
         <section class="form-section">
@@ -1225,6 +1261,10 @@
           <span>分支</span>
           <select name="branch" id="branchSelect" required></select>
         </label>
+        <label>
+          <span>发布配置</span>
+          <select name="deployConfigId" id="branchDeployConfigSelect" required></select>
+        </label>
         <p class="form-hint" id="branchStatus">正在读取仓库分支...</p>
         <div class="drawer-actions">
           <button class="ghost-button" type="button" id="cancelBranchSelect">
@@ -1254,6 +1294,10 @@
         <label>
           <span>分支</span>
           <select name="branch" id="scheduleBranchSelect" required></select>
+        </label>
+        <label>
+          <span>发布配置</span>
+          <select name="deployConfigId" id="scheduleDeployConfigSelect" required></select>
         </label>
         <label>
           <span>执行时间</span>

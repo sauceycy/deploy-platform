@@ -67,3 +67,8 @@ spec:
             # 每个集群可使用自己的 Agent Token，需与平台里该集群配置保持一致
             - name: AGENT_TOKEN
               value: dev-agent-token
+            # 如果平台域名开启了 Cloudflare Access，可填写服务令牌；未开启则留空或删除
+            - name: CF_ACCESS_CLIENT_ID
+              value: ""
+            - name: CF_ACCESS_CLIENT_SECRET
+              value: ""

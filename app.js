@@ -39,7 +39,7 @@ const roles = {
   },
   developer: {
     label: "开发人员",
-    permissions: ["task.view", "task.create", "task.deploy", "cluster.view", "template.view", "channel.view", "secret.view"],
+    permissions: ["task.view", "task.deploy", "cluster.view", "template.view", "channel.view", "secret.view"],
   },
   auditor: {
     label: "审计人员",
@@ -54,7 +54,7 @@ const defaultRoles = JSON.parse(JSON.stringify(roles));
 
 const permissionCatalog = [
   { key: "task.view", label: "查看任务" },
-  { key: "task.create", label: "创建任务" },
+  { key: "task.create", label: "创建 / 编辑 / 删除任务" },
   { key: "task.deploy", label: "执行发布" },
   { key: "task.export", label: "导出配置" },
   { key: "cluster.view", label: "查看集群" },
@@ -88,6 +88,7 @@ const agentHeartbeats = [];
 const schedules = [];
 const platformSettings = { registrySecretId: "", imageNamespace: "deploy-platform" };
 const clusterDrafts = [];
+const deployConfigDrafts = [];
 const clusterNodeDrafts = [];
 const APP_STATE_KEY = "deploy-platform-state";
 const APP_USER_KEY = "deploy-platform-user";
@@ -152,6 +153,7 @@ const pageSubtitle = document.getElementById("pageSubtitle");
 const currentUserName = document.getElementById("currentUserName");
 const currentUserRole = document.getElementById("currentUserRole");
 const taskView = document.getElementById("taskView");
+const deployConfigView = document.getElementById("deployConfigView");
 const clusterView = document.getElementById("clusterView");
 const templateView = document.getElementById("templateView");
 const channelView = document.getElementById("channelView");
@@ -182,6 +184,9 @@ const editUserOrgList = document.getElementById("editUserOrgList");
 const notifyTargetList = document.getElementById("notifyTargetList");
 const gitCredentialSelect = document.getElementById("gitCredentialSelect");
 const clusterEditor = document.getElementById("clusterEditor");
+const deployConfigEditor = document.getElementById("deployConfigEditor");
+const deployConfigSearch = document.getElementById("deployConfigSearch");
+const deployConfigBody = document.getElementById("deployConfigBody");
 const configDialog = document.getElementById("configDialog");
 const configPreview = document.getElementById("configPreview");
 const userDialog = document.getElementById("userDialog");
@@ -210,6 +215,7 @@ const clusterNodeEditor = document.getElementById("clusterNodeEditor");
 const branchDialog = document.getElementById("branchDialog");
 const branchForm = document.getElementById("branchForm");
 const branchSelect = document.getElementById("branchSelect");
+const branchDeployConfigSelect = document.getElementById("branchDeployConfigSelect");
 const branchStatus = document.getElementById("branchStatus");
 const confirmBranchDeploy = document.getElementById("confirmBranchDeploy");
 const branchDeployText = document.getElementById("branchDeployText");
@@ -221,6 +227,7 @@ const confirmBatchDeploy = document.getElementById("confirmBatchDeploy");
 const scheduleDialog = document.getElementById("scheduleDialog");
 const scheduleForm = document.getElementById("scheduleForm");
 const scheduleBranchSelect = document.getElementById("scheduleBranchSelect");
+const scheduleDeployConfigSelect = document.getElementById("scheduleDeployConfigSelect");
 const scheduleStatus = document.getElementById("scheduleStatus");
 const confirmScheduleDeploy = document.getElementById("confirmScheduleDeploy");
 const drawerTitle = document.getElementById("drawerTitle");
@@ -235,6 +242,7 @@ const auditPagination = document.getElementById("auditPagination");
 
 function hasPermission(permission) {
   if (!state.currentUser) return false;
+  if (permission === "task.create") return state.currentUser.role === "platform_admin";
   const rolePermissions = roles[state.currentUser.role]?.permissions || [];
   const groupPermissions = currentUserGroups().flatMap((group) => group.permissions || []);
   return rolePermissions.includes(permission) || groupPermissions.includes(permission);
@@ -276,6 +284,19 @@ function assetOrganizationIds(asset) {
 
 function assetOrganizationLabel(asset) {
   return assetOrganizationIds(asset).map(organizationName).join("、");
+}
+
+function deployConfigOrganizationIds(config, task) {
+  if (Array.isArray(config?.organizationIds) && config.organizationIds.length) return config.organizationIds.map(String);
+  return assetOrganizationIds(task || config);
+}
+
+function canAccessDeployConfig(config, task) {
+  return hasGlobalAccess() || deployConfigOrganizationIds(config, task).some((orgId) => currentUserOrgIds().includes(String(orgId)));
+}
+
+function deployConfigLabel(config) {
+  return [config?.project, config?.env, config?.name].filter(Boolean).join(" / ") || "默认配置";
 }
 
 function canAccessOrg(orgId) {
@@ -426,6 +447,9 @@ function replaceRoles(nextRoles) {
       ...incoming,
       permissions: Array.from(new Set([...(role.permissions || []), ...(Array.isArray(incoming.permissions) ? incoming.permissions : [])])),
     };
+    if (key !== "platform_admin") {
+      roles[key].permissions = roles[key].permissions.filter((permission) => permission !== "task.create");
+    }
   });
   Object.entries(incomingRoles).forEach(([key, role]) => {
     if (roles[key] || !role || typeof role !== "object") return;
@@ -433,6 +457,9 @@ function replaceRoles(nextRoles) {
       label: role.label || key,
       permissions: Array.isArray(role.permissions) ? role.permissions : [],
     };
+    if (key !== "platform_admin") {
+      roles[key].permissions = roles[key].permissions.filter((permission) => permission !== "task.create");
+    }
   });
   roles.platform_admin.permissions = Array.from(new Set([...(roles.platform_admin.permissions || []), ...(defaultRoles.platform_admin.permissions || []), "secret.view", "secret.manage", "org.view", "org.manage"]));
   if (roles.developer) roles.developer.permissions = Array.from(new Set([...(roles.developer.permissions || []), "secret.view"]));
@@ -445,6 +472,7 @@ function normalizeOrganizations() {
     if (!group.id) group.id = safeGroupId(group.name || "default");
     if (String(group.id) === "default") group.name = "default";
     if (!Array.isArray(group.permissions)) group.permissions = [];
+    group.permissions = group.permissions.filter((permission) => permission !== "task.create");
     group.globalAccess = String(group.id) === "default" ? false : Boolean(group.globalAccess);
   });
   if (!organizations.some((group) => String(group.id) === "default")) organizations.unshift({ id: "default", name: "default", description: "默认用户组", permissions: [], globalAccess: false });
@@ -469,6 +497,9 @@ function normalizeOrganizations() {
       if (!item.organizationId) item.organizationId = "default";
     });
   });
+  tasks.forEach((task) => {
+    task.deployConfigs = normalizeDeployConfigs(task.deployConfigs, task);
+  });
 }
 
 function safeGroupId(value) {
@@ -479,6 +510,51 @@ function safeGroupId(value) {
       .replace(/[^a-z0-9_-]+/g, "-")
       .replace(/^-+|-+$/g, "") || "default"
   );
+}
+
+function normalizeDeployConfig(config = {}, task = {}) {
+  const organizationIds = Array.isArray(config.organizationIds) && config.organizationIds.length ? config.organizationIds.map(String) : assetOrganizationIds(task);
+  const sourceClusters = Array.isArray(config.clusters) ? config.clusters : task.clusters || [];
+  return {
+    id: String(config.id || `cfg-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`),
+    name: String(config.name || config.project || "默认配置").trim() || "默认配置",
+    project: String(config.project || "").trim(),
+    env: String(config.env || task.env || "test").trim() || "test",
+    deploymentName: String(config.deploymentName || task.name || "").trim(),
+    organizationIds,
+    organizationId: organizationIds[0] || "default",
+    clusters: sourceClusters
+      .filter((cluster) => cluster && cluster.name)
+      .map((cluster) => ({
+        name: cluster.name,
+        namespace: cluster.namespace || "default",
+        replicas: Number(cluster.replicas || task.replicas || 1),
+        ingress: cluster.ingress || "",
+        imagePullSecretId: cluster.imagePullSecretId || "",
+      })),
+    runtimeEnv: config.runtimeEnv ?? task.runtimeEnv ?? "",
+    jvmOptions: config.jvmOptions ?? task.jvmOptions ?? "",
+  };
+}
+
+function normalizeDeployConfigs(configs, task = {}) {
+  const items = Array.isArray(configs) ? configs.filter(Boolean).map((config) => normalizeDeployConfig(config, task)) : [];
+  if (items.length) return items;
+  return [
+    normalizeDeployConfig(
+      {
+        id: "default",
+        name: "默认配置",
+        env: task.env || "test",
+        deploymentName: task.name || "",
+        organizationIds: assetOrganizationIds(task),
+        clusters: task.clusters || [],
+        runtimeEnv: task.runtimeEnv || "",
+        jvmOptions: task.jvmOptions || "",
+      },
+      task,
+    ),
+  ];
 }
 
 function reconcileTaskRuntime() {
@@ -1935,14 +2011,17 @@ function renderAccessView() {
         <div class="permission-list">
           ${permissionCatalog
             .map(
-              (permission) => `
+              (permission) => {
+                const lockedTaskConfigPermission = permission.key === "task.create" && roleKey !== "platform_admin";
+                return `
               <label class="permission-item">
                 <input type="checkbox" data-role="${roleKey}" data-permission="${permission.key}" ${role.permissions.includes(permission.key) ? "checked" : ""} ${
-                  hasPermission("rbac.manage") ? "" : "disabled"
+                  hasPermission("rbac.manage") && !lockedTaskConfigPermission ? "" : "disabled"
                 } />
                 <span>${permission.label}</span>
               </label>
-            `,
+            `;
+              },
             )
             .join("")}
         </div>
@@ -2013,7 +2092,9 @@ function renderOrganizationView() {
               .map(
                 (permission) => `
                 <label class="permission-item">
-                  <input type="checkbox" data-group="${group.id}" data-group-permission="${permission.key}" ${(group.permissions || []).includes(permission.key) ? "checked" : ""} ${hasPermission("org.manage") ? "" : "disabled"} />
+                  <input type="checkbox" data-group="${group.id}" data-group-permission="${permission.key}" ${(group.permissions || []).includes(permission.key) ? "checked" : ""} ${
+                    hasPermission("org.manage") && permission.key !== "task.create" ? "" : "disabled"
+                  } />
                   <span>${permission.label}</span>
                 </label>
               `,
@@ -2095,6 +2176,63 @@ function heartbeatForCluster(clusterName) {
 function clusterAgentState(cluster) {
   const heartbeat = heartbeatForCluster(cluster.name);
   return heartbeat ? { label: "Agent 在线", status: "success", time: heartbeat.time, instanceId: heartbeat.instanceId || "" } : { label: "Agent 未连接", status: "pending", time: "暂无心跳", instanceId: "" };
+}
+
+function renderDeployConfigView() {
+  if (!deployConfigBody) return;
+  const query = (deployConfigSearch?.value || "").trim().toLowerCase();
+  const rows = tasks
+    .filter(canAccessAsset)
+    .flatMap((task) =>
+      normalizeDeployConfigs(task.deployConfigs, task)
+        .filter((config) => canAccessDeployConfig(config, task))
+        .map((config) => ({ task, config })),
+    )
+    .filter(({ task, config }) =>
+      textIncludes(
+        [
+          task.name,
+          task.repo,
+          config.name,
+          config.project,
+          config.env,
+          config.deploymentName,
+          deployConfigOrganizationIds(config, task).map(organizationName).join(" "),
+          (config.clusters || []).map((cluster) => `${cluster.name} ${cluster.namespace}`).join(" "),
+        ],
+        query,
+      ),
+    );
+  if (!rows.length) {
+    deployConfigBody.innerHTML = emptyState("暂无可访问的发布配置");
+    return;
+  }
+  deployConfigBody.innerHTML = rows
+    .map(({ task, config }) => {
+      const clustersText = (config.clusters || []).map((cluster) => `${cluster.name}/${cluster.namespace || "default"}`).join("、") || "未绑定集群";
+      return `
+        <div class="cluster-row">
+          <div class="cluster-row-main">
+            <div>
+              <strong>${escapeHtml(config.name || "默认配置")}</strong>
+              <span>${escapeHtml(task.name)} · ${escapeHtml(config.project || "未设置项目")} · ${escapeHtml(config.env || task.env || "test")} · 部署名 ${escapeHtml(config.deploymentName || task.name)}</span>
+            </div>
+            <span class="status-chip success">${escapeHtml(deployConfigOrganizationIds(config, task).map(organizationName).join("、"))}</span>
+          </div>
+          <div class="cluster-meta">
+            <span>集群：${escapeHtml(clustersText)}</span>
+            <span>最近发布：${escapeHtml(task.lastDeployConfigId === config.id ? task.lastRun || "未发布" : "未发布")}</span>
+          </div>
+          <div class="cluster-actions">
+            <button class="ghost-button" type="button" data-action="edit" data-task-id="${task.id}" ${hasPermission("task.create") ? "" : "disabled"}>
+              <i data-lucide="square-pen"></i>
+              <span>编辑任务配置</span>
+            </button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
 }
 
 function renderClusterView() {
@@ -2553,6 +2691,125 @@ function renderClusters() {
     .join("");
 }
 
+function organizationChecksHtml(selectedIds = [], prefix = "") {
+  const selected = new Set((selectedIds.length ? selectedIds : ["default"]).map(String));
+  return visibleOrganizations()
+    .map(
+      (group) => `
+        <label class="permission-item">
+          <input type="checkbox" data-deploy-config-org="${prefix}" data-org-id="${group.id}" ${selected.has(String(group.id)) ? "checked" : ""} />
+          <span>${group.name}</span>
+        </label>
+      `,
+    )
+    .join("");
+}
+
+function deployConfigClusterRow(configIndex, cluster, clusterIndex) {
+  const selectableClusters = clusters.filter(canAccessAsset);
+  const selectedClusterNames = new Set([cluster.name, ...deployConfigDrafts[configIndex].clusters.map((item) => item.name)].filter(Boolean));
+  const clusterOptions = [
+    ...selectableClusters,
+    ...clusters.filter((item) => selectedClusterNames.has(item.name) && !selectableClusters.some((clusterItem) => clusterItem.name === item.name)),
+  ];
+  return `
+    <div class="cluster-edit-row compact-config-row" data-deploy-config-cluster="${configIndex}" data-cluster-index="${clusterIndex}">
+      <label>
+        <span>集群</span>
+        <select data-config-cluster-field="name">
+          ${clusterOptions.map((item) => `<option value="${item.name}" ${item.name === cluster.name ? "selected" : ""}>${item.name}</option>`).join("")}
+        </select>
+      </label>
+      <label>
+        <span>Namespace</span>
+        <input data-config-cluster-field="namespace" value="${cluster.namespace || "default"}" />
+      </label>
+      <label>
+        <span>副本</span>
+        <input data-config-cluster-field="replicas" type="number" min="1" value="${cluster.replicas || 1}" />
+      </label>
+      <label>
+        <span>Ingress</span>
+        <input data-config-cluster-field="ingress" value="${cluster.ingress || ""}" />
+      </label>
+      <label>
+        <span>镜像拉取秘钥</span>
+        <select data-config-cluster-field="imagePullSecretId">
+          ${imagePullSecretOptions(cluster.imagePullSecretId, "使用集群默认")}
+        </select>
+      </label>
+      <button class="icon-button" type="button" title="移除配置集群" data-remove-deploy-config-cluster="${configIndex}:${clusterIndex}">
+        <i data-lucide="trash-2"></i>
+      </button>
+    </div>
+  `;
+}
+
+function renderDeployConfigsEditor() {
+  if (!deployConfigEditor) return;
+  if (normalizeDeployRule(formValue("deployRule")) === "cf_pages") {
+    deployConfigEditor.innerHTML = `<div class="empty-state compact"><strong>CF Pages 暂不需要发布配置</strong><span>第一版发布配置聚焦 K8s 服务。</span></div>`;
+    return;
+  }
+  if (!deployConfigDrafts.length) {
+    deployConfigEditor.innerHTML = `<div class="empty-state compact"><strong>暂无发布配置</strong><span>点击“保存当前为配置”，为不同项目保存独立部署参数。</span></div>`;
+    return;
+  }
+  deployConfigEditor.innerHTML = deployConfigDrafts
+    .map(
+      (config, index) => `
+      <div class="config-card" data-deploy-config="${index}">
+        <div class="cluster-row-main">
+          <div>
+            <strong>${escapeHtml(deployConfigLabel(config))}</strong>
+            <span>${escapeHtml(deployConfigOrganizationIds(config).map(organizationName).join("、"))} · ${config.clusters.length} 个集群</span>
+          </div>
+          <button class="icon-button danger-action" type="button" title="删除配置" data-remove-deploy-config="${index}">
+            <i data-lucide="trash-2"></i>
+          </button>
+        </div>
+        <div class="form-grid compact-grid">
+          <label>
+            <span>配置名称</span>
+            <input data-deploy-config-field="name" value="${escapeHtml(config.name || "")}" placeholder="例如 A-test-sdk" />
+          </label>
+          <label>
+            <span>项目</span>
+            <input data-deploy-config-field="project" value="${escapeHtml(config.project || "")}" placeholder="A / B / C" />
+          </label>
+          <label>
+            <span>环境</span>
+            <input data-deploy-config-field="env" value="${escapeHtml(config.env || "test")}" />
+          </label>
+          <label>
+            <span>应用部署名</span>
+            <input data-deploy-config-field="deploymentName" value="${escapeHtml(config.deploymentName || formValue("name"))}" placeholder="例如 a-sdk" />
+          </label>
+          <label class="wide-field">
+            <span>运行环境变量</span>
+            <textarea data-deploy-config-field="runtimeEnv">${escapeHtml(config.runtimeEnv || "")}</textarea>
+          </label>
+          <label class="wide-field java-build-field">
+            <span>JVM 启动参数</span>
+            <textarea data-deploy-config-field="jvmOptions">${escapeHtml(config.jvmOptions || "")}</textarea>
+          </label>
+        </div>
+        <div class="permission-list compact-permission-list">${organizationChecksHtml(deployConfigOrganizationIds(config), String(index))}</div>
+        <div class="section-title-row">
+          <h3>配置集群</h3>
+          <button class="mini-button" type="button" data-add-deploy-config-cluster="${index}">
+            <i data-lucide="plus"></i>
+            <span>添加集群</span>
+          </button>
+        </div>
+        ${config.clusters.map((cluster, clusterIndex) => deployConfigClusterRow(index, cluster, clusterIndex)).join("")}
+      </div>
+    `,
+    )
+    .join("");
+  lucide.createIcons();
+}
+
 function updateSdkOptions(language, force = false) {
   const options = sdkOptions[language] || [];
   const currentSdk = sdkSelect.value;
@@ -2634,6 +2891,7 @@ function syncDeployRuleFields() {
   }
   renderCloudflareSecretOptions();
   renderClusters();
+  renderDeployConfigsEditor();
 }
 
 function resetTaskForm() {
@@ -2661,6 +2919,7 @@ function resetTaskForm() {
   renderGitCredentialOptions("");
   renderCloudflareSecretOptions();
   clusterDrafts.splice(0, clusterDrafts.length);
+  deployConfigDrafts.splice(0, deployConfigDrafts.length);
   updateSdkOptions("java", true);
   syncDeployRuleFields();
 }
@@ -2725,6 +2984,7 @@ function openTaskEditor(taskId) {
   taskForm.elements.notifyHealthFail.checked = task.notify?.events?.includes("健康检查失败") ?? true;
   taskForm.elements.notifySuccess.checked = task.notify?.events?.includes("发布成功") ?? false;
   clusterDrafts.splice(0, clusterDrafts.length, ...(task.clusters || []).map((cluster) => ({ ...cluster })));
+  deployConfigDrafts.splice(0, deployConfigDrafts.length, ...normalizeDeployConfigs(task.deployConfigs, task).map((config) => ({ ...config, clusters: config.clusters.map((cluster) => ({ ...cluster })) })));
   syncDeployRuleFields();
   drawer.inert = false;
   backdrop.hidden = false;
@@ -2787,6 +3047,7 @@ function selectedEvents() {
 function collectClusterDrafts() {
   if (normalizeDeployRule(formValue("deployRule")) === "cf_pages") return;
   document.querySelectorAll(".cluster-edit-row").forEach((row) => {
+    if (row.dataset.deployConfigCluster !== undefined) return;
     const index = Number(row.dataset.index);
     clusterDrafts[index] = {
       name: row.querySelector('[data-field="name"]').value,
@@ -2798,8 +3059,55 @@ function collectClusterDrafts() {
   });
 }
 
+function collectDeployConfigDrafts() {
+  if (normalizeDeployRule(formValue("deployRule")) === "cf_pages") return;
+  document.querySelectorAll("[data-deploy-config]").forEach((card) => {
+    const index = Number(card.dataset.deployConfig);
+    const config = deployConfigDrafts[index];
+    if (!config) return;
+    card.querySelectorAll("[data-deploy-config-field]").forEach((field) => {
+      config[field.dataset.deployConfigField] = field.value;
+    });
+    const organizationIds = Array.from(card.querySelectorAll(`[data-deploy-config-org="${index}"]:checked`)).map((input) => input.dataset.orgId);
+    config.organizationIds = organizationIds.length ? organizationIds : ["default"];
+    config.organizationId = config.organizationIds[0];
+    config.clusters = Array.from(card.querySelectorAll(`[data-deploy-config-cluster="${index}"]`)).map((row) => ({
+      name: row.querySelector('[data-config-cluster-field="name"]').value,
+      namespace: row.querySelector('[data-config-cluster-field="namespace"]').value || "default",
+      replicas: Number(row.querySelector('[data-config-cluster-field="replicas"]').value || 1),
+      ingress: row.querySelector('[data-config-cluster-field="ingress"]').value,
+      imagePullSecretId: row.querySelector('[data-config-cluster-field="imagePullSecretId"]').value,
+    }));
+  });
+}
+
+function currentDeployConfigSnapshot() {
+  collectClusterDrafts();
+  const name = formValue("name") || "服务";
+  const env = formValue("env") || "test";
+  return normalizeDeployConfig(
+    {
+      id: `cfg-${Date.now()}`,
+      name: `${env}-${name}`,
+      env,
+      deploymentName: name,
+      organizationIds: [formValue("organizationId") || "default"],
+      clusters: clusterDrafts.map((cluster) => ({ ...cluster })),
+      runtimeEnv: formValue("runtimeEnv"),
+      jvmOptions: formValue("jvmOptions"),
+    },
+    { name, env, organizationId: formValue("organizationId") || "default", clusters: clusterDrafts },
+  );
+}
+
 function buildPreviewObject() {
   collectClusterDrafts();
+  collectDeployConfigDrafts();
+  const deployConfigs = normalizeDeployRule(formValue("deployRule")) === "cf_pages"
+    ? []
+    : deployConfigDrafts.map((config) =>
+        normalizeDeployConfig(config, { name: formValue("name"), env: formValue("env"), organizationId: formValue("organizationId"), clusters: clusterDrafts }),
+      );
   return {
     task: {
       name: formValue("name"),
@@ -2838,6 +3146,7 @@ function buildPreviewObject() {
       jvmOptions: formValue("language") === "java" ? formValue("jvmOptions") : "",
     },
     clusters: normalizeDeployRule(formValue("deployRule")) === "cf_pages" ? [] : clusterDrafts,
+    deployConfigs,
     notify: {
       channelId: selectedNotifyChannel()?.id || "",
       channel: selectedNotifyChannel()?.name || formValue("notifyChannel"),
@@ -2886,6 +3195,7 @@ async function saveTask(event) {
     runtimeEnv: preview.runtime.env,
     jvmOptions: preview.runtime.jvmOptions,
     clusters: preview.clusters.map((cluster) => ({ ...cluster, status: cluster.status || "success" })),
+    deployConfigs: preview.deployConfigs,
     notify: preview.notify,
   };
 
@@ -2937,6 +3247,21 @@ async function refreshRemoteState(options = {}) {
   }
 }
 
+function deployConfigsForTask(task) {
+  return normalizeDeployConfigs(task?.deployConfigs, task).filter((config) => canAccessDeployConfig(config, task));
+}
+
+function renderDeployConfigSelect(task, selectElement) {
+  const configs = deployConfigsForTask(task);
+  selectElement.innerHTML = configs.map((config) => `<option value="${escapeHtml(config.id)}">${escapeHtml(config.name || "默认配置")}</option>`).join("");
+  const lastConfigId = task?.lastDeployConfigId || "";
+  if (lastConfigId && configs.some((config) => String(config.id) === String(lastConfigId))) {
+    selectElement.value = lastConfigId;
+  }
+  selectElement.disabled = configs.length === 0;
+  return configs;
+}
+
 async function openBranchDialog(taskId) {
   if (!requirePermission("task.deploy")) return;
   const task = tasks.find((item) => String(item.id) === String(taskId));
@@ -2948,6 +3273,11 @@ async function openBranchDialog(taskId) {
 
   branchForm.elements.taskId.value = task.id;
   branchForm.elements.taskName.value = task.name;
+  const deployConfigs = renderDeployConfigSelect(task, branchDeployConfigSelect);
+  if (!deployConfigs.length) {
+    window.alert("当前用户组没有可发布的配置");
+    return;
+  }
   branchSelect.innerHTML = "";
   branchSelect.disabled = true;
   confirmBranchDeploy.disabled = true;
@@ -3022,7 +3352,7 @@ async function runTask(taskId, branch) {
   if (branchDeployText) branchDeployText.textContent = "发布中...";
   try {
     await nextPaint();
-    await mutateJson(`/api/tasks/${taskId}/run`, { actor: state.currentUser?.username || "system", branch });
+    await mutateJson(`/api/tasks/${taskId}/run`, { actor: state.currentUser?.username || "system", branch, deployConfigId: branchDeployConfigSelect.value });
     if (branchStatus) branchStatus.textContent = "发布请求已提交，正在进入执行队列...";
     if (branchDeployText) branchDeployText.textContent = "已提交";
     await nextPaint();
@@ -3072,6 +3402,9 @@ async function openBatchDialog(taskIds) {
           <select data-batch-branch="${task.id}" disabled>
             <option>读取分支中...</option>
           </select>
+          <select data-batch-config="${task.id}">
+            ${deployConfigsForTask(task).map((config) => `<option value="${escapeHtml(config.id)}">${escapeHtml(config.name || "默认配置")}</option>`).join("")}
+          </select>
         </div>
       `,
     )
@@ -3083,6 +3416,11 @@ async function openBatchDialog(taskIds) {
   await Promise.all(
     selectedTasks.map(async (task) => {
       const select = batchTaskList.querySelector(`[data-batch-branch="${task.id}"]`);
+      const configSelect = batchTaskList.querySelector(`[data-batch-config="${task.id}"]`);
+      const configs = deployConfigsForTask(task);
+      if (task.lastDeployConfigId && configs.some((config) => String(config.id) === String(task.lastDeployConfigId))) {
+        configSelect.value = task.lastDeployConfigId;
+      }
       try {
         await loadBranchesIntoSelect(task, select);
       } catch (error) {
@@ -3102,6 +3440,7 @@ async function submitBatchDeploy(event) {
   const items = Array.from(batchTaskList.querySelectorAll("[data-batch-branch]")).map((select) => ({
     taskId: select.dataset.batchBranch,
     branch: select.value,
+    deployConfigId: batchTaskList.querySelector(`[data-batch-config="${select.dataset.batchBranch}"]`)?.value || "",
   }));
   if (items.length > MAX_BATCH_DEPLOY_TASKS) {
     window.alert(`批量发布一次最多选择 ${MAX_BATCH_DEPLOY_TASKS} 个任务`);
@@ -3132,6 +3471,11 @@ async function openScheduleDialog(taskId) {
   }
   scheduleForm.elements.taskId.value = task.id;
   scheduleForm.elements.taskName.value = task.name;
+  const deployConfigs = renderDeployConfigSelect(task, scheduleDeployConfigSelect);
+  if (!deployConfigs.length) {
+    window.alert("当前用户组没有可定时发布的配置");
+    return;
+  }
   scheduleForm.elements.scheduledAt.value = localDateTimeValue();
   scheduleBranchSelect.innerHTML = "";
   scheduleBranchSelect.disabled = true;
@@ -3157,6 +3501,7 @@ async function saveSchedule(event) {
     await mutateJson(`/api/tasks/${taskId}/schedule`, {
       actor: state.currentUser?.username || "system",
       branch: scheduleForm.elements.branch.value,
+      deployConfigId: scheduleDeployConfigSelect.value,
       scheduledAt: scheduleForm.elements.scheduledAt.value,
     });
     render();
@@ -3881,6 +4226,7 @@ async function saveEditedUser(event) {
 const viewConfig = {
   tasks: { title: "发布任务", subtitle: "任务、集群、权限与审计" },
   taskDetail: { title: "任务详情", subtitle: "发布进度、日志、配置、集群与历史" },
+  deployConfigs: { title: "配置管理", subtitle: "项目化发布配置与权限", permission: "task.view" },
   clusters: { title: "集群管理", subtitle: "Agent 接入与部署目标", permission: "cluster.view" },
   templates: { title: "任务模板", subtitle: "常用任务配置与构建默认值", permission: "template.view" },
   channels: { title: "通知渠道", subtitle: "告警机器人、邮件与 Webhook", permission: "channel.view" },
@@ -3893,6 +4239,7 @@ const viewConfig = {
 
 const viewRoutes = {
   tasks: "/tasks",
+  deployConfigs: "/deploy-configs",
   clusters: "/clusters",
   templates: "/templates",
   channels: "/channels",
@@ -3983,6 +4330,7 @@ function setView(view, options = {}) {
   }
   taskView.hidden = view !== "tasks";
   taskDetailView.hidden = view !== "taskDetail";
+  deployConfigView.hidden = view !== "deployConfigs";
   clusterView.hidden = view !== "clusters";
   templateView.hidden = view !== "templates";
   channelView.hidden = view !== "channels";
@@ -3997,7 +4345,7 @@ function setView(view, options = {}) {
   pageSubtitle.textContent = nextConfig.subtitle;
   taskSearch.hidden = view !== "tasks";
   document.querySelector(".search-box").hidden = view !== "tasks";
-  document.getElementById("openCreate").hidden = view !== "tasks";
+  document.getElementById("openCreate").hidden = view !== "tasks" || !hasPermission("task.create");
 
   document.querySelectorAll(".nav-item").forEach((item) => {
     item.classList.toggle("active", item.dataset.view === (view === "taskDetail" ? "tasks" : view));
@@ -4034,6 +4382,7 @@ function render() {
   renderRows();
   renderDetail();
   renderTaskDetailPage();
+  renderDeployConfigView();
   renderClusterView();
   renderTemplateView();
   renderChannelView();
@@ -4369,6 +4718,10 @@ bindListFilters("templates", "templateSearch", "templateCategoryFilter", renderT
 bindListFilters("channels", "channelSearch", "channelCategoryFilter", renderChannelView);
 bindListFilters("secrets", "secretSearch", "secretCategoryFilter", renderSecretView);
 bindListFilters("users", "userSearch", "userCategoryFilter", renderUserView);
+deployConfigSearch?.addEventListener("input", () => {
+  renderDeployConfigView();
+  lucide.createIcons();
+});
 
 auditSearch.addEventListener("input", (event) => {
   state.auditSearch = event.target.value;
@@ -4498,6 +4851,11 @@ document.addEventListener("change", async (event) => {
     const group = organizations.find((item) => String(item.id) === String(groupPermissionInput.dataset.group));
     if (!group) return;
     const permission = groupPermissionInput.dataset.groupPermission;
+    if (permission === "task.create") {
+      groupPermissionInput.checked = false;
+      window.alert("创建、编辑、删除任务权限仅平台管理员可用，不能分配给用户组");
+      return;
+    }
     if (groupPermissionInput.checked) {
       group.permissions = Array.from(new Set([...(group.permissions || []), permission]));
     } else {
@@ -4522,6 +4880,11 @@ document.addEventListener("change", async (event) => {
   const input = event.target.closest("[data-role][data-permission]");
   if (!input || !hasPermission("rbac.manage")) return;
   const role = roles[input.dataset.role];
+  if (input.dataset.permission === "task.create" && input.dataset.role !== "platform_admin") {
+    input.checked = false;
+    window.alert("创建、编辑、删除任务权限仅平台管理员可用，不能分配给非管理员角色");
+    return;
+  }
   if (input.checked) {
     role.permissions = Array.from(new Set([...role.permissions, input.dataset.permission]));
   } else {
@@ -4702,6 +5065,43 @@ document.addEventListener("click", (event) => {
     renderClusters();
   }
 
+  const removeDeployConfigButton = event.target.closest("[data-remove-deploy-config]");
+  if (removeDeployConfigButton && deployConfigDrafts.length > 0) {
+    collectDeployConfigDrafts();
+    deployConfigDrafts.splice(Number(removeDeployConfigButton.dataset.removeDeployConfig), 1);
+    renderDeployConfigsEditor();
+    return;
+  }
+
+  const addDeployConfigClusterButton = event.target.closest("[data-add-deploy-config-cluster]");
+  if (addDeployConfigClusterButton) {
+    collectDeployConfigDrafts();
+    const index = Number(addDeployConfigClusterButton.dataset.addDeployConfigCluster);
+    const firstCluster = clusters.filter(canAccessAsset)[0];
+    if (!firstCluster) {
+      window.alert("请先在集群管理中添加集群");
+      return;
+    }
+    deployConfigDrafts[index].clusters.push({
+      name: firstCluster.name,
+      namespace: firstCluster.namespace || "default",
+      replicas: 1,
+      ingress: "",
+      imagePullSecretId: firstCluster.imagePullSecretId || "",
+    });
+    renderDeployConfigsEditor();
+    return;
+  }
+
+  const removeDeployConfigClusterButton = event.target.closest("[data-remove-deploy-config-cluster]");
+  if (removeDeployConfigClusterButton) {
+    collectDeployConfigDrafts();
+    const [configIndex, clusterIndex] = removeDeployConfigClusterButton.dataset.removeDeployConfigCluster.split(":").map(Number);
+    deployConfigDrafts[configIndex]?.clusters.splice(clusterIndex, 1);
+    renderDeployConfigsEditor();
+    return;
+  }
+
   const removeNodeButton = event.target.closest("[data-remove-node]");
   if (removeNodeButton && clusterNodeDrafts.length > 0) {
     collectClusterNodes();
@@ -4732,6 +5132,11 @@ document.getElementById("addCluster").addEventListener("click", () => {
     imagePullSecretId: firstCluster.imagePullSecretId || "",
   });
   renderClusters();
+});
+
+document.getElementById("addDeployConfig").addEventListener("click", () => {
+  deployConfigDrafts.push(currentDeployConfigSnapshot());
+  renderDeployConfigsEditor();
 });
 
 async function init() {

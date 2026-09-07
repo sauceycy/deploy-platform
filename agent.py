@@ -13,11 +13,20 @@ CLUSTER_NAME = os.environ.get("CLUSTER_NAME", "dev-01")
 AGENT_TOKEN = os.environ.get("AGENT_TOKEN", "dev-agent-token")
 AGENT_INSTANCE_ID = os.environ.get("AGENT_INSTANCE_ID") or socket.gethostname()
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
+CF_ACCESS_CLIENT_ID = os.environ.get("CF_ACCESS_CLIENT_ID", "").strip()
+CF_ACCESS_CLIENT_SECRET = os.environ.get("CF_ACCESS_CLIENT_SECRET", "").strip()
 AGENT_HEADERS = {
-    "User-Agent": "DeployPlatformAgent/0.1",
+    "User-Agent": "DeployPlatformAgent/0.1 (+https://github.com/sauceycy/deploy-platform)",
     "Accept": "application/json",
     "X-Agent-Token": AGENT_TOKEN,
 }
+if CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET:
+    AGENT_HEADERS.update(
+        {
+            "CF-Access-Client-Id": CF_ACCESS_CLIENT_ID,
+            "CF-Access-Client-Secret": CF_ACCESS_CLIENT_SECRET,
+        }
+    )
 
 
 def api_get(path, query=None):
@@ -49,6 +58,11 @@ def api_request(method, path, payload=None, query=None):
             return json.loads(body) if body else {}
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:500]
+        if exc.code == 403 and "Attention Required" in body and "Cloudflare" in body:
+            raise RuntimeError(
+                f"{method} {path} 被 Cloudflare 拦截，平台后端未收到请求。请给 /api/agent/* 配置 WAF 跳过规则，"
+                "或在 Agent 环境变量中配置 CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET。"
+            ) from exc
         raise RuntimeError(f"{method} {path} HTTP {exc.code}: {body}") from exc
     except URLError as exc:
         raise RuntimeError(f"{method} {path} failed: {exc.reason}") from exc
