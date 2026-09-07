@@ -1446,7 +1446,7 @@ function renderRows() {
         </div>
         <div class="task-main">
           <strong>${task.name}</strong>
-          <span>${organizationName(task.organizationId)} · ${task.env} · ${appTypeLabel(task.appType)} · ${task.owner || "未设置负责人"} · 发布人 ${publishActor(task)} · ${task.lastRun}</span>
+          <span>${organizationName(task.organizationId)} · ${appTypeLabel(task.appType)} · ${task.owner || "未设置负责人"} · 发布人 ${publishActor(task)} · ${task.lastRun}</span>
         </div>
         <div>
           <span class="language-chip ${task.language}">${languageLabel(task.language)} / ${task.sdk}</span>

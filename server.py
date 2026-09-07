@@ -224,6 +224,18 @@ def normalize_deploy_configs(configs, task=None):
     ]
 
 
+def task_display_name(task, deploy_config=None):
+    task = task if isinstance(task, dict) else {}
+    deploy_config = deploy_config if isinstance(deploy_config, dict) else {}
+    return str(
+        deploy_config.get("deploymentName")
+        or task.get("deploymentName")
+        or deploy_config.get("name")
+        or task.get("name")
+        or "未命名任务"
+    ).strip() or "未命名任务"
+
+
 def merge_defaults(state):
     for key, value in DEFAULT_STATE.items():
         if key not in state:
@@ -2068,7 +2080,7 @@ def lark_field(label, value):
     }
 
 
-def lark_notification_card(task, event, event_label, message, event_time):
+def lark_notification_card(task, event, event_label, message, event_time, deploy_config=None):
     template = {
         "BUILD_SUCCESS": "green",
         "BUILD_FAILED": "red",
@@ -2090,19 +2102,20 @@ def lark_notification_card(task, event, event_label, message, event_time):
     rule_label = "CF Pages" if task_deploy_rule(task) == "cf_pages" else "K8s 服务"
     app_type_label = "前端静态站点" if task_app_type(task) == "frontend" else "后端服务"
     actor = task.get("lastActor") or task.get("actor") or "system"
+    display_name = task_display_name(task, deploy_config)
     return {
         "msg_type": "interactive",
         "card": {
             "config": {"wide_screen_mode": True},
             "header": {
                 "template": template,
-                "title": {"tag": "plain_text", "content": f"{icon} · {event_label} · {task.get('name') or '未命名任务'}"},
+                "title": {"tag": "plain_text", "content": f"{icon} · {event_label} · {display_name}"},
             },
             "elements": [
                 {
                     "tag": "div",
                     "fields": [
-                        lark_field("任务", task.get("name") or "-"),
+                        lark_field("应用部署名", display_name),
                         lark_field("状态", event_label),
                         lark_field("部署规则", rule_label),
                         lark_field("应用类型", app_type_label),
@@ -2193,7 +2206,8 @@ def send_notification(task, event, message, execution_id=None):
         return
     event_time = now_text()
     actor = task.get("lastActor") or task.get("actor") or "system"
-    text = f"【{event_label}】{task.get('name')}\n发布人: {actor}\n{message}\n时间: {event_time}"
+    display_name = task_display_name(task)
+    text = f"【{event_label}】{display_name}\n发布人: {actor}\n{message}\n时间: {event_time}"
     channel_type = (channel or {}).get("type") or "webhook"
     if channel_type == "feishu":
         payload = lark_notification_card(task, event, event_label, message, event_time)
@@ -2201,7 +2215,7 @@ def send_notification(task, event, message, execution_id=None):
     elif channel_type in {"wecom", "dingtalk"}:
         payload = {"msgtype": "text", "text": {"content": text}}
     else:
-        payload = {"task": task.get("name"), "actor": actor, "event": event, "eventLabel": event_label, "message": message, "time": event_time, "text": text}
+        payload = {"task": display_name, "actor": actor, "event": event, "eventLabel": event_label, "message": message, "time": event_time, "text": text}
     try:
         req = Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json"})
         response_body = urlopen(req, timeout=5).read().decode("utf-8", errors="replace")
@@ -2434,7 +2448,7 @@ def create_execution_record(state, task, actor, branch, action="触发发布", d
             "time": now_text(),
             "actor": execution_actor,
             "action": action,
-            "target": f"{task['name']} / {deploy_config.get('name') or '默认配置'} / {branch}",
+            "target": f"{task_display_name(task, deploy_config)} / {deploy_config.get('name') or '默认配置'} / {branch}",
             "result": "已入队",
         },
     )
@@ -2947,7 +2961,7 @@ def schedule_execution(task_id, actor, branch, scheduled_at, deploy_config_id=No
             "scheduledAt": scheduled_at,
             "status": "pending",
         }
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "创建定时发布", "target": f"{task['name']} / {deploy_config.get('name') or '默认配置'} / {branch}", "result": scheduled_at})
+        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "创建定时发布", "target": f"{task_display_name(task, deploy_config)} / {deploy_config.get('name') or '默认配置'} / {branch}", "result": scheduled_at})
         return schedule
 
     schedule, state = mutate_state(update)
