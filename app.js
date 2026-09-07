@@ -131,6 +131,7 @@ const state = {
   auditPage: 1,
   lists: {
     tasks: { page: 1 },
+    deployConfigs: { search: "", category: "all", page: 1 },
     clusters: { search: "", category: "all", page: 1 },
     templates: { search: "", category: "all", page: 1 },
     channels: { search: "", category: "all", page: 1 },
@@ -187,6 +188,7 @@ const clusterEditor = document.getElementById("clusterEditor");
 const deployConfigEditor = document.getElementById("deployConfigEditor");
 const deployConfigSearch = document.getElementById("deployConfigSearch");
 const deployConfigBody = document.getElementById("deployConfigBody");
+const deployConfigCategoryFilter = document.getElementById("deployConfigCategoryFilter");
 const configDialog = document.getElementById("configDialog");
 const configPreview = document.getElementById("configPreview");
 const userDialog = document.getElementById("userDialog");
@@ -2180,14 +2182,32 @@ function clusterAgentState(cluster) {
 
 function renderDeployConfigView() {
   if (!deployConfigBody) return;
-  const query = (deployConfigSearch?.value || "").trim().toLowerCase();
-  const rows = tasks
+  const filters = listState("deployConfigs");
+  const query = filters.search.trim().toLowerCase();
+  const allRows = tasks
     .filter(canAccessAsset)
     .flatMap((task) =>
       normalizeDeployConfigs(task.deployConfigs, task)
         .filter((config) => canAccessDeployConfig(config, task))
         .map((config) => ({ task, config })),
-    )
+    );
+  const categoryOptions = [
+    ...Array.from(new Set(allRows.map(({ config }) => config.project).filter(Boolean))).map((project) => ({ value: `project:${project}`, label: `项目 ${project}` })),
+    ...Array.from(new Set(allRows.map(({ config, task }) => config.env || task.env || "test").filter(Boolean))).map((env) => ({ value: `env:${env}`, label: `环境 ${env}` })),
+    ...Array.from(new Set(allRows.flatMap(({ config, task }) => deployConfigOrganizationIds(config, task)))).map((orgId) => ({ value: `org:${orgId}`, label: `用户组 ${organizationName(orgId)}` })),
+    ...Array.from(new Set(allRows.flatMap(({ config }) => (config.clusters || []).map((cluster) => cluster.name).filter(Boolean)))).map((cluster) => ({ value: `cluster:${cluster}`, label: `集群 ${cluster}` })),
+  ];
+  filters.category = renderCategoryOptions("deployConfigCategoryFilter", categoryOptions, filters.category);
+  const rows = allRows
+    .filter(({ task, config }) => {
+      if (filters.category === "all") return true;
+      const [kind, value] = filters.category.split(":");
+      if (kind === "project") return config.project === value;
+      if (kind === "env") return (config.env || task.env || "test") === value;
+      if (kind === "org") return deployConfigOrganizationIds(config, task).includes(value);
+      if (kind === "cluster") return (config.clusters || []).some((cluster) => cluster.name === value);
+      return true;
+    })
     .filter(({ task, config }) =>
       textIncludes(
         [
@@ -2203,11 +2223,13 @@ function renderDeployConfigView() {
         query,
       ),
     );
+  const pageData = paginateRows("deployConfigs", rows);
   if (!rows.length) {
     deployConfigBody.innerHTML = emptyState("暂无可访问的发布配置");
+    renderPagination("deployConfigPagination", "deployConfigs", pageData);
     return;
   }
-  deployConfigBody.innerHTML = rows
+  deployConfigBody.innerHTML = pageData.rows
     .map(({ task, config }) => {
       const clustersText = (config.clusters || []).map((cluster) => `${cluster.name}/${cluster.namespace || "default"}`).join("、") || "未绑定集群";
       return `
@@ -2233,6 +2255,7 @@ function renderDeployConfigView() {
       `;
     })
     .join("");
+  renderPagination("deployConfigPagination", "deployConfigs", pageData);
 }
 
 function renderClusterView() {
@@ -4718,14 +4741,11 @@ function bindListFilters(key, searchId, categoryId, renderFn) {
 }
 
 bindListFilters("clusters", "clusterSearch", "clusterCategoryFilter", renderClusterView);
+bindListFilters("deployConfigs", "deployConfigSearch", "deployConfigCategoryFilter", renderDeployConfigView);
 bindListFilters("templates", "templateSearch", "templateCategoryFilter", renderTemplateView);
 bindListFilters("channels", "channelSearch", "channelCategoryFilter", renderChannelView);
 bindListFilters("secrets", "secretSearch", "secretCategoryFilter", renderSecretView);
 bindListFilters("users", "userSearch", "userCategoryFilter", renderUserView);
-deployConfigSearch?.addEventListener("input", () => {
-  renderDeployConfigView();
-  lucide.createIcons();
-});
 
 auditSearch.addEventListener("input", (event) => {
   state.auditSearch = event.target.value;
