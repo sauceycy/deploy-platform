@@ -205,7 +205,12 @@ if __name__ == "__main__":
             if pending_result:
                 api_post(
                     f"/api/agent/tasks/{pending_result['id']}/result",
-                    {"status": pending_result["status"], "logs": pending_result["logs"], "instanceId": AGENT_INSTANCE_ID},
+                    {
+                        "status": pending_result["status"],
+                        "logs": pending_result["logs"],
+                        "instanceId": AGENT_INSTANCE_ID,
+                        "cluster": CLUSTER_NAME,
+                    },
                 )
                 print(f"reported task result id={pending_result['id']} status={pending_result['status']}", flush=True)
                 pending_result = None
@@ -215,7 +220,10 @@ if __name__ == "__main__":
             if task:
                 status, logs = execute_task(task)
                 pending_result = {"id": task["id"], "status": status, "logs": logs}
-                api_post(f"/api/agent/tasks/{task['id']}/result", {"status": status, "logs": logs, "instanceId": AGENT_INSTANCE_ID})
+                api_post(
+                    f"/api/agent/tasks/{task['id']}/result",
+                    {"status": status, "logs": logs, "instanceId": AGENT_INSTANCE_ID, "cluster": CLUSTER_NAME},
+                )
                 print(f"reported task result id={task['id']} status={status}", flush=True)
                 pending_result = None
             else:

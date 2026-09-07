@@ -220,7 +220,7 @@
             <div class="cluster-token-note">
               <div>
                 <strong>Agent Token 设置位置</strong>
-                <span>平台服务端使用 AGENT_SHARED_TOKEN，集群 Agent 使用 AGENT_TOKEN，两边必须保持一致。</span>
+                <span>每个集群都可以单独配置 Agent Token；Agent 侧的 AGENT_TOKEN 需要与对应集群一致，留空则使用平台默认共享 Token。</span>
               </div>
               <code>docker-compose.yml: AGENT_SHARED_TOKEN</code>
               <code>k8s-agent.yaml: AGENT_TOKEN</code>
@@ -320,7 +320,7 @@
               </form>
               <div class="secret-token-note">
                 <strong>Agent Token 实际配置位置</strong>
-                <span>平台服务端在 docker-compose.yml 的 AGENT_SHARED_TOKEN，集群 Agent 在 k8s-agent.yaml 的 AGENT_TOKEN，两边必须一致。这里可以记录 token 名称和用途，但运行时仍以环境变量为准。</span>
+                <span>平台默认仍可用 docker-compose.yml 的 AGENT_SHARED_TOKEN；如果某个集群在管理页单独配置了 Agent Token，就以该集群的 token 为准。这里建议记录 token 名称和用途，方便后续维护。</span>
               </div>
               <div class="management-toolbar">
                 <label class="search-box">
@@ -682,6 +682,10 @@
           <label>
             <span>默认 namespace</span>
             <input name="namespace" placeholder="default" />
+          </label>
+          <label class="wide-field">
+            <span>Agent Token</span>
+            <input name="agentToken" type="password" placeholder="留空则使用平台默认共享 Token" autocomplete="off" />
           </label>
           <label class="wide-field">
             <span>默认镜像拉取秘钥</span>
@@ -1134,6 +1138,10 @@
           <label>
             <span>默认 namespace</span>
             <input name="namespace" />
+          </label>
+          <label class="wide-field">
+            <span>Agent Token</span>
+            <input name="agentToken" type="password" placeholder="留空则保留当前值 / 使用平台默认共享 Token" autocomplete="off" />
           </label>
           <label>
             <span>默认镜像拉取秘钥</span>

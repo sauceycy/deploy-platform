@@ -64,5 +64,6 @@ spec:
               value: http://YOUR_PLATFORM_HOST:8080
             - name: CLUSTER_NAME
               value: dev-01
+            # 每个集群可使用自己的 Agent Token，需与平台里该集群配置保持一致
             - name: AGENT_TOKEN
               value: dev-agent-token

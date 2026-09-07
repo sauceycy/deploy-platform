@@ -2149,6 +2149,7 @@ function renderClusterView() {
           ${agentState.instanceId ? `<span>实例：${String(agentState.instanceId).slice(0, 24)}</span>` : ""}
           <span>节点：${nodes.length} 个</span>
           <span>任务绑定：${tasks.filter((task) => (task.clusters || []).some((target) => target.name === cluster.name)).length} 个</span>
+          <span>Agent Token：${cluster.agentToken ? "已配置" : "使用平台默认"}</span>
           <span>拉取秘钥：${secretName(cluster.imagePullSecretId)}</span>
         </div>
         <div class="cluster-node-preview">
@@ -3238,6 +3239,7 @@ async function saveCluster(event) {
     organizationIds,
     organizationId: organizationIds[0] || "default",
     namespace: formData.get("namespace"),
+    agentToken: String(formData.get("agentToken") || "").trim(),
     imagePullSecretId: formData.get("imagePullSecretId"),
     nodes: [],
   };
@@ -3309,6 +3311,7 @@ function openClusterDialog(clusterId) {
   editClusterForm.elements.env.value = cluster.env || "dev";
   renderOrganizationChecks(document.getElementById("editClusterOrganizationList"), assetOrganizationIds(cluster));
   editClusterForm.elements.namespace.value = cluster.namespace || "default";
+  editClusterForm.elements.agentToken.value = cluster.agentToken || "";
   editClusterForm.elements.imagePullSecretId.value = cluster.imagePullSecretId || "";
   clusterNodeDrafts.splice(0, clusterNodeDrafts.length, ...(cluster.nodes || []).map((node) => ({ ...node })));
   renderClusterNodes();
@@ -3362,6 +3365,7 @@ async function saveEditedCluster(event) {
     organizationIds,
     organizationId: organizationIds[0] || "default",
     namespace: editClusterForm.elements.namespace.value || "default",
+    agentToken: String(editClusterForm.elements.agentToken.value || "").trim() || cluster.agentToken || "",
     imagePullSecretId: editClusterForm.elements.imagePullSecretId.value,
     nodes: clusterNodeDrafts.filter((node) => node.name || node.ip),
   });

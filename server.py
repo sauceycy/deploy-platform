@@ -247,6 +247,8 @@ def normalize_group_state(state):
                 normalized_org_ids = [str(item.get("organizationId") or "default").strip() or "default"]
             item["organizationIds"] = normalized_org_ids or ["default"]
             item["organizationId"] = item["organizationIds"][0]
+            if key == "clusters":
+                item["agentToken"] = str(item.get("agentToken") or "").strip()
 
 
 def use_postgres():
@@ -2999,6 +3001,15 @@ def normalize_cluster_key(value):
     return re.sub(r"\s+", " ", str(value or "").strip()).lower()
 
 
+def cluster_agent_token(state, cluster_name):
+    cluster = next((item for item in state.get("clusters", []) if normalize_cluster_key(item.get("name")) == normalize_cluster_key(cluster_name)), None)
+    if cluster:
+        token = str(cluster.get("agentToken") or "").strip()
+        if token:
+            return token
+    return AGENT_SHARED_TOKEN
+
+
 def update_agent_result(agent_task_id, status, logs, agent_instance=None):
     notification = None
     status = status if status in {"success", "failed"} else "failed"
@@ -3100,10 +3111,11 @@ class Handler(SimpleHTTPRequestHandler):
                 return value
         return ""
 
-    def require_agent_token(self, parsed):
+    def require_agent_token(self, parsed, expected_token=None):
         query = parse_qs(parsed.query)
         token = query.get("token", [""])[0] or self.headers.get("X-Agent-Token", "")
-        if AGENT_SHARED_TOKEN and token != AGENT_SHARED_TOKEN:
+        expected = str(expected_token or AGENT_SHARED_TOKEN or "").strip()
+        if expected and token != expected:
             self.send_json({"error": "unauthorized"}, status=401)
             return False
         return True
@@ -3205,9 +3217,9 @@ class Handler(SimpleHTTPRequestHandler):
             query = parse_qs(parsed.query)
             cluster = query.get("cluster", [""])[0].strip()
             agent_instance = query.get("instanceId", [""])[0].strip()
-            if not self.require_agent_token(parsed):
-                return
             state = read_state()
+            if not self.require_agent_token(parsed, cluster_agent_token(state, cluster)):
+                return
             task = next_agent_task_for_cluster(state["agentTasks"], cluster)
             if not task:
                 self.send_json({"task": None})
@@ -3329,17 +3341,21 @@ class Handler(SimpleHTTPRequestHandler):
             return
         match = re.match(r"^/api/agent/tasks/([^/]+)/result$", parsed.path)
         if match:
-            if not self.require_agent_token(parsed):
-                return
             body = self.read_json_body()
+            state = read_state()
+            agent_task = find_by_id(state.get("agentTasks", []), match.group(1))
+            cluster_name = (agent_task or {}).get("clusterName") or str(body.get("cluster") or "").strip()
+            if not self.require_agent_token(parsed, cluster_agent_token(state, cluster_name)):
+                return
             item, state = update_agent_result(match.group(1), body.get("status") or "failed", body.get("logs") or "", body.get("instanceId") or "")
             self.send_json({"ok": True, "task": {"id": match.group(1), "status": (item or {}).get("status")}})
             return
         if parsed.path == "/api/agent/heartbeat":
-            if not self.require_agent_token(parsed):
-                return
             body = self.read_json_body()
             cluster = str(body.get("cluster") or "").strip()
+            state = read_state()
+            if not self.require_agent_token(parsed, cluster_agent_token(state, cluster)):
+                return
 
             def update(state):
                 state["agentHeartbeats"] = [item for item in state["agentHeartbeats"] if normalize_cluster_key(item.get("cluster")) != normalize_cluster_key(cluster)]
