@@ -2903,7 +2903,7 @@ function resetTaskForm() {
   taskForm.elements.templateId.value = "";
   taskForm.elements.deployRule.value = "k8s";
   taskForm.elements.appType.value = "backend";
-  taskForm.elements.env.value = "test";
+  if (taskForm.elements.env) taskForm.elements.env.value = "test";
   taskForm.elements.language.value = "java";
   taskForm.elements.artifactPath.value = "";
   taskForm.elements.buildEnv.value = "";
@@ -2946,8 +2946,8 @@ function openTaskEditor(taskId) {
   taskForm.elements.taskId.value = task.id;
   taskForm.elements.name.value = task.name || "";
   taskForm.elements.owner.value = task.owner || "";
-  taskForm.elements.env.value = task.env || "test";
-  taskForm.elements.tag.value = task.tag || "";
+  if (taskForm.elements.env) taskForm.elements.env.value = task.env || "test";
+  if (taskForm.elements.tag) taskForm.elements.tag.value = task.tag || "";
   taskOrganizationSelect.innerHTML = organizationOptions(task.organizationId || "default");
   taskForm.elements.organizationId.value = task.organizationId || "default";
   renderTaskTemplateOptions(task.templateId || "");
@@ -3034,6 +3034,10 @@ function formValue(name) {
   return taskForm.elements[name]?.value || "";
 }
 
+function taskEnvValue(task = {}) {
+  return task.env || formValue("env") || "test";
+}
+
 function selectedEvents() {
   const eventMap = [
     ["notifyBuildFail", "构建失败"],
@@ -3084,7 +3088,7 @@ function collectDeployConfigDrafts() {
 function currentDeployConfigSnapshot() {
   collectClusterDrafts();
   const name = formValue("name") || "服务";
-  const env = formValue("env") || "test";
+  const env = taskEnvValue();
   return normalizeDeployConfig(
     {
       id: `cfg-${Date.now()}`,
@@ -3106,14 +3110,14 @@ function buildPreviewObject() {
   const deployConfigs = normalizeDeployRule(formValue("deployRule")) === "cf_pages"
     ? []
     : deployConfigDrafts.map((config) =>
-        normalizeDeployConfig(config, { name: formValue("name"), env: formValue("env"), organizationId: formValue("organizationId"), clusters: clusterDrafts }),
+        normalizeDeployConfig(config, { name: formValue("name"), env: taskEnvValue(), organizationId: formValue("organizationId"), clusters: clusterDrafts }),
       );
   return {
     task: {
       name: formValue("name"),
       owner: formValue("owner"),
-      env: formValue("env"),
-      tag: formValue("tag"),
+      env: taskEnvValue(),
+      tag: "",
       organizationId: formValue("organizationId"),
       deployRule: normalizeDeployRule(formValue("deployRule")),
       appType: normalizeDeployRule(formValue("deployRule")) === "cf_pages" ? "frontend" : normalizeAppType(formValue("appType")),
