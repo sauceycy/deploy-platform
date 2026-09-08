@@ -128,10 +128,25 @@ STATE_WRITE_STOP = threading.Event()
 PENDING_STATE_PAYLOAD = None
 PENDING_STATE_REVISION = 0
 STATE_WRITE_ERROR = ""
+REQUEST_CONTEXT = threading.local()
 
 
 def now_text():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def current_request_context():
+    return getattr(REQUEST_CONTEXT, "value", {}) or {}
+
+
+def audit_entry(actor, action, target, result):
+    entry = {"time": now_text(), "actor": actor or "system", "action": action, "target": target, "result": result}
+    context = current_request_context()
+    if context.get("sourceIp"):
+        entry["sourceIp"] = context.get("sourceIp")
+    if context.get("userAgent"):
+        entry["userAgent"] = context.get("userAgent")
+    return entry
 
 
 def format_duration(seconds):
@@ -312,6 +327,7 @@ def normalize_group_state(state):
         if not isinstance(user.get("organizationIds"), list) or not user.get("organizationIds"):
             user["organizationIds"] = ["default"]
         user["globalAccess"] = bool(user.get("globalAccess") or user.get("role") == "platform_admin")
+        user["authVersion"] = max(1, int(user.get("authVersion") or 1))
         if RESET_ADMIN_PASSWORD and ADMIN_PASSWORD and user.get("username") == "admin":
             user["password"] = ADMIN_PASSWORD
     for key in ("tasks", "clusters", "secrets", "buildTemplates"):
@@ -447,21 +463,31 @@ def preserve_existing_user_passwords(next_state, current_state=None):
     current_state = current_state if current_state is not None else read_raw_state()
     if not current_state:
         return next_state
-    current_passwords = {user.get("username"): user.get("password") for user in current_state.get("users", [])}
+    current_users = {user.get("username"): user for user in current_state.get("users", [])}
     default_passwords = default_user_passwords()
     for user in next_state.get("users", []):
         username = user.get("username")
+        current_user = current_users.get(username) or {}
         if RESET_ADMIN_PASSWORD and ADMIN_PASSWORD and username == "admin":
+            if current_user and str(current_user.get("password") or "") != str(ADMIN_PASSWORD):
+                user["authVersion"] = int(current_user.get("authVersion") or 1) + 1
             user["password"] = ADMIN_PASSWORD
             continue
         incoming_password = user.get("password")
-        current_password = current_passwords.get(username)
+        current_password = current_user.get("password")
         default_password = default_passwords.get(username)
         if current_password and not incoming_password:
             user["password"] = current_password
+            user["authVersion"] = int(user.get("authVersion") or current_user.get("authVersion") or 1)
             continue
         if current_password and default_password and incoming_password == default_password and current_password != incoming_password:
             user["password"] = current_password
+            user["authVersion"] = int(user.get("authVersion") or current_user.get("authVersion") or 1)
+            continue
+        if current_user and incoming_password and str(incoming_password) != str(current_password or ""):
+            user["authVersion"] = int(current_user.get("authVersion") or 1) + 1
+        else:
+            user["authVersion"] = int(user.get("authVersion") or current_user.get("authVersion") or 1)
     return next_state
 
 
@@ -778,6 +804,7 @@ def public_user(user):
         "role": user.get("role") or "viewer",
         "globalAccess": bool(user.get("globalAccess")),
         "organizationIds": user_org_ids(user),
+        "authVersion": int(user.get("authVersion") or 1),
     }
 
 
@@ -809,11 +836,13 @@ def verify_session_token(token):
     username = str(payload.get("username") or "").strip()
     if not username:
         raise ValueError("登录状态已失效")
-    return username
+    if "authVersion" not in payload:
+        raise ValueError("登录状态已升级，请重新登录")
+    return username, int(payload.get("authVersion") or 1)
 
 
 def issue_session_token(user):
-    return sign_session_payload({"username": user.get("username"), "iat": int(time.time())})
+    return sign_session_payload({"username": user.get("username"), "authVersion": int(user.get("authVersion") or 1), "iat": int(time.time())})
 
 
 def authenticate_user(username, password):
@@ -835,13 +864,15 @@ def authenticate_user(username, password):
 
 
 def session_user(token=None):
-    username = verify_session_token(token)
+    username, auth_version = verify_session_token(token)
     if not username:
         raise ValueError("登录状态已失效")
     state = read_state()
     user = find_user(state, username)
     if not user:
         raise ValueError("用户不存在，请重新登录")
+    if int(user.get("authVersion") or 1) != int(auth_version or 1):
+        raise ValueError("账号密码或权限已变更，请重新登录")
     public = public_user(user)
     public["token"] = issue_session_token(user)
     return public, state
@@ -2444,13 +2475,7 @@ def create_execution_record(state, task, actor, branch, action="触发发布", d
     task["lastDeployConfigName"] = deploy_config.get("name") or "默认配置"
     state["auditLogs"].insert(
         0,
-        {
-            "time": now_text(),
-            "actor": execution_actor,
-            "action": action,
-            "target": f"{task_display_name(task, deploy_config)} / {deploy_config.get('name') or '默认配置'} / {branch}",
-            "result": "已入队",
-        },
+        audit_entry(execution_actor, action, f"{task_display_name(task, deploy_config)} / {deploy_config.get('name') or '默认配置'} / {branch}", "已入队"),
     )
     return execution
 
@@ -2479,7 +2504,7 @@ def cancel_execution(execution_id, actor):
             task["stage"] = "已取消"
             task["progress"] = execution["progress"]
             task["lastRun"] = now_text()
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "取消发布", "target": execution.get("taskName"), "result": "成功"})
+        state["auditLogs"].insert(0, audit_entry(actor, "取消发布", execution.get("taskName"), "成功"))
         return execution
 
     execution, state = mutate_state(update)
@@ -2547,7 +2572,7 @@ def delete_task(task_id, actor):
         state["executions"] = [item for item in state["executions"] if str(item.get("taskId")) != str(task_id)]
         state["agentTasks"] = [item for item in state["agentTasks"] if str(item.get("taskId")) != str(task_id)]
         state["schedules"] = [item for item in state.setdefault("schedules", []) if str(item.get("taskId")) != str(task_id)]
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "删除任务", "target": task.get("name"), "result": "成功"})
+        state["auditLogs"].insert(0, audit_entry(actor, "删除任务", task.get("name"), "成功"))
         return task
 
     task, state = mutate_state(update)
@@ -2711,7 +2736,7 @@ def save_task_config(task_id, payload, actor):
                 raise ValueError("任务不存在")
             require_actor_asset_access(state, actor, "task.create", task, "编辑")
             task.update(task_payload)
-            state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "编辑任务", "target": task.get("name"), "result": "成功"})
+            state["auditLogs"].insert(0, audit_entry(actor, "编辑任务", task.get("name"), "成功"))
             return task
 
         task = {
@@ -2724,7 +2749,7 @@ def save_task_config(task_id, payload, actor):
             "alerts": 0,
         }
         state["tasks"].insert(0, task)
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "创建任务", "target": task.get("name"), "result": "成功"})
+        state["auditLogs"].insert(0, audit_entry(actor, "创建任务", task.get("name"), "成功"))
         return task
 
     task, state = mutate_state(update)
@@ -2961,7 +2986,7 @@ def schedule_execution(task_id, actor, branch, scheduled_at, deploy_config_id=No
             "scheduledAt": scheduled_at,
             "status": "pending",
         }
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "创建定时发布", "target": f"{task_display_name(task, deploy_config)} / {deploy_config.get('name') or '默认配置'} / {branch}", "result": scheduled_at})
+        state["auditLogs"].insert(0, audit_entry(actor, "创建定时发布", f"{task_display_name(task, deploy_config)} / {deploy_config.get('name') or '默认配置'} / {branch}", scheduled_at))
         return schedule
 
     schedule, state = mutate_state(update)
@@ -2983,7 +3008,7 @@ def cancel_schedule(schedule_id, actor):
         schedule["updatedAt"] = now_text()
         if task and task.get("schedule", {}).get("id") == schedule_id:
             task["schedule"]["status"] = "cancelled"
-        state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "取消定时发布", "target": schedule.get("taskName"), "result": "成功"})
+        state["auditLogs"].insert(0, audit_entry(actor, "取消定时发布", schedule.get("taskName"), "成功"))
         return schedule
 
     schedule, state = mutate_state(update)
@@ -3316,12 +3341,22 @@ class Handler(SimpleHTTPRequestHandler):
         return True
 
     def require_session_user(self):
+        REQUEST_CONTEXT.value = {
+            "sourceIp": (self.headers.get("X-Forwarded-For") or self.client_address[0] or "").split(",")[0].strip(),
+            "userAgent": (self.headers.get("User-Agent") or "")[:240],
+        }
         try:
             user, _ = session_user(self.cookie_value("deploy_platform_session"))
         except Exception as exc:
             self.send_json({"error": str(exc)}, status=401)
             return None
         return user
+
+    def require_session_actor(self):
+        user = self.require_session_user()
+        if not user:
+            return None
+        return user.get("username") or "system"
 
     def websocket_handshake(self):
         key = self.headers.get("Sec-WebSocket-Key", "")
@@ -3390,6 +3425,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.websocket_serve(state)
             return
         if parsed.path == "/api/state":
+            if not self.require_session_user():
+                return
             state = read_state()
             query = parse_qs(parsed.query)
             compact = query.get("compact", [""])[0] in {"1", "true", "yes"}
@@ -3401,6 +3438,8 @@ class Handler(SimpleHTTPRequestHandler):
             return
         match = re.match(r"^/api/executions/([^/]+)/logs$", parsed.path)
         if match:
+            if not self.require_session_user():
+                return
             state = read_state()
             execution = find_by_id(state.get("executions", []), match.group(1))
             if not execution:
@@ -3454,8 +3493,11 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/tasks":
             body = self.read_json_body()
+            actor = self.require_session_actor()
+            if not actor:
+                return
             try:
-                task, state = save_task_config(None, body.get("task") or {}, body.get("actor"))
+                task, state = save_task_config(None, body.get("task") or {}, actor)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
@@ -3463,8 +3505,11 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/secrets":
             body = self.read_json_body()
+            actor = self.require_session_actor()
+            if not actor:
+                return
             try:
-                secret, state = save_secret_config(None, body.get("secret") or {}, body.get("actor"))
+                secret, state = save_secret_config(None, body.get("secret") or {}, actor)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
@@ -3472,8 +3517,11 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/tasks/batch-run":
             body = self.read_json_body()
+            actor = self.require_session_actor()
+            if not actor:
+                return
             try:
-                executions, state = create_batch_executions(body.get("items"), body.get("actor"))
+                executions, state = create_batch_executions(body.get("items"), actor)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
@@ -3482,8 +3530,11 @@ class Handler(SimpleHTTPRequestHandler):
         match = re.match(r"^/api/tasks/([^/]+)/run$", parsed.path)
         if match:
             body = self.read_json_body()
+            actor = self.require_session_actor()
+            if not actor:
+                return
             try:
-                execution, state = create_execution(match.group(1), body.get("actor"), body.get("branch"), body.get("deployConfigId"))
+                execution, state = create_execution(match.group(1), actor, body.get("branch"), body.get("deployConfigId"))
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
@@ -3492,8 +3543,11 @@ class Handler(SimpleHTTPRequestHandler):
         match = re.match(r"^/api/tasks/([^/]+)/schedule$", parsed.path)
         if match:
             body = self.read_json_body()
+            actor = self.require_session_actor()
+            if not actor:
+                return
             try:
-                schedule, state = schedule_execution(match.group(1), body.get("actor"), body.get("branch"), body.get("scheduledAt"), body.get("deployConfigId"))
+                schedule, state = schedule_execution(match.group(1), actor, body.get("branch"), body.get("scheduledAt"), body.get("deployConfigId"))
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
@@ -3502,8 +3556,11 @@ class Handler(SimpleHTTPRequestHandler):
         match = re.match(r"^/api/executions/([^/]+)/cancel$", parsed.path)
         if match:
             body = self.read_json_body()
+            actor = self.require_session_actor()
+            if not actor:
+                return
             try:
-                execution, state = cancel_execution(match.group(1), body.get("actor"))
+                execution, state = cancel_execution(match.group(1), actor)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
@@ -3512,8 +3569,11 @@ class Handler(SimpleHTTPRequestHandler):
         match = re.match(r"^/api/schedules/([^/]+)/cancel$", parsed.path)
         if match:
             body = self.read_json_body()
+            actor = self.require_session_actor()
+            if not actor:
+                return
             try:
-                schedule, state = cancel_schedule(match.group(1), body.get("actor"))
+                schedule, state = cancel_schedule(match.group(1), actor)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
@@ -3521,13 +3581,16 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/repositories/branches":
             body = self.read_json_body()
+            actor = self.require_session_actor()
+            if not actor:
+                return
             try:
                 state = read_state()
                 secret_id = body.get("gitCredentialId")
                 if secret_id:
                     secret = find_by_id(state.get("secrets", []), secret_id)
                     if secret:
-                        require_actor_asset_access(state, body.get("actor"), "secret.view", secret, "读取")
+                        require_actor_asset_access(state, actor, "secret.view", secret, "读取")
                 branches = list_repository_branches(body.get("repo") or "", body.get("gitCredentialId"))
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
@@ -3565,9 +3628,11 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         match = re.match(r"^/api/tasks/([^/]+)$", parsed.path)
         if match:
-            query = parse_qs(parsed.query)
+            actor = self.require_session_actor()
+            if not actor:
+                return
             try:
-                task, state = delete_task(match.group(1), query.get("actor", ["system"])[0])
+                task, state = delete_task(match.group(1), actor)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
@@ -3575,9 +3640,11 @@ class Handler(SimpleHTTPRequestHandler):
             return
         match = re.match(r"^/api/secrets/([^/]+)$", parsed.path)
         if match:
-            query = parse_qs(parsed.query)
+            actor = self.require_session_actor()
+            if not actor:
+                return
             try:
-                secret, state = delete_secret_config(match.group(1), query.get("actor", ["system"])[0])
+                secret, state = delete_secret_config(match.group(1), actor)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
@@ -3590,8 +3657,11 @@ class Handler(SimpleHTTPRequestHandler):
         match = re.match(r"^/api/tasks/([^/]+)$", parsed.path)
         if match:
             body = self.read_json_body()
+            actor = self.require_session_actor()
+            if not actor:
+                return
             try:
-                task, state = save_task_config(match.group(1), body.get("task") or {}, body.get("actor"))
+                task, state = save_task_config(match.group(1), body.get("task") or {}, actor)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
@@ -3600,8 +3670,11 @@ class Handler(SimpleHTTPRequestHandler):
         match = re.match(r"^/api/secrets/([^/]+)$", parsed.path)
         if match:
             body = self.read_json_body()
+            actor = self.require_session_actor()
+            if not actor:
+                return
             try:
-                secret, state = save_secret_config(match.group(1), body.get("secret") or {}, body.get("actor"))
+                secret, state = save_secret_config(match.group(1), body.get("secret") or {}, actor)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
@@ -3613,10 +3686,14 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             body = self.read_json_body()
             if isinstance(body, dict) and "state" in body:
-                actor = body.get("actor")
+                actor = self.require_session_actor()
+                if not actor:
+                    return
                 state = body.get("state") or {}
             else:
-                actor = None
+                actor = self.require_session_actor()
+                if not actor:
+                    return
                 state = body
             with STATE_LOCK:
                 current_state = read_state()

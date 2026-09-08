@@ -4330,6 +4330,12 @@ async function saveEditedUser(event) {
   const saved = await persistState();
   if (saved) {
     closeUserDialog();
+    if (changedPassword && state.currentUser.username === user.username) {
+      window.alert("密码已更新，请使用新密码重新登录");
+      logout();
+      if (submitter) submitter.disabled = false;
+      return;
+    }
     render();
   }
   if (submitter) submitter.disabled = false;
@@ -4646,6 +4652,7 @@ function authUserSnapshot(user) {
     role: user.role || "viewer",
     globalAccess: Boolean(user.globalAccess),
     organizationIds: Array.isArray(user.organizationIds) && user.organizationIds.length ? user.organizationIds : ["default"],
+    authVersion: Number(user.authVersion || 1),
     token: user.token || "",
   };
 }
