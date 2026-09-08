@@ -1142,20 +1142,34 @@ def write_maven_settings(task, src_dir):
         raise RuntimeError("Maven 私库地址必须以 http:// 或 https:// 开头")
 
     mirror_of = str(task.get("mavenMirrorOf") or "maven-public").strip() or "maven-public"
+    snapshots_repo_url = str(task.get("mavenSnapshotsRepoUrl") or "").strip()
+    snapshots_mirror_of = str(task.get("mavenSnapshotsMirrorOf") or "maven-snapshots").strip() or "maven-snapshots"
+    if snapshots_repo_url and not re.match(r"^https?://", snapshots_repo_url, flags=re.IGNORECASE):
+        raise RuntimeError("Maven snapshots 私库地址必须以 http:// 或 https:// 开头")
     settings_dir = src_dir / ".deploy"
     settings_dir.mkdir(parents=True, exist_ok=True)
     settings_file = settings_dir / "maven-settings.xml"
-    settings_file.write_text(
-        f"""<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
-          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
-  <mirrors>
-    <mirror>
+    mirrors = f"""    <mirror>
       <id>deploy-platform-private-repo</id>
       <name>Deploy Platform Private Maven Repository</name>
       <url>{xml_escape(repo_url)}</url>
       <mirrorOf>{xml_escape(mirror_of)}</mirrorOf>
     </mirror>
+"""
+    if snapshots_repo_url:
+        mirrors += f"""    <mirror>
+      <id>deploy-platform-private-snapshots</id>
+      <name>Deploy Platform Private Maven Snapshots</name>
+      <url>{xml_escape(snapshots_repo_url)}</url>
+      <mirrorOf>{xml_escape(snapshots_mirror_of)}</mirrorOf>
+    </mirror>
+"""
+    settings_file.write_text(
+        f"""<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+  <mirrors>
+{mirrors.rstrip()}
   </mirrors>
 </settings>
 """,
@@ -2355,10 +2369,11 @@ def build_and_dispatch(execution_id):
             if maven_settings_path:
                 original_command = command
                 command, injected = apply_maven_settings_to_command(command, maven_settings_path)
-                append_log(
-                    execution_id,
-                    f"已启用 Maven 私库 {redact_url_credentials(task.get('mavenRepoUrl'))}，覆盖仓库: {task.get('mavenMirrorOf') or 'maven-public'}",
-                )
+                repo_message = f"已启用 Maven 私库 {redact_url_credentials(task.get('mavenRepoUrl'))}，覆盖仓库: {task.get('mavenMirrorOf') or 'maven-public'}"
+                snapshots_repo_url = str(task.get("mavenSnapshotsRepoUrl") or "").strip()
+                if snapshots_repo_url:
+                    repo_message += f"，snapshot 仓库: {redact_url_credentials(snapshots_repo_url)}，覆盖仓库: {task.get('mavenSnapshotsMirrorOf') or 'maven-snapshots'}"
+                append_log(execution_id, repo_message)
                 if not injected and original_command == command:
                     append_log(execution_id, f"编译命令未以 mvn/mvnw 开头，请手动追加参数: -s {maven_settings_path}")
             build_env = parse_build_env(task.get("buildEnv"))
@@ -2621,6 +2636,8 @@ def normalize_task_payload(payload):
         "pagesDeployCommand": str(payload.get("pagesDeployCommand") or "").strip() or default_pages_deploy_command(package_manager),
         "mavenRepoUrl": str(payload.get("mavenRepoUrl") or "").strip(),
         "mavenMirrorOf": str(payload.get("mavenMirrorOf") or "maven-public").strip() or "maven-public",
+        "mavenSnapshotsRepoUrl": str(payload.get("mavenSnapshotsRepoUrl") or "").strip(),
+        "mavenSnapshotsMirrorOf": str(payload.get("mavenSnapshotsMirrorOf") or "maven-snapshots").strip() or "maven-snapshots",
         "containerPort": int(payload.get("containerPort") or 8080),
         "servicePort": int(payload.get("servicePort") or 80),
         "replicas": int(payload.get("replicas") or 1),
@@ -2645,10 +2662,16 @@ def normalize_task_payload(payload):
             task_payload["sdk"] = "node22"
         task_payload["mavenRepoUrl"] = ""
         task_payload["mavenMirrorOf"] = "maven-public"
+        task_payload["mavenSnapshotsRepoUrl"] = ""
+        task_payload["mavenSnapshotsMirrorOf"] = "maven-snapshots"
         task_payload["jvmOptions"] = ""
     elif task_payload["language"] != "java":
         task_payload["artifactPath"] = ""
         task_payload["jvmOptions"] = ""
+        task_payload["mavenRepoUrl"] = ""
+        task_payload["mavenMirrorOf"] = "maven-public"
+        task_payload["mavenSnapshotsRepoUrl"] = ""
+        task_payload["mavenSnapshotsMirrorOf"] = "maven-snapshots"
     if deploy_rule == "cf_pages":
         task_payload["clusters"] = []
         task_payload["artifactPath"] = ""

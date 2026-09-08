@@ -1618,7 +1618,9 @@ function renderDetail() {
         ${
           task.language === "java"
             ? `<span>Maven 私库</span><strong>${task.mavenRepoUrl || "未设置"}</strong>
-               <span>覆盖仓库</span><strong>${task.mavenMirrorOf || "maven-public"}</strong>`
+               <span>覆盖仓库</span><strong>${task.mavenMirrorOf || "maven-public"}</strong>
+               <span>Maven snapshots 私库</span><strong>${task.mavenSnapshotsRepoUrl || "未设置"}</strong>
+               <span>Snapshots 覆盖仓库</span><strong>${task.mavenSnapshotsMirrorOf || "maven-snapshots"}</strong>`
             : ""
         }
       </div>
@@ -1978,7 +1980,9 @@ function renderTaskConfigTab(task, activeSchedule) {
           ${
             task.language === "java"
               ? `<span>Maven 私库</span><strong>${task.mavenRepoUrl || "未设置"}</strong>
-                 <span>覆盖仓库</span><strong>${task.mavenMirrorOf || "maven-public"}</strong>`
+                 <span>覆盖仓库</span><strong>${task.mavenMirrorOf || "maven-public"}</strong>
+                 <span>Maven snapshots 私库</span><strong>${task.mavenSnapshotsRepoUrl || "未设置"}</strong>
+                 <span>Snapshots 覆盖仓库</span><strong>${task.mavenSnapshotsMirrorOf || "maven-snapshots"}</strong>`
               : ""
           }
         </div>
@@ -2426,7 +2430,7 @@ function renderTemplateView() {
   );
   const visibleTemplates = accessibleTemplates.filter((template) => {
     const matchedCategory = filters.category === "all" || filters.category === `lang:${template.language}` || filters.category === `rule:${template.deployRule || "k8s"}`;
-    const matchedSearch = textIncludes([template.name, assetOrganizationLabel(template), template.language, template.sdk, template.command, template.workdir, template.artifactPath, template.mavenRepoUrl, template.pagesDeployCommand], query);
+    const matchedSearch = textIncludes([template.name, assetOrganizationLabel(template), template.language, template.sdk, template.command, template.workdir, template.artifactPath, template.mavenRepoUrl, template.mavenSnapshotsRepoUrl, template.pagesDeployCommand], query);
     return matchedCategory && matchedSearch;
   });
   const pageData = paginateRows("templates", visibleTemplates);
@@ -2483,6 +2487,8 @@ function applyTaskTemplate(templateId) {
   setValue("pagesDeployCommand", template.pagesDeployCommand || defaultPagesDeployCommand(template.pagesPackageManager || "npm"));
   setValue("mavenRepoUrl", template.mavenRepoUrl);
   setValue("mavenMirrorOf", template.mavenMirrorOf || "maven-public");
+  setValue("mavenSnapshotsRepoUrl", template.mavenSnapshotsRepoUrl);
+  setValue("mavenSnapshotsMirrorOf", template.mavenSnapshotsMirrorOf || "maven-snapshots");
   syncDeployRuleFields();
 }
 
@@ -3011,6 +3017,8 @@ function resetTaskForm() {
   taskForm.elements.cloudflareApiTokenSecretId.value = "";
   taskForm.elements.mavenRepoUrl.value = "";
   taskForm.elements.mavenMirrorOf.value = "maven-public";
+  taskForm.elements.mavenSnapshotsRepoUrl.value = "";
+  taskForm.elements.mavenSnapshotsMirrorOf.value = "maven-snapshots";
   fillHealthCheckForm(taskForm, { enabled: true });
   renderNotifyChannelOptions("", true);
   renderGitCredentialOptions("");
@@ -3068,6 +3076,8 @@ function openTaskEditor(taskId) {
   taskForm.elements.cloudflareApiTokenSecretId.value = task.cloudflareApiTokenSecretId || "";
   taskForm.elements.mavenRepoUrl.value = task.mavenRepoUrl || "";
   taskForm.elements.mavenMirrorOf.value = task.mavenMirrorOf || "maven-public";
+  taskForm.elements.mavenSnapshotsRepoUrl.value = task.mavenSnapshotsRepoUrl || "";
+  taskForm.elements.mavenSnapshotsMirrorOf.value = task.mavenSnapshotsMirrorOf || "maven-snapshots";
   taskForm.elements.containerPort.value = task.containerPort || "";
   taskForm.elements.servicePort.value = task.servicePort || "";
   taskForm.elements.replicas.value = task.replicas || "";
@@ -3243,6 +3253,8 @@ function buildPreviewObject() {
       cloudflareApiTokenSecretId: normalizeDeployRule(formValue("deployRule")) === "cf_pages" ? formValue("cloudflareApiTokenSecretId") : "",
       mavenRepoUrl: formValue("mavenRepoUrl"),
       mavenMirrorOf: formValue("mavenMirrorOf") || "maven-public",
+      mavenSnapshotsRepoUrl: formValue("mavenSnapshotsRepoUrl"),
+      mavenSnapshotsMirrorOf: formValue("mavenSnapshotsMirrorOf") || "maven-snapshots",
     },
     runtime: {
       containerPort: Number(formValue("containerPort")),
@@ -3293,6 +3305,8 @@ async function saveTask(event) {
     cloudflareApiTokenSecretId: preview.build.cloudflareApiTokenSecretId,
     mavenRepoUrl: preview.build.mavenRepoUrl,
     mavenMirrorOf: preview.build.mavenMirrorOf,
+    mavenSnapshotsRepoUrl: preview.build.mavenSnapshotsRepoUrl,
+    mavenSnapshotsMirrorOf: preview.build.mavenSnapshotsMirrorOf,
     containerPort: preview.runtime.containerPort,
     servicePort: preview.runtime.servicePort,
     replicas: preview.runtime.replicas,
@@ -3884,6 +3898,8 @@ async function saveTemplate(event) {
     pagesDeployCommand: formData.get("pagesDeployCommand") || "",
     mavenRepoUrl: formData.get("mavenRepoUrl") || "",
     mavenMirrorOf: formData.get("mavenMirrorOf") || "maven-public",
+    mavenSnapshotsRepoUrl: formData.get("mavenSnapshotsRepoUrl") || "",
+    mavenSnapshotsMirrorOf: formData.get("mavenSnapshotsMirrorOf") || "maven-snapshots",
   };
   buildTemplates.unshift(template);
   addAudit("添加任务模板", template.name);

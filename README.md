@@ -353,7 +353,7 @@ JAR 包路径：ruoyi-admin/target/*.jar
 https://nexus.example.com/repository/maven-public/
 ```
 
-「覆盖仓库 ID」默认是 `maven-public`。构建时平台会临时生成 `/workspace/.deploy/maven-settings.xml`，并自动把以 `mvn` 或 `./mvnw` 开头的编译命令改为使用 `-s /workspace/.deploy/maven-settings.xml`。如果编译命令不是以 `mvn` 或 `./mvnw` 开头，请手动在命令中加入这个 `-s` 参数。
+「覆盖仓库 ID」默认是 `maven-public`。如果需要下载 `SNAPSHOT` 包，可以再单独填写「Maven snapshots 私库地址」和「Snapshots 覆盖仓库 ID」，通常对应 `maven-snapshots`。构建时平台会临时生成 `/workspace/.deploy/maven-settings.xml`，并自动把以 `mvn` 或 `./mvnw` 开头的编译命令改为使用 `-s /workspace/.deploy/maven-settings.xml`。如果编译命令不是以 `mvn` 或 `./mvnw` 开头，请手动在命令中加入这个 `-s` 参数。
 
 任务还支持「构建环境变量」，每行填写一个变量：
 
