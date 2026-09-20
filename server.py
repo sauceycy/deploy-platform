@@ -204,9 +204,11 @@ def normalize_deploy_config(config, task=None, index=0):
         "id": str(config.get("id") or uuid.uuid4().hex[:12]),
         "name": name,
         "project": str(config.get("project") or "").strip(),
-        "branch": str(config.get("branch") or task.get("lastBranch") or "").strip(),
         "env": str(config.get("env") or task.get("env") or "test").strip() or "test",
         "deploymentName": str(config.get("deploymentName") or config.get("appName") or task.get("name") or "").strip(),
+        "buildCommand": str(config.get("buildCommand") or "").strip(),
+        "artifactPath": str(config.get("artifactPath") or "").strip(),
+        "pagesDeployCommand": str(config.get("pagesDeployCommand") or "").strip(),
         "organizationIds": organization_ids,
         "organizationId": organization_ids[0],
         "clusters": normalized_clusters,
@@ -230,7 +232,9 @@ def normalize_deploy_configs(configs, task=None):
                 "name": "默认配置",
                 "env": task.get("env") or "test",
                 "deploymentName": task.get("name") or "",
-                "branch": task.get("lastBranch") or "",
+                "buildCommand": "",
+                "artifactPath": "",
+                "pagesDeployCommand": "",
                 "organizationIds": task.get("organizationIds") or [task.get("organizationId") or "default"],
                 "clusters": task.get("clusters") or [],
                 "runtimeEnv": task.get("runtimeEnv") or "",
@@ -2048,6 +2052,9 @@ def effective_task_for_deploy_config(task, deploy_config):
     effective["deployConfigName"] = deploy_config.get("name")
     effective["deploymentName"] = deploy_config.get("deploymentName") or task.get("name")
     effective["env"] = deploy_config.get("env") or task.get("env")
+    effective["buildCommand"] = deploy_config.get("buildCommand") or task.get("buildCommand") or ""
+    effective["artifactPath"] = deploy_config.get("artifactPath") if deploy_config.get("artifactPath") is not None else task.get("artifactPath") or ""
+    effective["pagesDeployCommand"] = deploy_config.get("pagesDeployCommand") or task.get("pagesDeployCommand") or ""
     effective["clusters"] = copy.deepcopy(deploy_config.get("clusters") or task.get("clusters") or [])
     effective["runtimeEnv"] = deploy_config.get("runtimeEnv") if deploy_config.get("runtimeEnv") is not None else task.get("runtimeEnv") or ""
     effective["jvmOptions"] = deploy_config.get("jvmOptions") if deploy_config.get("jvmOptions") is not None else task.get("jvmOptions") or ""
