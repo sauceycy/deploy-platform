@@ -314,7 +314,15 @@ Cloudflare Pages 发布建议这样配置：
 
 发布中可以点击「取消」。如果当前正在执行 Maven/Docker 等命令，平台会在该命令返回后停止后续阶段。任务不在发布中时，可以点击「删除」清理任务配置、执行记录和定时计划。
 
-Java 任务编译时会使用 Maven + Temurin JDK 构建镜像，例如 `jdk17` 会使用 `maven:3-eclipse-temurin-17` 执行 `mvn clean package -DskipTests`；最终运行镜像仍使用 Temurin JRE。选择 `oraclejdk8u381` 时，构建和运行镜像会使用 `container-registry.oracle.com/java/jdk:8u381-oraclelinux8`；如构建命令依赖 Maven，请使用项目自带的 `./mvnw` 或准备包含 Maven 的 Oracle JDK 构建镜像。
+Java 任务编译时会使用 Maven + Temurin JDK 构建镜像，例如 `jdk17` 会使用 `maven:3-eclipse-temurin-17` 执行 `mvn clean package -DskipTests`；最终运行镜像仍使用 Temurin JRE。
+
+如果需要使用自定义 SDK 编译镜像，可以在「秘钥管理」里的平台设置维护 `SDK -> 编译镜像` 映射，例如：
+
+```text
+oraclejdk8u381 -> harbor.example.com/build/java-oracle-jdk8u381-maven:latest
+```
+
+Oracle 官方镜像仓库需要登录授权，平台不会默认拉取 `container-registry.oracle.com/java/jdk:8u381-oraclelinux8`。选择 `oraclejdk8u381` 时，请先配置一个平台 Docker 环境可拉取、且包含构建所需工具的镜像；如果编译命令依赖 Maven，该镜像需要包含 `mvn`，或项目中提供可执行的 `./mvnw`。
 
 平台会自动挂载持久化 Maven 缓存到构建容器的 `/root/.m2`，并为 `mvn` / `./mvnw` 命令自动追加：
 

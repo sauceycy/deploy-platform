@@ -86,7 +86,7 @@ const executions = [];
 const agentTasks = [];
 const agentHeartbeats = [];
 const schedules = [];
-const platformSettings = { registrySecretId: "", imageNamespace: "deploy-platform" };
+const platformSettings = { registrySecretId: "", imageNamespace: "deploy-platform", sdkImages: [] };
 const clusterDrafts = [];
 const deployConfigDrafts = [];
 let activeDeployConfigIndex = 0;
@@ -206,6 +206,7 @@ const editSecretForm = document.getElementById("editSecretForm");
 const platformSettingsForm = document.getElementById("platformSettingsForm");
 const platformRegistrySecret = document.getElementById("platformRegistrySecret");
 const platformImageNamespace = document.getElementById("platformImageNamespace");
+const sdkImageMappings = document.getElementById("sdkImageMappings");
 const clusterCreateDialog = document.getElementById("clusterCreateDialog");
 const templateCreateDialog = document.getElementById("templateCreateDialog");
 const channelCreateDialog = document.getElementById("channelCreateDialog");
@@ -604,7 +605,8 @@ function hydrateState(nextState, options = {}) {
   mergeAgentTaskSnapshots(nextState.agentTasks, compact);
   replaceArray(agentHeartbeats, nextState.agentHeartbeats);
   replaceArray(schedules, nextState.schedules);
-  Object.assign(platformSettings, { registrySecretId: "", imageNamespace: "deploy-platform" }, nextState.platformSettings || {});
+  Object.assign(platformSettings, { registrySecretId: "", imageNamespace: "deploy-platform", sdkImages: [] }, nextState.platformSettings || {});
+  platformSettings.sdkImages = normalizeSdkImages(platformSettings.sdkImages);
   currentStateRevision = Math.max(currentStateRevision, incomingRevision);
   normalizeOrganizations();
   reconcileTaskRuntime();
@@ -2609,10 +2611,73 @@ function renderImagePullSecretOptions() {
   }
 }
 
+function normalizeSdkImages(value, requireBuilderImage = false) {
+  const items = Array.isArray(value) ? value : [];
+  const seen = new Set();
+  return items
+    .map((item) => ({
+      sdk: String(item?.sdk || "").trim().toLowerCase(),
+      builderImage: String(item?.builderImage || item?.image || "").trim(),
+      runtimeImage: String(item?.runtimeImage || "").trim(),
+    }))
+    .filter((item) => item.sdk && (!requireBuilderImage || item.builderImage))
+    .filter((item) => {
+      if (seen.has(item.sdk)) return false;
+      seen.add(item.sdk);
+      return true;
+    });
+}
+
+function renderSdkImageMappings() {
+  if (!sdkImageMappings) return;
+  const rows = normalizeSdkImages(platformSettings.sdkImages);
+  platformSettings.sdkImages = rows;
+  if (!rows.length) {
+    sdkImageMappings.innerHTML = `<div class="empty-row">暂无自定义 SDK 编译镜像</div>`;
+    return;
+  }
+  sdkImageMappings.innerHTML = rows
+    .map(
+      (item, index) => `
+        <div class="sdk-image-row" data-sdk-image-row="${index}">
+          <label>
+            <span>SDK</span>
+            <input data-sdk-image-field="sdk" value="${escapeHtml(item.sdk)}" placeholder="oraclejdk8u381" />
+          </label>
+          <label>
+            <span>编译镜像</span>
+            <input data-sdk-image-field="builderImage" value="${escapeHtml(item.builderImage)}" placeholder="registry.example.com/java/jdk8u381-maven:latest" />
+          </label>
+          <label>
+            <span>运行镜像</span>
+            <input data-sdk-image-field="runtimeImage" value="${escapeHtml(item.runtimeImage)}" placeholder="不填则使用平台默认运行镜像" />
+          </label>
+          <button class="icon-button" type="button" title="删除 SDK 镜像" data-remove-sdk-image="${index}">
+            <i data-lucide="trash-2"></i>
+          </button>
+        </div>
+      `,
+    )
+    .join("");
+}
+
+function collectSdkImageMappings() {
+  if (!sdkImageMappings) return [];
+  return normalizeSdkImages(
+    Array.from(sdkImageMappings.querySelectorAll("[data-sdk-image-row]")).map((row) => ({
+      sdk: row.querySelector('[data-sdk-image-field="sdk"]')?.value,
+      builderImage: row.querySelector('[data-sdk-image-field="builderImage"]')?.value,
+      runtimeImage: row.querySelector('[data-sdk-image-field="runtimeImage"]')?.value,
+    })),
+    true,
+  );
+}
+
 function renderPlatformSettings() {
   if (!platformRegistrySecret || !platformImageNamespace || platformSettingsDirty) return;
   platformRegistrySecret.innerHTML = imagePullSecretOptions(platformSettings.registrySecretId, "使用环境变量配置");
   platformImageNamespace.value = platformSettings.imageNamespace || "deploy-platform";
+  renderSdkImageMappings();
 }
 
 function renderUserView() {
@@ -4062,9 +4127,13 @@ async function savePlatformSettings(event) {
   if (submitter) submitter.disabled = true;
   platformSettings.registrySecretId = platformSettingsForm.elements.registrySecretId.value;
   platformSettings.imageNamespace = (platformSettingsForm.elements.imageNamespace.value || "deploy-platform").trim().replace(/^\/+|\/+$/g, "") || "deploy-platform";
-  addAudit("保存镜像仓库配置", `${secretName(platformSettings.registrySecretId)} / ${platformSettings.imageNamespace}`);
-  const saved = await saveStateAndRender();
-  if (saved) platformSettingsDirty = false;
+  platformSettings.sdkImages = collectSdkImageMappings();
+  addAudit("保存镜像仓库配置", `${secretName(platformSettings.registrySecretId)} / ${platformSettings.imageNamespace} / ${platformSettings.sdkImages.length} 个 SDK 镜像`);
+  const saved = await persistState();
+  if (saved) {
+    platformSettingsDirty = false;
+    render();
+  }
   if (submitter) submitter.disabled = false;
 }
 
@@ -4832,6 +4901,13 @@ platformSettingsForm.addEventListener("submit", savePlatformSettings);
 platformSettingsForm.addEventListener("input", () => {
   platformSettingsDirty = true;
 });
+document.getElementById("addSdkImageMapping")?.addEventListener("click", () => {
+  platformSettings.sdkImages = collectSdkImageMappings();
+  platformSettings.sdkImages.push({ sdk: "oraclejdk8u381", builderImage: "", runtimeImage: "" });
+  platformSettingsDirty = true;
+  renderSdkImageMappings();
+  lucide.createIcons();
+});
 secretForm.addEventListener("submit", saveSecret);
 document.getElementById("userForm").addEventListener("submit", saveUser);
 organizationForm.addEventListener("submit", saveOrganization);
@@ -5293,6 +5369,16 @@ document.addEventListener("click", (event) => {
     const [configIndex, clusterIndex] = removeDeployConfigClusterButton.dataset.removeDeployConfigCluster.split(":").map(Number);
     deployConfigDrafts[configIndex]?.clusters.splice(clusterIndex, 1);
     renderDeployConfigsEditor();
+    return;
+  }
+
+  const removeSdkImageButton = event.target.closest("[data-remove-sdk-image]");
+  if (removeSdkImageButton) {
+    platformSettings.sdkImages = collectSdkImageMappings();
+    platformSettings.sdkImages.splice(Number(removeSdkImageButton.dataset.removeSdkImage), 1);
+    platformSettingsDirty = true;
+    renderSdkImageMappings();
+    lucide.createIcons();
     return;
   }
 

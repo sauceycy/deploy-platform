@@ -1691,6 +1691,23 @@ svg {
   gap: 6px;
 }
 
+.compact-settings-table {
+  display: grid;
+  gap: 8px;
+  min-height: 0 !important;
+}
+
+.sdk-image-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(220px, 1.6fr) minmax(220px, 1.4fr) 38px;
+  gap: 8px;
+  align-items: end;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
 .simple-table {
   min-height: 120px;
 }

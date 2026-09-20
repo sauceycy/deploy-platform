@@ -115,6 +115,7 @@ DEFAULT_STATE = {
     "platformSettings": {
         "registrySecretId": "",
         "imageNamespace": IMAGE_NAMESPACE,
+        "sdkImages": [],
     },
 }
 
@@ -261,9 +262,38 @@ def merge_defaults(state):
     for key, value in DEFAULT_STATE.items():
         if key not in state:
             state[key] = copy.deepcopy(value)
+    normalize_platform_settings(state)
     normalize_roles_state(state)
     normalize_group_state(state)
     return state
+
+
+def normalize_sdk_images(value):
+    items = value if isinstance(value, list) else []
+    normalized = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        sdk = str(item.get("sdk") or "").strip().lower()
+        builder_image_value = str(item.get("builderImage") or item.get("image") or "").strip()
+        runtime_image_value = str(item.get("runtimeImage") or "").strip()
+        if not sdk or not builder_image_value or sdk in seen:
+            continue
+        seen.add(sdk)
+        normalized.append({"sdk": sdk, "builderImage": builder_image_value, "runtimeImage": runtime_image_value})
+    return normalized
+
+
+def normalize_platform_settings(state):
+    settings = state.get("platformSettings")
+    if not isinstance(settings, dict):
+        settings = {}
+    state["platformSettings"] = {
+        "registrySecretId": str(settings.get("registrySecretId") or "").strip(),
+        "imageNamespace": str(settings.get("imageNamespace") or IMAGE_NAMESPACE or "deploy-platform").strip().strip("/") or "deploy-platform",
+        "sdkImages": normalize_sdk_images(settings.get("sdkImages")),
+    }
 
 
 def default_user_passwords():
@@ -1112,15 +1142,26 @@ def safe_name(value):
     return value[:63] or "app"
 
 
-ORACLE_JDK_IMAGES = {
-    "oraclejdk8u381": "container-registry.oracle.com/java/jdk:8u381-oraclelinux8",
+CUSTOM_IMAGE_REQUIRED_SDKS = {
+    "oraclejdk8u381": "Oracle JDK 8u381 官方镜像需要登录 Oracle Registry，请在平台设置里为 oraclejdk8u381 配置可访问的 SDK 编译镜像",
 }
 
 
-def builder_image(sdk):
-    sdk = str(sdk).lower()
-    if sdk in ORACLE_JDK_IMAGES:
-        return ORACLE_JDK_IMAGES[sdk]
+def sdk_image_mapping(task, sdk):
+    sdk = str(sdk or "").strip().lower()
+    for item in normalize_sdk_images(task.get("sdkImages")):
+        if item.get("sdk") == sdk:
+            return item
+    return {}
+
+
+def builder_image(task):
+    sdk = str(task.get("sdk") or "").strip().lower()
+    custom_image = sdk_image_mapping(task, sdk).get("builderImage")
+    if custom_image:
+        return custom_image
+    if sdk in CUSTOM_IMAGE_REQUIRED_SDKS:
+        raise RuntimeError(CUSTOM_IMAGE_REQUIRED_SDKS[sdk])
     if sdk.startswith("jdk"):
         return f"maven:3-eclipse-temurin-{sdk.replace('jdk', '')}"
     if sdk.startswith("node"):
@@ -1134,8 +1175,11 @@ def builder_image(sdk):
 
 def runtime_base(task):
     sdk = str(task.get("sdk", "")).lower()
-    if task.get("language") == "java" and sdk in ORACLE_JDK_IMAGES:
-        return ORACLE_JDK_IMAGES[sdk]
+    custom_runtime = sdk_image_mapping(task, sdk).get("runtimeImage")
+    if custom_runtime:
+        return custom_runtime
+    if task.get("language") == "java" and sdk == "oraclejdk8u381":
+        return "eclipse-temurin:8-jre"
     if task.get("language") == "java" and sdk.startswith("jdk"):
         return f"eclipse-temurin:{sdk.replace('jdk', '')}-jre"
     if task.get("language") == "node" and sdk.startswith("node"):
@@ -1370,6 +1414,8 @@ def run_sdk_command(execution_id, task, command, src_dir, build_env):
         append_log(execution_id, "已为 Node 构建启用 Corepack，支持 package.json 脚本中调用 pnpm/yarn。")
     docker_src_dir = HOST_WORKSPACE_DIR / execution_id / "src"
     container_name = f"deploy-build-{safe_name(execution_id)}"
+    build_image = builder_image(task)
+    append_log(execution_id, f"SDK 编译镜像: {build_image}")
     docker_cmd = [
         "docker",
         "run",
@@ -1382,7 +1428,7 @@ def run_sdk_command(execution_id, task, command, src_dir, build_env):
         "-w",
         f"/workspace/{task.get('workdir') or '.'}",
         *docker_env_args(effective_build_env),
-        builder_image(task.get("sdk")),
+        build_image,
         "sh",
         "-lc",
         effective_command,
@@ -2314,6 +2360,8 @@ def build_and_dispatch(execution_id):
         return
     deploy_config = deploy_config_by_id(task, execution.get("deployConfigId"))
     task = effective_task_for_deploy_config(task, deploy_config)
+    platform_settings = state.get("platformSettings") if isinstance(state.get("platformSettings"), dict) else {}
+    task["sdkImages"] = normalize_sdk_images(platform_settings.get("sdkImages"))
 
     work_dir = WORKSPACE_DIR / execution_id
     src_dir = work_dir / "src"
