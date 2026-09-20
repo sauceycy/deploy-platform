@@ -2647,6 +2647,7 @@ function defaultSdkImages() {
       sdk,
       builderImage: sdkDefaultBuilderImage(language, sdk),
       runtimeImage: sdkDefaultRuntimeImage(language, sdk),
+      pullSecretId: "",
     })),
   );
 }
@@ -2671,6 +2672,7 @@ function normalizeSdkImages(value) {
       sdk: String(item?.sdk || "").trim().toLowerCase(),
       builderImage: String(item?.builderImage || item?.image || "").trim(),
       runtimeImage: String(item?.runtimeImage || "").trim(),
+      pullSecretId: String(item?.pullSecretId || item?.imagePullSecretId || "").trim(),
     }))
     .map((item) => ({ ...item, language: item.language || inferSdkLanguage(item.sdk) }))
     .filter((item) => item.language && item.sdk)
@@ -2704,6 +2706,7 @@ function collectVisibleSdkImageRows() {
       sdk: row.querySelector('[data-sdk-image-field="sdk"]')?.value,
       builderImage: row.querySelector('[data-sdk-image-field="builderImage"]')?.value,
       runtimeImage: row.querySelector('[data-sdk-image-field="runtimeImage"]')?.value,
+      pullSecretId: row.querySelector('[data-sdk-image-field="pullSecretId"]')?.value,
     })),
   ).map((item, index) => ({
     ...item,
@@ -2721,6 +2724,7 @@ function mergeVisibleSdkImageRows() {
       sdk: item.sdk,
       builderImage: item.builderImage,
       runtimeImage: item.runtimeImage,
+      pullSecretId: item.pullSecretId,
     });
   });
   platformSettings.sdkImages = Array.from(nextByKey.values());
@@ -2766,6 +2770,12 @@ function renderSdkImageMappings() {
           <label>
             <span>运行镜像</span>
             <input data-sdk-image-field="runtimeImage" value="${escapeHtml(item.runtimeImage)}" placeholder="不填则使用平台默认运行镜像" />
+          </label>
+          <label>
+            <span>拉取秘钥</span>
+            <select data-sdk-image-field="pullSecretId">
+              ${imagePullSecretOptions(item.pullSecretId, "不使用拉取秘钥")}
+            </select>
           </label>
           <button class="icon-button" type="button" title="删除 SDK 镜像" data-remove-sdk-image="${index}">
             <i data-lucide="trash-2"></i>
@@ -4379,6 +4389,7 @@ async function deleteSecret(secretId) {
   const usedByImagePull = tasks.find((task) => (task.clusters || []).some((cluster) => String(cluster.imagePullSecretId) === String(secretId)));
   const usedByCluster = clusters.find((cluster) => String(cluster.imagePullSecretId) === String(secretId));
   const usedByPlatformRegistry = String(platformSettings.registrySecretId) === String(secretId);
+  const usedBySdkImage = normalizeSdkImages(platformSettings.sdkImages).find((item) => String(item.pullSecretId) === String(secretId));
   if (usedByTask) {
     window.alert(`任务 ${usedByTask.name} 正在使用该秘钥，请先编辑任务取消绑定`);
     return;
@@ -4401,6 +4412,10 @@ async function deleteSecret(secretId) {
   }
   if (usedByPlatformRegistry) {
     window.alert("平台默认推送镜像仓库正在使用该秘钥，请先在秘钥管理中切换仓库配置");
+    return;
+  }
+  if (usedBySdkImage) {
+    window.alert(`镜像管理中的 ${usedBySdkImage.sdk} 正在使用该拉取秘钥，请先取消绑定`);
     return;
   }
   try {
@@ -5030,7 +5045,7 @@ document.getElementById("addSdkImageMapping")?.addEventListener("click", () => {
   mergeVisibleSdkImageRows();
   const filters = listState("images");
   const language = filters.category !== "all" ? filters.category : "java";
-  platformSettings.sdkImages.unshift({ language, sdk: "custom-sdk", builderImage: "", runtimeImage: "" });
+  platformSettings.sdkImages.unshift({ language, sdk: "custom-sdk", builderImage: "", runtimeImage: "", pullSecretId: "" });
   filters.page = 1;
   platformSettings.sdkImagesInitialized = true;
   renderSdkImageMappings();

@@ -105,6 +105,7 @@ def default_sdk_images():
             "sdk": sdk,
             "builderImage": default_sdk_builder_image(language, sdk),
             "runtimeImage": default_sdk_runtime_image(language, sdk),
+            "pullSecretId": "",
         }
         for language, sdks in SDK_OPTIONS.items()
         for sdk in sdks
@@ -331,6 +332,7 @@ def normalize_sdk_images(value):
         sdk = str(item.get("sdk") or "").strip().lower()
         builder_image_value = str(item.get("builderImage") or item.get("image") or "").strip()
         runtime_image_value = str(item.get("runtimeImage") or "").strip()
+        pull_secret_id = str(item.get("pullSecretId") or item.get("imagePullSecretId") or "").strip()
         if not language:
             if sdk.startswith("jdk") or sdk.startswith("oraclejdk"):
                 language = "java"
@@ -344,7 +346,7 @@ def normalize_sdk_images(value):
         if not language or not sdk or key in seen:
             continue
         seen.add(key)
-        normalized.append({"language": language, "sdk": sdk, "builderImage": builder_image_value, "runtimeImage": runtime_image_value})
+        normalized.append({"language": language, "sdk": sdk, "builderImage": builder_image_value, "runtimeImage": runtime_image_value, "pullSecretId": pull_secret_id})
     return normalized
 
 
@@ -1262,6 +1264,41 @@ def runtime_base(task):
     return "alpine:3.20"
 
 
+def sdk_pull_secret(task, image):
+    mapping = sdk_image_mapping(task, task.get("sdk"))
+    pull_secret_id = str(mapping.get("pullSecretId") or "").strip()
+    if pull_secret_id:
+        secret = secret_by_id(task.get("_state") or {}, pull_secret_id)
+        if not secret or secret.get("type") != "registry":
+            raise RuntimeError("SDK 编译镜像拉取秘钥不存在或类型不是镜像仓库账号")
+        return secret
+    return None
+
+
+def docker_login_env_for_secret(execution_id, secret, image, config_dir):
+    if not secret:
+        return None
+    username = str(secret.get("username") or "").strip()
+    password = str(secret.get("secret") or "")
+    registry_url = normalize_registry_server(secret.get("target")) or registry_server_from_image(image)
+    if not username or not password:
+        raise RuntimeError("SDK 编译镜像拉取秘钥缺少用户名或密码")
+    if not registry_url:
+        raise RuntimeError("无法识别 SDK 编译镜像仓库地址")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "DOCKER_CONFIG": str(config_dir)}
+    append_log(execution_id, f"登录 SDK 编译镜像仓库: {secret.get('name') or registry_url} / {registry_url}")
+    code, output = run_command(
+        ["docker", "login", registry_url, "-u", username, "--password-stdin"],
+        input_text=password,
+        env=env,
+    )
+    append_log(execution_id, output)
+    if code != 0:
+        raise RuntimeError("SDK 编译镜像仓库登录失败")
+    return env
+
+
 def redact_url_credentials(value):
     return re.sub(r"://[^/@]+@", "://***@", str(value or ""))
 
@@ -1489,6 +1526,7 @@ def run_sdk_command(execution_id, task, command, src_dir, build_env):
     container_name = f"deploy-build-{safe_name(execution_id)}"
     build_image = builder_image(task)
     append_log(execution_id, f"SDK 编译镜像: {build_image}")
+    docker_env = docker_login_env_for_secret(execution_id, sdk_pull_secret(task, build_image), build_image, src_dir.parent / ".docker-sdk")
     docker_cmd = [
         "docker",
         "run",
@@ -1510,7 +1548,7 @@ def run_sdk_command(execution_id, task, command, src_dir, build_env):
     def remove_build_container():
         run_command(["docker", "rm", "-f", container_name])
 
-    return run_command_stream(docker_cmd, execution_id, on_cancel=remove_build_container)
+    return run_command_stream(docker_cmd, execution_id, env=docker_env, on_cancel=remove_build_container)
 
 
 def registry_config(state):
@@ -2435,6 +2473,7 @@ def build_and_dispatch(execution_id):
     task = effective_task_for_deploy_config(task, deploy_config)
     platform_settings = state.get("platformSettings") if isinstance(state.get("platformSettings"), dict) else {}
     task["sdkImages"] = normalize_sdk_images(platform_settings.get("sdkImages"))
+    task["_state"] = state
 
     work_dir = WORKSPACE_DIR / execution_id
     src_dir = work_dir / "src"
@@ -3041,6 +3080,9 @@ def delete_secret_config(secret_id, actor):
         settings = state.get("platformSettings") if isinstance(state.get("platformSettings"), dict) else {}
         if str(settings.get("registrySecretId")) == str(secret_id):
             raise ValueError("平台默认推送镜像仓库正在使用该秘钥，请先切换仓库配置")
+        sdk_image_with_secret = next((item for item in normalize_sdk_images(settings.get("sdkImages")) if str(item.get("pullSecretId")) == str(secret_id)), None)
+        if sdk_image_with_secret:
+            raise ValueError(f"镜像管理中的 {sdk_image_with_secret.get('sdk')} 正在使用该拉取秘钥，请先取消绑定")
         state["secrets"] = [item for item in state.get("secrets", []) if str(item.get("id")) != str(secret_id)]
         state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "删除秘钥", "target": f"{secret.get('name')} / {secret.get('type')}", "result": "成功"})
         return secret
