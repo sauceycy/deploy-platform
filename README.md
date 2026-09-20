@@ -317,13 +317,15 @@ Cloudflare Pages 发布建议这样配置：
 
 Java 任务编译时会使用 Maven + Temurin JDK 构建镜像，例如 `jdk17` 会使用 `maven:3-eclipse-temurin-17` 执行 `mvn clean package -DskipTests`；最终运行镜像仍使用 Temurin JRE。
 
-如果需要使用自定义 SDK 编译镜像，可以在「镜像管理」里按语言维护 `SDK -> 编译镜像 / 运行镜像` 映射。平台会默认列出当前支持的所有 SDK 版本，并允许新增、编辑、删除。私有仓库镜像可以在同一行选择「拉取秘钥」，平台执行 SDK 编译容器前会先登录该镜像仓库，例如：
+如果需要使用自定义 SDK 编译镜像，可以在「镜像管理」里按语言维护 `SDK -> 编译镜像 / 运行镜像` 映射。平台会默认列出当前支持的所有 SDK 版本，并允许新增、编辑、删除。私有仓库镜像可以在同一行选择「拉取秘钥」，平台执行 SDK 编译容器前会先登录该镜像仓库；如果 Java 运行镜像也来自私有仓库，Docker build 前也会复用同一个拉取秘钥登录运行镜像仓库，例如：
 
 ```text
 oraclejdk8u381 -> harbor.example.com/build/java-oracle-jdk8u381-maven:latest
 ```
 
 Oracle 官方镜像仓库需要登录授权，平台不会默认拉取 `container-registry.oracle.com/java/jdk:8u381-oraclelinux8`。选择 `oraclejdk8u381` 时，请先配置一个平台 Docker 环境可拉取、且包含构建所需工具的镜像；如果编译命令依赖 Maven，该镜像需要包含 `mvn`，或项目中提供可执行的 `./mvnw`。
+
+如果内网仓库使用自签证书、证书域名不匹配，或只开放 HTTP，需要先在平台宿主机 Docker daemon 配置对应 `insecure-registries`，并在镜像仓库秘钥地址填写 `http://仓库地址`。平台会在 `docker login` 时保留这个协议；否则 Docker 默认按 HTTPS 校验证书。
 
 平台会自动挂载持久化 Maven 缓存到构建容器的 `/root/.m2`，并为 `mvn` / `./mvnw` 命令自动追加：
 

@@ -1275,19 +1275,19 @@ def sdk_pull_secret(task, image):
     return None
 
 
-def docker_login_env_for_secret(execution_id, secret, image, config_dir):
+def docker_login_env_for_secret(execution_id, secret, image, config_dir, purpose="SDK 编译镜像"):
     if not secret:
         return None
     username = str(secret.get("username") or "").strip()
     password = str(secret.get("secret") or "")
-    registry_url = normalize_registry_server(secret.get("target")) or registry_server_from_image(image)
+    registry_url = docker_login_server(secret.get("target"), image)
     if not username or not password:
         raise RuntimeError("SDK 编译镜像拉取秘钥缺少用户名或密码")
     if not registry_url:
         raise RuntimeError("无法识别 SDK 编译镜像仓库地址")
     config_dir.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "DOCKER_CONFIG": str(config_dir)}
-    append_log(execution_id, f"登录 SDK 编译镜像仓库: {secret.get('name') or registry_url} / {registry_url}")
+    append_log(execution_id, f"登录 {purpose}仓库: {secret.get('name') or registry_url} / {registry_url}")
     code, output = run_command(
         ["docker", "login", registry_url, "-u", username, "--password-stdin"],
         input_text=password,
@@ -1295,7 +1295,9 @@ def docker_login_env_for_secret(execution_id, secret, image, config_dir):
     )
     append_log(execution_id, output)
     if code != 0:
-        raise RuntimeError("SDK 编译镜像仓库登录失败")
+        if "tls: failed to verify certificate" in output or "x509:" in output:
+            append_log(execution_id, f"{purpose}仓库 TLS 校验失败：请修复仓库证书域名，或在平台 Docker 宿主机配置 insecure-registries，并在镜像仓库秘钥地址中填写 http://仓库地址。")
+        raise RuntimeError(f"{purpose}仓库登录失败")
     return env
 
 
@@ -1526,7 +1528,7 @@ def run_sdk_command(execution_id, task, command, src_dir, build_env):
     container_name = f"deploy-build-{safe_name(execution_id)}"
     build_image = builder_image(task)
     append_log(execution_id, f"SDK 编译镜像: {build_image}")
-    docker_env = docker_login_env_for_secret(execution_id, sdk_pull_secret(task, build_image), build_image, src_dir.parent / ".docker-sdk")
+    docker_env = docker_login_env_for_secret(execution_id, sdk_pull_secret(task, build_image), build_image, src_dir.parent / ".docker-sdk", "SDK 编译镜像")
     docker_cmd = [
         "docker",
         "run",
@@ -1598,6 +1600,16 @@ def normalize_registry_server(value):
     if parsed.netloc:
         return parsed.netloc
     return value.split("/")[0]
+
+
+def docker_login_server(target, image):
+    value = str(target or "").strip().rstrip("/")
+    if value:
+        parsed = urlparse(value)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return value
+        return normalize_registry_server(value)
+    return registry_server_from_image(image)
 
 
 def dockerconfigjson_for_secret(secret, image):
@@ -2573,7 +2585,11 @@ def build_and_dispatch(execution_id):
         if task_app_type(task) == "frontend":
             append_log(execution_id, "前端静态站点使用平台生成的 nginx 镜像，不执行项目自带 Dockerfile。")
         set_execution_status(execution_id, "building", f"开始构建镜像 {image}", stage="构建镜像", progress=65)
-        code, output, elapsed = run_command_stream(["docker", "build", "-t", image, "-f", str(dockerfile), "."], execution_id, cwd=docker_context)
+        build_env = None
+        if task_app_type(task) != "frontend" and task.get("language") in {"java", "node", "python"}:
+            runtime_image = runtime_base(task)
+            build_env = docker_login_env_for_secret(execution_id, sdk_pull_secret(task, runtime_image), runtime_image, work_dir / ".docker-build", "运行基础镜像")
+        code, output, elapsed = run_command_stream(["docker", "build", "-t", image, "-f", str(dockerfile), "."], execution_id, cwd=docker_context, env=build_env)
         if code != 0:
             raise RuntimeError("Docker 镜像构建失败")
         append_log(execution_id, f"Docker 镜像构建耗时: {format_duration(elapsed)}")

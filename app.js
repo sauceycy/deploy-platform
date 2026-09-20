@@ -1320,7 +1320,7 @@ function syncSecretFieldHints(form, type) {
       knownHosts: "ssh-keyscan gitlab.example.com 或 ssh-keyscan -p 2222 gitlab.example.com",
     },
     registry: {
-      target: "harbor.example.com / registry.example.com",
+      target: "harbor.example.com / registry.example.com；内网 HTTP 可填 http://harbor.example.com",
       username: "镜像仓库用户名或机器人账号",
       secret: "镜像仓库密码或访问令牌",
       knownHosts: "镜像仓库不需要填写",
