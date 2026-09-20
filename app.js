@@ -1,5 +1,5 @@
 const sdkOptions = {
-  java: ["jdk8", "jdk11", "jdk17", "jdk21", "jdk25"],
+  java: ["jdk8", "oraclejdk8u381", "jdk11", "jdk17", "jdk21", "jdk25"],
   node: ["node18", "node20", "node22", "node24"],
   golang: ["go1.21", "go1.22", "go1.23"],
   python: ["python3.10", "python3.11", "python3.12"],
@@ -523,6 +523,7 @@ function normalizeDeployConfig(config = {}, task = {}) {
     id: String(config.id || `cfg-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`),
     name: String(config.name || config.project || "默认配置").trim() || "默认配置",
     project: String(config.project || "").trim(),
+    branch: String(config.branch || "").trim(),
     env: String(config.env || task.env || "test").trim() || "test",
     deploymentName: String(config.deploymentName || task.name || "").trim(),
     organizationIds,
@@ -551,6 +552,7 @@ function normalizeDeployConfigs(configs, task = {}) {
         name: "默认配置",
         env: task.env || "test",
         deploymentName: task.name || "",
+        branch: task.lastBranch || "",
         organizationIds: assetOrganizationIds(task),
         clusters: task.clusters || [],
         runtimeEnv: task.runtimeEnv || "",
@@ -2868,6 +2870,10 @@ function deployConfigCardHtml(config, index) {
             <input data-deploy-config-field="env" value="${escapeHtml(config.env || "test")}" />
           </label>
           <label>
+            <span>默认发布分支</span>
+            <input data-deploy-config-field="branch" value="${escapeHtml(config.branch || "")}" placeholder="例如 main / release" />
+          </label>
+          <label>
             <span>应用部署名</span>
             <input data-deploy-config-field="deploymentName" value="${escapeHtml(config.deploymentName || formValue("name"))}" placeholder="例如 a-sdk" />
           </label>
@@ -3207,6 +3213,7 @@ function currentDeployConfigSnapshot() {
       id: `cfg-${Date.now()}`,
       name: `${env}-${name}`,
       env,
+      branch: baseConfig.branch || "",
       deploymentName: name,
       organizationIds: [formValue("organizationId") || "default"],
       clusters: clusterDrafts.map((cluster) => ({ ...cluster })),
@@ -3369,6 +3376,33 @@ function deployConfigsForTask(task) {
   return normalizeDeployConfigs(task?.deployConfigs, task).filter((config) => canAccessDeployConfig(config, task));
 }
 
+function deployConfigForSelection(task, deployConfigId) {
+  const configs = deployConfigsForTask(task);
+  if (deployConfigId) {
+    const selected = configs.find((config) => String(config.id) === String(deployConfigId));
+    if (selected) return selected;
+  }
+  return configs.find((config) => String(config.id) === String(task?.lastDeployConfigId || "")) || configs[0] || null;
+}
+
+function branchOptionsHtml(branches) {
+  return branches.map((branch) => `<option value="${escapeHtml(branch)}">${escapeHtml(branch)}</option>`).join("");
+}
+
+function selectPreferredBranch(task, branchSelectElement, deployConfigId, branches = null) {
+  if (!branchSelectElement) return;
+  const config = deployConfigForSelection(task, deployConfigId);
+  const preferredBranch = config?.branch || task?.lastBranch || "";
+  const availableBranches =
+    branches ||
+    Array.from(branchSelectElement.options)
+      .map((option) => option.value)
+      .filter(Boolean);
+  if (preferredBranch && availableBranches.includes(preferredBranch)) {
+    branchSelectElement.value = preferredBranch;
+  }
+}
+
 function renderDeployConfigSelect(task, selectElement) {
   const configs = deployConfigsForTask(task);
   selectElement.innerHTML = configs.map((config) => `<option value="${escapeHtml(config.id)}">${escapeHtml(config.name || "默认配置")}</option>`).join("");
@@ -3411,10 +3445,8 @@ async function openBranchDialog(taskId) {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "读取仓库分支失败");
     if (!result.branches.length) throw new Error("仓库没有可发布分支");
-    branchSelect.innerHTML = result.branches.map((branch) => `<option value="${branch}">${branch}</option>`).join("");
-    if (task.lastBranch && result.branches.includes(task.lastBranch)) {
-      branchSelect.value = task.lastBranch;
-    }
+    branchSelect.innerHTML = branchOptionsHtml(result.branches);
+    selectPreferredBranch(task, branchSelect, branchDeployConfigSelect.value, result.branches);
     branchSelect.disabled = false;
     confirmBranchDeploy.disabled = false;
     branchStatus.textContent = `已读取 ${result.branches.length} 个分支`;
@@ -3423,7 +3455,7 @@ async function openBranchDialog(taskId) {
   }
 }
 
-async function loadBranchesIntoSelect(task, selectElement) {
+async function loadBranchesIntoSelect(task, selectElement, deployConfigId = null) {
   selectElement.innerHTML = "";
   selectElement.disabled = true;
   const response = await fetch("/api/repositories/branches", {
@@ -3434,10 +3466,8 @@ async function loadBranchesIntoSelect(task, selectElement) {
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "读取仓库分支失败");
   if (!result.branches.length) throw new Error("仓库没有可发布分支");
-  selectElement.innerHTML = result.branches.map((branch) => `<option value="${branch}">${branch}</option>`).join("");
-  if (task.lastBranch && result.branches.includes(task.lastBranch)) {
-    selectElement.value = task.lastBranch;
-  }
+  selectElement.innerHTML = branchOptionsHtml(result.branches);
+  selectPreferredBranch(task, selectElement, deployConfigId, result.branches);
   selectElement.disabled = false;
   return result.branches;
 }
@@ -3540,7 +3570,7 @@ async function openBatchDialog(taskIds) {
         configSelect.value = task.lastDeployConfigId;
       }
       try {
-        await loadBranchesIntoSelect(task, select);
+        await loadBranchesIntoSelect(task, select, configSelect.value);
       } catch (error) {
         failed += 1;
         select.innerHTML = `<option>${error.message}</option>`;
@@ -3601,7 +3631,7 @@ async function openScheduleDialog(taskId) {
   scheduleStatus.textContent = "正在读取仓库分支...";
   scheduleDialog.showModal();
   try {
-    const branches = await loadBranchesIntoSelect(task, scheduleBranchSelect);
+    const branches = await loadBranchesIntoSelect(task, scheduleBranchSelect, scheduleDeployConfigSelect.value);
     scheduleStatus.textContent = `已读取 ${branches.length} 个分支`;
     confirmScheduleDeploy.disabled = false;
   } catch (error) {
@@ -4980,6 +5010,26 @@ document.addEventListener("change", async (event) => {
 
   if (event.target === taskForm.elements.notifyChannel) {
     syncNotifyTargetOptions();
+    return;
+  }
+
+  if (event.target === branchDeployConfigSelect) {
+    const task = tasks.find((item) => String(item.id) === String(branchForm.elements.taskId.value));
+    selectPreferredBranch(task, branchSelect, branchDeployConfigSelect.value);
+    return;
+  }
+
+  if (event.target === scheduleDeployConfigSelect) {
+    const task = tasks.find((item) => String(item.id) === String(scheduleForm.elements.taskId.value));
+    selectPreferredBranch(task, scheduleBranchSelect, scheduleDeployConfigSelect.value);
+    return;
+  }
+
+  const batchConfigSelect = event.target.closest("[data-batch-config]");
+  if (batchConfigSelect) {
+    const task = tasks.find((item) => String(item.id) === String(batchConfigSelect.dataset.batchConfig));
+    const select = batchTaskList.querySelector(`[data-batch-branch="${batchConfigSelect.dataset.batchConfig}"]`);
+    selectPreferredBranch(task, select, batchConfigSelect.value);
     return;
   }
 

@@ -204,6 +204,7 @@ def normalize_deploy_config(config, task=None, index=0):
         "id": str(config.get("id") or uuid.uuid4().hex[:12]),
         "name": name,
         "project": str(config.get("project") or "").strip(),
+        "branch": str(config.get("branch") or task.get("lastBranch") or "").strip(),
         "env": str(config.get("env") or task.get("env") or "test").strip() or "test",
         "deploymentName": str(config.get("deploymentName") or config.get("appName") or task.get("name") or "").strip(),
         "organizationIds": organization_ids,
@@ -229,6 +230,7 @@ def normalize_deploy_configs(configs, task=None):
                 "name": "默认配置",
                 "env": task.get("env") or "test",
                 "deploymentName": task.get("name") or "",
+                "branch": task.get("lastBranch") or "",
                 "organizationIds": task.get("organizationIds") or [task.get("organizationId") or "default"],
                 "clusters": task.get("clusters") or [],
                 "runtimeEnv": task.get("runtimeEnv") or "",
@@ -1106,8 +1108,15 @@ def safe_name(value):
     return value[:63] or "app"
 
 
+ORACLE_JDK_IMAGES = {
+    "oraclejdk8u381": "container-registry.oracle.com/java/jdk:8u381-oraclelinux8",
+}
+
+
 def builder_image(sdk):
     sdk = str(sdk).lower()
+    if sdk in ORACLE_JDK_IMAGES:
+        return ORACLE_JDK_IMAGES[sdk]
     if sdk.startswith("jdk"):
         return f"maven:3-eclipse-temurin-{sdk.replace('jdk', '')}"
     if sdk.startswith("node"):
@@ -1121,6 +1130,8 @@ def builder_image(sdk):
 
 def runtime_base(task):
     sdk = str(task.get("sdk", "")).lower()
+    if task.get("language") == "java" and sdk in ORACLE_JDK_IMAGES:
+        return ORACLE_JDK_IMAGES[sdk]
     if task.get("language") == "java" and sdk.startswith("jdk"):
         return f"eclipse-temurin:{sdk.replace('jdk', '')}-jre"
     if task.get("language") == "node" and sdk.startswith("node"):

@@ -300,10 +300,11 @@ Cloudflare Pages 发布建议这样配置：
 5. 后续可在任务列表点击「编辑」调整任务配置
 6. 可通过关键字搜索定位任务，也可勾选多个任务点击「批量发布」
 7. 批量发布会一次性展示所选任务，并为每个任务读取仓库分支后提交到后端批量入队
-8. 单个任务可点击「定时」选择分支和执行时间，平台服务端到点后自动触发发布
-9. 平台 Worker 拉代码、执行编译、构建镜像、推送镜像
-10. Agent 创建 Deployment、Service 和可选 Ingress
-11. 任务详情中查看执行日志和待执行定时发布
+8. K8s 发布配置可以维护「默认发布分支」，单次发布、批量发布和定时发布会优先带出该配置分支；如果仓库不存在该分支，则回退为最近发布分支或手动选择
+9. 单个任务可点击「定时」选择分支和执行时间，平台服务端到点后自动触发发布
+10. 平台 Worker 拉代码、执行编译、构建镜像、推送镜像
+11. Agent 创建 Deployment、Service 和可选 Ingress
+12. 任务详情中查看执行日志和待执行定时发布
 
 发布阶段会显示进度：
 
@@ -313,7 +314,7 @@ Cloudflare Pages 发布建议这样配置：
 
 发布中可以点击「取消」。如果当前正在执行 Maven/Docker 等命令，平台会在该命令返回后停止后续阶段。任务不在发布中时，可以点击「删除」清理任务配置、执行记录和定时计划。
 
-Java 任务编译时会使用 Maven + Temurin JDK 构建镜像，例如 `jdk17` 会使用 `maven:3-eclipse-temurin-17` 执行 `mvn clean package -DskipTests`；最终运行镜像仍使用 Temurin JRE。
+Java 任务编译时会使用 Maven + Temurin JDK 构建镜像，例如 `jdk17` 会使用 `maven:3-eclipse-temurin-17` 执行 `mvn clean package -DskipTests`；最终运行镜像仍使用 Temurin JRE。选择 `oraclejdk8u381` 时，构建和运行镜像会使用 `container-registry.oracle.com/java/jdk:8u381-oraclelinux8`；如构建命令依赖 Maven，请使用项目自带的 `./mvnw` 或准备包含 Maven 的 Oracle JDK 构建镜像。
 
 平台会自动挂载持久化 Maven 缓存到构建容器的 `/root/.m2`，并为 `mvn` / `./mvnw` 命令自动追加：
 
