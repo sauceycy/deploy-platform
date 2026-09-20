@@ -16,6 +16,7 @@
 - PostgreSQL 持久化
 - 配置仓库地址、分支、工作路径
 - 配置编译语言与 SDK 版本
+- 镜像管理按语言维护 SDK 编译镜像和运行镜像，支持新增、编辑、删除
 - 配置编译命令、端口、副本数、健康检查
 - 配置多集群部署目标
 - 集群管理支持查看 Agent 心跳、编辑集群和维护节点信息
@@ -316,7 +317,7 @@ Cloudflare Pages 发布建议这样配置：
 
 Java 任务编译时会使用 Maven + Temurin JDK 构建镜像，例如 `jdk17` 会使用 `maven:3-eclipse-temurin-17` 执行 `mvn clean package -DskipTests`；最终运行镜像仍使用 Temurin JRE。
 
-如果需要使用自定义 SDK 编译镜像，可以在「秘钥管理」里的平台设置维护 `SDK -> 编译镜像` 映射，例如：
+如果需要使用自定义 SDK 编译镜像，可以在「镜像管理」里按语言维护 `SDK -> 编译镜像 / 运行镜像` 映射。平台会默认列出当前支持的所有 SDK 版本，并允许新增、编辑、删除，例如：
 
 ```text
 oraclejdk8u381 -> harbor.example.com/build/java-oracle-jdk8u381-maven:latest

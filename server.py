@@ -60,6 +60,57 @@ MAX_CONCURRENT_EXECUTIONS = max(1, int(os.environ.get("MAX_CONCURRENT_EXECUTIONS
 MAVEN_DOWNLOAD_THREADS = max(1, int(os.environ.get("MAVEN_DOWNLOAD_THREADS", "8")))
 BUILD_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_EXECUTIONS, thread_name_prefix="deploy-build")
 
+SDK_OPTIONS = {
+    "java": ["jdk8", "oraclejdk8u381", "jdk11", "jdk17", "jdk21", "jdk25"],
+    "node": ["node18", "node20", "node22", "node24"],
+    "golang": ["go1.21", "go1.22", "go1.23"],
+    "python": ["python3.10", "python3.11", "python3.12"],
+}
+
+
+def default_sdk_builder_image(language, sdk):
+    version = re.sub(r"^(jdk|node|go|python)", "", str(sdk or ""))
+    if language == "java" and sdk == "oraclejdk8u381":
+        return ""
+    if language == "java":
+        return f"maven:3-eclipse-temurin-{version}"
+    if language == "node":
+        return f"node:{version}"
+    if language == "golang":
+        return f"golang:{version}"
+    if language == "python":
+        return f"python:{version}"
+    return ""
+
+
+def default_sdk_runtime_image(language, sdk):
+    version = re.sub(r"^(jdk|node|go|python)", "", str(sdk or ""))
+    if language == "java" and sdk == "oraclejdk8u381":
+        return "eclipse-temurin:8-jre"
+    if language == "java":
+        return f"eclipse-temurin:{version}-jre"
+    if language == "node":
+        return f"node:{version}-alpine"
+    if language == "golang":
+        return "alpine:3.20"
+    if language == "python":
+        return f"python:{version}-slim"
+    return ""
+
+
+def default_sdk_images():
+    return [
+        {
+            "language": language,
+            "sdk": sdk,
+            "builderImage": default_sdk_builder_image(language, sdk),
+            "runtimeImage": default_sdk_runtime_image(language, sdk),
+        }
+        for language, sdks in SDK_OPTIONS.items()
+        for sdk in sdks
+    ]
+
+
 DEFAULT_STATE = {
     "revision": 0,
     "roles": {
@@ -116,6 +167,7 @@ DEFAULT_STATE = {
         "registrySecretId": "",
         "imageNamespace": IMAGE_NAMESPACE,
         "sdkImages": [],
+        "sdkImagesInitialized": False,
     },
 }
 
@@ -275,13 +327,24 @@ def normalize_sdk_images(value):
     for item in items:
         if not isinstance(item, dict):
             continue
+        language = str(item.get("language") or "").strip().lower()
         sdk = str(item.get("sdk") or "").strip().lower()
         builder_image_value = str(item.get("builderImage") or item.get("image") or "").strip()
         runtime_image_value = str(item.get("runtimeImage") or "").strip()
-        if not sdk or not builder_image_value or sdk in seen:
+        if not language:
+            if sdk.startswith("jdk") or sdk.startswith("oraclejdk"):
+                language = "java"
+            elif sdk.startswith("node"):
+                language = "node"
+            elif sdk.startswith("go"):
+                language = "golang"
+            elif sdk.startswith("python"):
+                language = "python"
+        key = f"{language}:{sdk}"
+        if not language or not sdk or key in seen:
             continue
-        seen.add(sdk)
-        normalized.append({"sdk": sdk, "builderImage": builder_image_value, "runtimeImage": runtime_image_value})
+        seen.add(key)
+        normalized.append({"language": language, "sdk": sdk, "builderImage": builder_image_value, "runtimeImage": runtime_image_value})
     return normalized
 
 
@@ -289,10 +352,19 @@ def normalize_platform_settings(state):
     settings = state.get("platformSettings")
     if not isinstance(settings, dict):
         settings = {}
+    initialized = bool(settings.get("sdkImagesInitialized"))
+    sdk_images = normalize_sdk_images(settings.get("sdkImages"))
+    if not initialized:
+        merged = {f"{item['language']}:{item['sdk']}": item for item in default_sdk_images()}
+        for item in sdk_images:
+            merged[f"{item['language']}:{item['sdk']}"] = item
+        sdk_images = list(merged.values())
+        initialized = True
     state["platformSettings"] = {
         "registrySecretId": str(settings.get("registrySecretId") or "").strip(),
         "imageNamespace": str(settings.get("imageNamespace") or IMAGE_NAMESPACE or "deploy-platform").strip().strip("/") or "deploy-platform",
-        "sdkImages": normalize_sdk_images(settings.get("sdkImages")),
+        "sdkImages": sdk_images,
+        "sdkImagesInitialized": initialized,
     }
 
 
@@ -1143,7 +1215,7 @@ def safe_name(value):
 
 
 CUSTOM_IMAGE_REQUIRED_SDKS = {
-    "oraclejdk8u381": "Oracle JDK 8u381 官方镜像需要登录 Oracle Registry，请在平台设置里为 oraclejdk8u381 配置可访问的 SDK 编译镜像",
+    "oraclejdk8u381": "Oracle JDK 8u381 官方镜像需要登录 Oracle Registry，请在镜像管理里为 oraclejdk8u381 配置可访问的 SDK 编译镜像",
 }
 
 

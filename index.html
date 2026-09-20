@@ -89,6 +89,10 @@
             <i data-lucide="key-round"></i>
             <span>秘钥管理</span>
           </button>
+          <button class="nav-item" type="button" data-view="images" data-permission-required="secret.view">
+            <i data-lucide="package-open"></i>
+            <span>镜像管理</span>
+          </button>
           <button class="nav-item" type="button" data-view="users" data-permission-required="user.view">
             <i data-lucide="users"></i>
             <span>用户管理</span>
@@ -337,19 +341,6 @@
                   <span>镜像命名空间</span>
                   <input name="imageNamespace" id="platformImageNamespace" placeholder="deploy-platform" />
                 </label>
-                <div class="wide-field">
-                  <div class="section-title-row">
-                    <div>
-                      <strong>SDK 编译镜像映射</strong>
-                      <span>为指定 SDK 配置可访问的构建镜像；运行镜像不填则使用平台默认规则。</span>
-                    </div>
-                    <button class="mini-button" id="addSdkImageMapping" type="button">
-                      <i data-lucide="plus"></i>
-                      <span>添加 SDK 镜像</span>
-                    </button>
-                  </div>
-                  <div class="simple-table compact-settings-table" id="sdkImageMappings"></div>
-                </div>
                 <button class="primary-button" type="submit" data-permission-required="secret.manage">
                   <i data-lucide="save"></i>
                   <span>保存仓库配置</span>
@@ -369,6 +360,36 @@
               <div class="simple-table" id="secretBody"></div>
               <div class="pagination-bar" id="secretPagination"></div>
             </div>
+          </section>
+        </section>
+
+        <section class="management-view" id="imageView" hidden>
+          <section class="management-panel">
+            <div class="panel-title split-title">
+              <div>
+                <h2>镜像管理</h2>
+                <span>按语言维护 SDK 编译镜像和运行镜像</span>
+              </div>
+              <div class="row-actions">
+                <button class="ghost-button" id="addSdkImageMapping" type="button" data-permission-required="secret.manage">
+                  <i data-lucide="plus"></i>
+                  <span>添加镜像</span>
+                </button>
+                <button class="primary-button" id="saveSdkImages" type="button" data-permission-required="secret.manage">
+                  <i data-lucide="save"></i>
+                  <span>保存镜像</span>
+                </button>
+              </div>
+            </div>
+            <div class="management-toolbar">
+              <label class="search-box">
+                <i data-lucide="search"></i>
+                <input id="imageSearch" type="search" placeholder="搜索语言、SDK、镜像地址" />
+              </label>
+              <select id="imageLanguageFilter" aria-label="镜像语言分类"></select>
+            </div>
+            <div class="simple-table compact-settings-table" id="sdkImageMappings"></div>
+            <div class="pagination-bar" id="imagePagination"></div>
           </section>
         </section>
 

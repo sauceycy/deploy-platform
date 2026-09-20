@@ -5,6 +5,13 @@ const sdkOptions = {
   python: ["python3.10", "python3.11", "python3.12"],
 };
 
+const languageLabels = {
+  java: "Java",
+  node: "Node.js",
+  golang: "Golang",
+  python: "Python",
+};
+
 const buildCommands = {
   java: "mvn clean package -DskipTests",
   node: "npm ci && npm run build",
@@ -86,7 +93,7 @@ const executions = [];
 const agentTasks = [];
 const agentHeartbeats = [];
 const schedules = [];
-const platformSettings = { registrySecretId: "", imageNamespace: "deploy-platform", sdkImages: [] };
+const platformSettings = { registrySecretId: "", imageNamespace: "deploy-platform", sdkImages: [], sdkImagesInitialized: false };
 const clusterDrafts = [];
 const deployConfigDrafts = [];
 let activeDeployConfigIndex = 0;
@@ -111,6 +118,7 @@ let stateReadSequence = 0;
 let latestAppliedStateRead = 0;
 let stateMutationEpoch = 0;
 let platformSettingsDirty = false;
+let sdkImagesDirty = false;
 const loadingExecutionLogs = new Set();
 
 const state = {
@@ -137,6 +145,7 @@ const state = {
     templates: { search: "", category: "all", page: 1 },
     channels: { search: "", category: "all", page: 1 },
     secrets: { search: "", category: "all", page: 1 },
+    images: { search: "", category: "all", page: 1 },
     users: { search: "", category: "all", page: 1 },
   },
   view: "tasks",
@@ -160,6 +169,7 @@ const clusterView = document.getElementById("clusterView");
 const templateView = document.getElementById("templateView");
 const channelView = document.getElementById("channelView");
 const secretView = document.getElementById("secretView");
+const imageView = document.getElementById("imageView");
 const userView = document.getElementById("userView");
 const orgView = document.getElementById("orgView");
 const accessView = document.getElementById("accessView");
@@ -605,8 +615,12 @@ function hydrateState(nextState, options = {}) {
   mergeAgentTaskSnapshots(nextState.agentTasks, compact);
   replaceArray(agentHeartbeats, nextState.agentHeartbeats);
   replaceArray(schedules, nextState.schedules);
-  Object.assign(platformSettings, { registrySecretId: "", imageNamespace: "deploy-platform", sdkImages: [] }, nextState.platformSettings || {});
+  Object.assign(platformSettings, { registrySecretId: "", imageNamespace: "deploy-platform", sdkImages: [], sdkImagesInitialized: false }, nextState.platformSettings || {});
   platformSettings.sdkImages = normalizeSdkImages(platformSettings.sdkImages);
+  if (!platformSettings.sdkImagesInitialized && platformSettings.sdkImages.length === 0) {
+    platformSettings.sdkImages = defaultSdkImages();
+    platformSettings.sdkImagesInitialized = true;
+  }
   currentStateRevision = Math.max(currentStateRevision, incomingRevision);
   normalizeOrganizations();
   reconcileTaskRuntime();
@@ -1168,12 +1182,7 @@ function localDateTimeValue(date = new Date(Date.now() + 10 * 60 * 1000)) {
 }
 
 function languageLabel(language) {
-  return {
-    java: "Java",
-    node: "Node.js",
-    golang: "Golang",
-    python: "Python",
-  }[language] || language || "未知";
+  return languageLabels[language] || language || "未知";
 }
 
 function normalizeDeployRule(rule) {
@@ -2611,35 +2620,130 @@ function renderImagePullSecretOptions() {
   }
 }
 
-function normalizeSdkImages(value, requireBuilderImage = false) {
+function sdkDefaultBuilderImage(language, sdk) {
+  const version = String(sdk || "").replace(/^(jdk|node|go|python)/, "");
+  if (language === "java" && sdk === "oraclejdk8u381") return "";
+  if (language === "java") return `maven:3-eclipse-temurin-${version}`;
+  if (language === "node") return `node:${version}`;
+  if (language === "golang") return `golang:${version}`;
+  if (language === "python") return `python:${version}`;
+  return "";
+}
+
+function sdkDefaultRuntimeImage(language, sdk) {
+  const version = String(sdk || "").replace(/^(jdk|node|go|python)/, "");
+  if (language === "java" && sdk === "oraclejdk8u381") return "eclipse-temurin:8-jre";
+  if (language === "java") return `eclipse-temurin:${version}-jre`;
+  if (language === "node") return `node:${version}-alpine`;
+  if (language === "golang") return "alpine:3.20";
+  if (language === "python") return `python:${version}-slim`;
+  return "";
+}
+
+function defaultSdkImages() {
+  return Object.entries(sdkOptions).flatMap(([language, sdks]) =>
+    sdks.map((sdk) => ({
+      language,
+      sdk,
+      builderImage: sdkDefaultBuilderImage(language, sdk),
+      runtimeImage: sdkDefaultRuntimeImage(language, sdk),
+    })),
+  );
+}
+
+function normalizeSdkImages(value) {
   const items = Array.isArray(value) ? value : [];
   const seen = new Set();
   return items
     .map((item) => ({
+      language: String(item?.language || "").trim().toLowerCase(),
       sdk: String(item?.sdk || "").trim().toLowerCase(),
       builderImage: String(item?.builderImage || item?.image || "").trim(),
       runtimeImage: String(item?.runtimeImage || "").trim(),
     }))
-    .filter((item) => item.sdk && (!requireBuilderImage || item.builderImage))
+    .map((item) => ({ ...item, language: item.language || inferSdkLanguage(item.sdk) }))
+    .filter((item) => item.language && item.sdk)
     .filter((item) => {
-      if (seen.has(item.sdk)) return false;
-      seen.add(item.sdk);
+      const key = `${item.language}:${item.sdk}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
       return true;
     });
+}
+
+function inferSdkLanguage(sdk) {
+  const value = String(sdk || "").toLowerCase();
+  if (value.startsWith("jdk") || value.startsWith("oraclejdk")) return "java";
+  if (value.startsWith("node")) return "node";
+  if (value.startsWith("go")) return "golang";
+  if (value.startsWith("python")) return "python";
+  return "";
+}
+
+function sdkImageKey(item) {
+  return `${item.language}:${item.sdk}`;
+}
+
+function collectVisibleSdkImageRows() {
+  if (!sdkImageMappings) return [];
+  return normalizeSdkImages(
+    Array.from(sdkImageMappings.querySelectorAll("[data-sdk-image-row]")).map((row) => ({
+      originalKey: row.dataset.originalKey,
+      language: row.querySelector('[data-sdk-image-field="language"]')?.value,
+      sdk: row.querySelector('[data-sdk-image-field="sdk"]')?.value,
+      builderImage: row.querySelector('[data-sdk-image-field="builderImage"]')?.value,
+      runtimeImage: row.querySelector('[data-sdk-image-field="runtimeImage"]')?.value,
+    })),
+  ).map((item, index) => ({
+    ...item,
+    originalKey: sdkImageMappings.querySelectorAll("[data-sdk-image-row]")[index]?.dataset.originalKey || sdkImageKey(item),
+  }));
+}
+
+function mergeVisibleSdkImageRows() {
+  const visibleRows = collectVisibleSdkImageRows();
+  const nextByKey = new Map(normalizeSdkImages(platformSettings.sdkImages).map((item) => [sdkImageKey(item), item]));
+  visibleRows.forEach((item) => {
+    if (item.originalKey) nextByKey.delete(item.originalKey);
+    nextByKey.set(sdkImageKey(item), {
+      language: item.language,
+      sdk: item.sdk,
+      builderImage: item.builderImage,
+      runtimeImage: item.runtimeImage,
+    });
+  });
+  platformSettings.sdkImages = Array.from(nextByKey.values());
 }
 
 function renderSdkImageMappings() {
   if (!sdkImageMappings) return;
   const rows = normalizeSdkImages(platformSettings.sdkImages);
   platformSettings.sdkImages = rows;
-  if (!rows.length) {
-    sdkImageMappings.innerHTML = `<div class="empty-row">暂无自定义 SDK 编译镜像</div>`;
+  const filters = listState("images");
+  const query = filters.search.trim().toLowerCase();
+  const languageOptions = Object.entries(languageLabels).map(([value, label]) => ({ value, label }));
+  filters.category = renderCategoryOptions("imageLanguageFilter", languageOptions, filters.category, "全部语言");
+  const filteredRows = rows.filter((item) => {
+    const matchedLanguage = filters.category === "all" || item.language === filters.category;
+    const matchedSearch = textIncludes([languageLabel(item.language), item.sdk, item.builderImage, item.runtimeImage], query);
+    return matchedLanguage && matchedSearch;
+  });
+  const pageData = paginateRows("images", filteredRows);
+  if (!filteredRows.length) {
+    sdkImageMappings.innerHTML = `<div class="empty-row">暂无 SDK 镜像映射</div>`;
+    renderPagination("imagePagination", "images", pageData);
     return;
   }
-  sdkImageMappings.innerHTML = rows
+  sdkImageMappings.innerHTML = pageData.rows
     .map(
       (item, index) => `
-        <div class="sdk-image-row" data-sdk-image-row="${index}">
+        <div class="sdk-image-row" data-sdk-image-row data-original-key="${escapeHtml(sdkImageKey(item))}">
+          <label>
+            <span>语言</span>
+            <select data-sdk-image-field="language">
+              ${Object.entries(languageLabels).map(([value, label]) => `<option value="${value}" ${item.language === value ? "selected" : ""}>${label}</option>`).join("")}
+            </select>
+          </label>
           <label>
             <span>SDK</span>
             <input data-sdk-image-field="sdk" value="${escapeHtml(item.sdk)}" placeholder="oraclejdk8u381" />
@@ -2659,24 +2763,17 @@ function renderSdkImageMappings() {
       `,
     )
     .join("");
-}
-
-function collectSdkImageMappings() {
-  if (!sdkImageMappings) return [];
-  return normalizeSdkImages(
-    Array.from(sdkImageMappings.querySelectorAll("[data-sdk-image-row]")).map((row) => ({
-      sdk: row.querySelector('[data-sdk-image-field="sdk"]')?.value,
-      builderImage: row.querySelector('[data-sdk-image-field="builderImage"]')?.value,
-      runtimeImage: row.querySelector('[data-sdk-image-field="runtimeImage"]')?.value,
-    })),
-    true,
-  );
+  renderPagination("imagePagination", "images", pageData);
 }
 
 function renderPlatformSettings() {
   if (!platformRegistrySecret || !platformImageNamespace || platformSettingsDirty) return;
   platformRegistrySecret.innerHTML = imagePullSecretOptions(platformSettings.registrySecretId, "使用环境变量配置");
   platformImageNamespace.value = platformSettings.imageNamespace || "deploy-platform";
+}
+
+function renderImageView() {
+  if (sdkImagesDirty) return;
   renderSdkImageMappings();
 }
 
@@ -4127,14 +4224,25 @@ async function savePlatformSettings(event) {
   if (submitter) submitter.disabled = true;
   platformSettings.registrySecretId = platformSettingsForm.elements.registrySecretId.value;
   platformSettings.imageNamespace = (platformSettingsForm.elements.imageNamespace.value || "deploy-platform").trim().replace(/^\/+|\/+$/g, "") || "deploy-platform";
-  platformSettings.sdkImages = collectSdkImageMappings();
-  addAudit("保存镜像仓库配置", `${secretName(platformSettings.registrySecretId)} / ${platformSettings.imageNamespace} / ${platformSettings.sdkImages.length} 个 SDK 镜像`);
+  addAudit("保存镜像仓库配置", `${secretName(platformSettings.registrySecretId)} / ${platformSettings.imageNamespace}`);
   const saved = await persistState();
   if (saved) {
     platformSettingsDirty = false;
     render();
   }
   if (submitter) submitter.disabled = false;
+}
+
+async function saveSdkImageSettings() {
+  if (!requirePermission("secret.manage")) return;
+  mergeVisibleSdkImageRows();
+  platformSettings.sdkImagesInitialized = true;
+  addAudit("保存镜像配置", `${platformSettings.sdkImages.length} 个 SDK 镜像`);
+  const saved = await persistState();
+  if (saved) {
+    sdkImagesDirty = false;
+    render();
+  }
 }
 
 async function saveSecret(event) {
@@ -4476,6 +4584,7 @@ const viewConfig = {
   templates: { title: "任务模板", subtitle: "常用任务配置与构建默认值", permission: "template.view" },
   channels: { title: "通知渠道", subtitle: "告警机器人、邮件与 Webhook", permission: "channel.view" },
   secrets: { title: "秘钥管理", subtitle: "Git 凭据、镜像仓库与 Agent Token", permission: "secret.view" },
+  images: { title: "镜像管理", subtitle: "按语言维护 SDK 编译镜像", permission: "secret.view" },
   users: { title: "用户管理", subtitle: "账号、姓名与角色绑定", permission: "user.view" },
   orgs: { title: "用户组管理", subtitle: "用户组权限、成员与资产边界", permission: "org.view" },
   access: { title: "角色权限", subtitle: "用户、角色与操作边界", permission: "rbac.view" },
@@ -4489,6 +4598,7 @@ const viewRoutes = {
   templates: "/templates",
   channels: "/channels",
   secrets: "/secrets",
+  images: "/images",
   users: "/users",
   orgs: "/groups",
   access: "/access",
@@ -4580,6 +4690,7 @@ function setView(view, options = {}) {
   templateView.hidden = view !== "templates";
   channelView.hidden = view !== "channels";
   secretView.hidden = view !== "secrets";
+  imageView.hidden = view !== "images";
   userView.hidden = view !== "users";
   orgView.hidden = view !== "orgs";
   accessView.hidden = view !== "access";
@@ -4632,6 +4743,7 @@ function render() {
   renderTemplateView();
   renderChannelView();
   renderSecretView();
+  renderImageView();
   renderUserView();
   renderOrganizationView();
   renderAccessView();
@@ -4902,12 +5014,17 @@ platformSettingsForm.addEventListener("input", () => {
   platformSettingsDirty = true;
 });
 document.getElementById("addSdkImageMapping")?.addEventListener("click", () => {
-  platformSettings.sdkImages = collectSdkImageMappings();
-  platformSettings.sdkImages.push({ sdk: "oraclejdk8u381", builderImage: "", runtimeImage: "" });
-  platformSettingsDirty = true;
+  mergeVisibleSdkImageRows();
+  const filters = listState("images");
+  const language = filters.category !== "all" ? filters.category : "java";
+  platformSettings.sdkImages.unshift({ language, sdk: "custom-sdk", builderImage: "", runtimeImage: "" });
+  filters.page = 1;
+  platformSettings.sdkImagesInitialized = true;
   renderSdkImageMappings();
+  sdkImagesDirty = true;
   lucide.createIcons();
 });
+document.getElementById("saveSdkImages")?.addEventListener("click", saveSdkImageSettings);
 secretForm.addEventListener("submit", saveSecret);
 document.getElementById("userForm").addEventListener("submit", saveUser);
 organizationForm.addEventListener("submit", saveOrganization);
@@ -4977,6 +5094,12 @@ bindListFilters("deployConfigs", "deployConfigSearch", "deployConfigCategoryFilt
 bindListFilters("templates", "templateSearch", "templateCategoryFilter", renderTemplateView);
 bindListFilters("channels", "channelSearch", "channelCategoryFilter", renderChannelView);
 bindListFilters("secrets", "secretSearch", "secretCategoryFilter", renderSecretView);
+bindListFilters("images", "imageSearch", "imageLanguageFilter", () => {
+  mergeVisibleSdkImageRows();
+  sdkImagesDirty = false;
+  renderImageView();
+  lucide.createIcons();
+});
 bindListFilters("users", "userSearch", "userCategoryFilter", renderUserView);
 
 auditSearch.addEventListener("input", (event) => {
@@ -5010,6 +5133,11 @@ document.getElementById("clearAuditFilters").addEventListener("click", () => {
 });
 
 document.addEventListener("input", (event) => {
+  if (event.target.closest("[data-sdk-image-field]")) {
+    sdkImagesDirty = true;
+    return;
+  }
+
   const logQuery = event.target.closest("[data-log-query]");
   if (logQuery) {
     rememberLogFollowState();
@@ -5073,6 +5201,11 @@ document.querySelectorAll(".nav-item").forEach((button) => {
 });
 
 document.addEventListener("change", async (event) => {
+  if (event.target.closest("[data-sdk-image-field]")) {
+    sdkImagesDirty = true;
+    return;
+  }
+
   const taskCheckbox = event.target.closest("[data-task-select]");
   if (taskCheckbox) {
     const taskId = String(taskCheckbox.dataset.taskSelect);
@@ -5374,10 +5507,11 @@ document.addEventListener("click", (event) => {
 
   const removeSdkImageButton = event.target.closest("[data-remove-sdk-image]");
   if (removeSdkImageButton) {
-    platformSettings.sdkImages = collectSdkImageMappings();
-    platformSettings.sdkImages.splice(Number(removeSdkImageButton.dataset.removeSdkImage), 1);
-    platformSettingsDirty = true;
+    removeSdkImageButton.closest("[data-sdk-image-row]")?.remove();
+    mergeVisibleSdkImageRows();
+    sdkImagesDirty = false;
     renderSdkImageMappings();
+    sdkImagesDirty = true;
     lucide.createIcons();
     return;
   }
