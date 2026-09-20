@@ -2651,6 +2651,17 @@ function defaultSdkImages() {
   );
 }
 
+function sdkOptionsForLanguage(language) {
+  const normalizedLanguage = String(language || "").trim().toLowerCase();
+  const managedOptions = normalizeSdkImages(platformSettings.sdkImages)
+    .filter((item) => item.language === normalizedLanguage)
+    .map((item) => item.sdk);
+  if (platformSettings.sdkImagesInitialized) {
+    return Array.from(new Set(managedOptions));
+  }
+  return sdkOptions[normalizedLanguage] || [];
+}
+
 function normalizeSdkImages(value) {
   const items = Array.isArray(value) ? value : [];
   const seen = new Set();
@@ -3110,10 +3121,12 @@ function renderDeployConfigsEditor() {
 }
 
 function updateSdkOptions(language, force = false) {
-  const options = sdkOptions[language] || [];
+  const options = sdkOptionsForLanguage(language);
   const currentSdk = sdkSelect.value;
-  const selectedSdk = options.includes(currentSdk) && !force ? currentSdk : options[0];
-  sdkSelect.innerHTML = options.map((sdk) => `<option ${sdk === selectedSdk ? "selected" : ""}>${sdk}</option>`).join("");
+  const selectedSdk = options.includes(currentSdk) && !force ? currentSdk : options[0] || "";
+  sdkSelect.innerHTML = options.length
+    ? options.map((sdk) => `<option value="${escapeHtml(sdk)}" ${sdk === selectedSdk ? "selected" : ""}>${escapeHtml(sdk)}</option>`).join("")
+    : `<option value="">请先在镜像管理添加 SDK</option>`;
   const commandInput = taskForm.elements.buildCommand;
   if (force || !commandInput.value) commandInput.value = buildCommands[language] || "";
   document.querySelectorAll(".java-build-field").forEach((field) => {
@@ -3254,7 +3267,7 @@ function openTaskEditor(taskId) {
   taskForm.elements.gitCredentialId.value = task.gitCredentialId || "";
   taskForm.elements.language.value = normalizeDeployRule(task.deployRule) === "cf_pages" ? "node" : task.language || "java";
   updateSdkOptions(taskForm.elements.language.value || "java", true);
-  taskForm.elements.sdk.value = task.sdk || sdkOptions[taskForm.elements.language.value || "java"]?.[0] || "";
+  taskForm.elements.sdk.value = task.sdk || sdkOptionsForLanguage(taskForm.elements.language.value || "java")[0] || "";
   taskForm.elements.buildCommand.value = task.buildCommand || "";
   taskForm.elements.artifactPath.value = task.artifactPath || "";
   taskForm.elements.buildEnv.value = task.buildEnv || "";
@@ -5507,8 +5520,13 @@ document.addEventListener("click", (event) => {
 
   const removeSdkImageButton = event.target.closest("[data-remove-sdk-image]");
   if (removeSdkImageButton) {
-    removeSdkImageButton.closest("[data-sdk-image-row]")?.remove();
+    const row = removeSdkImageButton.closest("[data-sdk-image-row]");
+    const removedKey = row?.dataset.originalKey || "";
+    row?.remove();
     mergeVisibleSdkImageRows();
+    if (removedKey) {
+      platformSettings.sdkImages = platformSettings.sdkImages.filter((item) => sdkImageKey(item) !== removedKey);
+    }
     sdkImagesDirty = false;
     renderSdkImageMappings();
     sdkImagesDirty = true;

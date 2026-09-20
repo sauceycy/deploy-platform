@@ -1221,8 +1221,9 @@ CUSTOM_IMAGE_REQUIRED_SDKS = {
 
 def sdk_image_mapping(task, sdk):
     sdk = str(sdk or "").strip().lower()
+    language = str(task.get("language") or "").strip().lower()
     for item in normalize_sdk_images(task.get("sdkImages")):
-        if item.get("sdk") == sdk:
+        if item.get("sdk") == sdk and (not item.get("language") or item.get("language") == language):
             return item
     return {}
 
