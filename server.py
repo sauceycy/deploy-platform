@@ -235,7 +235,8 @@ def normalize_deploy_config(config, task=None, index=0):
         organization_ids = [str(item or "default").strip() or "default" for item in org_ids if str(item or "").strip()] or ["default"]
     else:
         organization_ids = [str(config.get("organizationId") or task.get("organizationId") or "default").strip() or "default"]
-    clusters = config.get("clusters") if isinstance(config.get("clusters"), list) else task.get("clusters")
+    is_pages = task_deploy_rule(task) == "cf_pages"
+    clusters = [] if is_pages else config.get("clusters") if isinstance(config.get("clusters"), list) else task.get("clusters")
     normalized_clusters = []
     for cluster in clusters if isinstance(clusters, list) else []:
         if not isinstance(cluster, dict):
@@ -254,6 +255,9 @@ def normalize_deploy_config(config, task=None, index=0):
             }
         )
     name = str(config.get("name") or config.get("project") or task.get("env") or "默认配置").strip() or "默认配置"
+    pages_package_manager = str(config.get("pagesPackageManager") or task.get("pagesPackageManager") or "npm").strip().lower()
+    if pages_package_manager != "pnpm":
+        pages_package_manager = "npm"
     return {
         "id": str(config.get("id") or uuid.uuid4().hex[:12]),
         "name": name,
@@ -262,7 +266,10 @@ def normalize_deploy_config(config, task=None, index=0):
         "deploymentName": str(config.get("deploymentName") or config.get("appName") or task.get("name") or "").strip(),
         "buildCommand": str(config.get("buildCommand") or "").strip(),
         "artifactPath": str(config.get("artifactPath") or "").strip(),
+        "pagesPackageManager": pages_package_manager,
         "pagesDeployCommand": str(config.get("pagesDeployCommand") or "").strip(),
+        "cloudflareAccountIdSecretId": str(config.get("cloudflareAccountIdSecretId") or "").strip(),
+        "cloudflareApiTokenSecretId": str(config.get("cloudflareApiTokenSecretId") or "").strip(),
         "organizationIds": organization_ids,
         "organizationId": organization_ids[0],
         "clusters": normalized_clusters,
@@ -288,7 +295,10 @@ def normalize_deploy_configs(configs, task=None):
                 "deploymentName": task.get("name") or "",
                 "buildCommand": "",
                 "artifactPath": "",
+                "pagesPackageManager": task.get("pagesPackageManager") or "npm",
                 "pagesDeployCommand": "",
+                "cloudflareAccountIdSecretId": "",
+                "cloudflareApiTokenSecretId": "",
                 "organizationIds": task.get("organizationIds") or [task.get("organizationId") or "default"],
                 "clusters": task.get("clusters") or [],
                 "runtimeEnv": task.get("runtimeEnv") or "",
@@ -2223,7 +2233,10 @@ def effective_task_for_deploy_config(task, deploy_config):
     effective["env"] = deploy_config.get("env") or task.get("env")
     effective["buildCommand"] = deploy_config.get("buildCommand") or task.get("buildCommand") or ""
     effective["artifactPath"] = deploy_config.get("artifactPath") if deploy_config.get("artifactPath") is not None else task.get("artifactPath") or ""
+    effective["pagesPackageManager"] = deploy_config.get("pagesPackageManager") or task.get("pagesPackageManager") or "npm"
     effective["pagesDeployCommand"] = deploy_config.get("pagesDeployCommand") or task.get("pagesDeployCommand") or ""
+    effective["cloudflareAccountIdSecretId"] = deploy_config.get("cloudflareAccountIdSecretId") or task.get("cloudflareAccountIdSecretId") or ""
+    effective["cloudflareApiTokenSecretId"] = deploy_config.get("cloudflareApiTokenSecretId") or task.get("cloudflareApiTokenSecretId") or ""
     effective["clusters"] = copy.deepcopy(deploy_config.get("clusters") or task.get("clusters") or [])
     effective["runtimeEnv"] = deploy_config.get("runtimeEnv") if deploy_config.get("runtimeEnv") is not None else task.get("runtimeEnv") or ""
     effective["jvmOptions"] = deploy_config.get("jvmOptions") if deploy_config.get("jvmOptions") is not None else task.get("jvmOptions") or ""
@@ -2901,20 +2914,25 @@ def save_task_config(task_id, payload, actor):
             secret = git_secret_by_id(state, task_payload.get("gitCredentialId"))
             if not user_can_access_asset(state, actor_user, secret):
                 raise ValueError(f"当前用户组无权绑定该 Git 凭据: {secret.get('name')}")
+
+        def validate_secret_binding(secret_id, expected_type, label, scope=""):
+            secret_id = str(secret_id or "").strip()
+            if not secret_id:
+                return
+            secret = find_by_id(state.get("secrets", []), secret_id)
+            prefix = f"{scope}{label}" if scope else label
+            if not secret:
+                raise ValueError(f"{prefix} 秘钥不存在")
+            if secret.get("type") != expected_type:
+                raise ValueError(f"{prefix} 秘钥类型不正确")
+            if not user_can_access_asset(state, actor_user, secret):
+                raise ValueError(f"当前用户组无权绑定{prefix} 秘钥")
+
         for field_name, expected_type, label in (
             ("cloudflareAccountIdSecretId", "cloudflare_account_id", "Cloudflare Account ID"),
             ("cloudflareApiTokenSecretId", "cloudflare_api_token", "Cloudflare API Token"),
         ):
-            secret_id = str(task_payload.get(field_name) or "").strip()
-            if not secret_id:
-                continue
-            secret = find_by_id(state.get("secrets", []), secret_id)
-            if not secret:
-                raise ValueError(f"{label} 秘钥不存在")
-            if secret.get("type") != expected_type:
-                raise ValueError(f"{label} 秘钥类型不正确")
-            if not user_can_access_asset(state, actor_user, secret):
-                raise ValueError(f"当前用户组无权绑定该 {label} 秘钥")
+            validate_secret_binding(task_payload.get(field_name), expected_type, label)
         notify_channel_id = (task_payload.get("notify") or {}).get("channelId")
         if notify_channel_id:
             notify_channel = find_by_id(state.get("notifyChannels", []), notify_channel_id)
@@ -2936,6 +2954,9 @@ def save_task_config(task_id, payload, actor):
         for deploy_config in task_payload.get("deployConfigs", []):
             if not user_can_access_deploy_config(state, actor_user, deploy_config):
                 raise ValueError(f"当前用户组无权保存发布配置 {deploy_config.get('name')}")
+            if task_payload["deployRule"] == "cf_pages":
+                validate_secret_binding(deploy_config.get("cloudflareAccountIdSecretId"), "cloudflare_account_id", "Cloudflare Account ID", f"发布配置 {deploy_config.get('name')} 的 ")
+                validate_secret_binding(deploy_config.get("cloudflareApiTokenSecretId"), "cloudflare_api_token", "Cloudflare API Token", f"发布配置 {deploy_config.get('name')} 的 ")
             for target in deploy_config.get("clusters", []):
                 cluster = next((item for item in state.get("clusters", []) if normalize_cluster_key(item.get("name")) == normalize_cluster_key(target.get("name"))), None)
                 if cluster and not user_can_access_asset(state, actor_user, cluster):
@@ -3073,6 +3094,26 @@ def delete_secret_config(secret_id, actor):
         task_with_cloudflare_token = next((task for task in state.get("tasks", []) if str(task.get("cloudflareApiTokenSecretId")) == str(secret_id)), None)
         if task_with_cloudflare_token:
             raise ValueError(f"任务 {task_with_cloudflare_token.get('name')} 正在使用该 Cloudflare API Token 秘钥，请先取消绑定")
+        config_with_cloudflare_account = next(
+            (
+                task
+                for task in state.get("tasks", [])
+                if any(str(config.get("cloudflareAccountIdSecretId")) == str(secret_id) for config in normalize_deploy_configs(task.get("deployConfigs"), task))
+            ),
+            None,
+        )
+        if config_with_cloudflare_account:
+            raise ValueError(f"任务 {config_with_cloudflare_account.get('name')} 的发布配置正在使用该 Cloudflare Account ID 秘钥，请先取消绑定")
+        config_with_cloudflare_token = next(
+            (
+                task
+                for task in state.get("tasks", [])
+                if any(str(config.get("cloudflareApiTokenSecretId")) == str(secret_id) for config in normalize_deploy_configs(task.get("deployConfigs"), task))
+            ),
+            None,
+        )
+        if config_with_cloudflare_token:
+            raise ValueError(f"任务 {config_with_cloudflare_token.get('name')} 的发布配置正在使用该 Cloudflare API Token 秘钥，请先取消绑定")
         task_with_pull_secret = next((task for task in state.get("tasks", []) if any(str(cluster.get("imagePullSecretId")) == str(secret_id) for cluster in task.get("clusters", []))), None)
         if task_with_pull_secret:
             raise ValueError(f"任务 {task_with_pull_secret.get('name')} 正在使用该镜像拉取秘钥，请先取消绑定")

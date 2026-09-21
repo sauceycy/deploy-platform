@@ -529,7 +529,9 @@ function safeGroupId(value) {
 
 function normalizeDeployConfig(config = {}, task = {}) {
   const organizationIds = Array.isArray(config.organizationIds) && config.organizationIds.length ? config.organizationIds.map(String) : assetOrganizationIds(task);
-  const sourceClusters = Array.isArray(config.clusters) ? config.clusters : task.clusters || [];
+  const isPages = normalizeDeployRule(config.deployRule || task.deployRule) === "cf_pages";
+  const sourceClusters = isPages ? [] : Array.isArray(config.clusters) ? config.clusters : task.clusters || [];
+  const pagesPackageManager = String(config.pagesPackageManager || task.pagesPackageManager || "npm").trim().toLowerCase() === "pnpm" ? "pnpm" : "npm";
   return {
     id: String(config.id || `cfg-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`),
     name: String(config.name || config.project || "默认配置").trim() || "默认配置",
@@ -538,7 +540,10 @@ function normalizeDeployConfig(config = {}, task = {}) {
     deploymentName: String(config.deploymentName || task.name || "").trim(),
     buildCommand: String(config.buildCommand ?? "").trim(),
     artifactPath: String(config.artifactPath ?? "").trim(),
+    pagesPackageManager,
     pagesDeployCommand: String(config.pagesDeployCommand ?? "").trim(),
+    cloudflareAccountIdSecretId: String(config.cloudflareAccountIdSecretId || "").trim(),
+    cloudflareApiTokenSecretId: String(config.cloudflareApiTokenSecretId || "").trim(),
     organizationIds,
     organizationId: organizationIds[0] || "default",
     clusters: sourceClusters
@@ -567,7 +572,10 @@ function normalizeDeployConfigs(configs, task = {}) {
         deploymentName: task.name || "",
         buildCommand: "",
         artifactPath: "",
+        pagesPackageManager: task.pagesPackageManager || "npm",
         pagesDeployCommand: "",
+        cloudflareAccountIdSecretId: "",
+        cloudflareApiTokenSecretId: "",
         organizationIds: assetOrganizationIds(task),
         clusters: task.clusters || [],
         runtimeEnv: task.runtimeEnv || "",
@@ -2308,7 +2316,10 @@ function renderDeployConfigView() {
           config.deploymentName,
           config.buildCommand,
           config.artifactPath,
+          config.pagesPackageManager,
           config.pagesDeployCommand,
+          secretName(config.cloudflareAccountIdSecretId),
+          secretName(config.cloudflareApiTokenSecretId),
           deployConfigOrganizationIds(config, task).map(organizationName).join(" "),
           (config.clusters || []).map((cluster) => `${cluster.name} ${cluster.namespace}`).join(" "),
         ],
@@ -2323,20 +2334,21 @@ function renderDeployConfigView() {
   }
   deployConfigBody.innerHTML = pageData.rows
     .map(({ task, config }) => {
-      const clustersText = (config.clusters || []).map((cluster) => `${cluster.name}/${cluster.namespace || "default"}`).join("、") || "未绑定集群";
-      const buildText = normalizeAppType(task.appType) === "frontend" ? config.buildCommand || task.buildCommand || "未设置编译命令" : "";
+      const isPages = normalizeDeployRule(task.deployRule) === "cf_pages";
+      const clustersText = isPages ? "Cloudflare Pages / 本机部署" : (config.clusters || []).map((cluster) => `${cluster.name}/${cluster.namespace || "default"}`).join("、") || "未绑定集群";
+      const buildText = isPages ? config.pagesDeployCommand || task.pagesDeployCommand || defaultPagesDeployCommand(config.pagesPackageManager || task.pagesPackageManager || "npm") : normalizeAppType(task.appType) === "frontend" ? config.buildCommand || task.buildCommand || "未设置编译命令" : "";
       return `
         <div class="cluster-row">
           <div class="cluster-row-main">
             <div>
               <strong>${escapeHtml(config.name || "默认配置")}</strong>
-              <span>${escapeHtml(task.name)} · ${escapeHtml(config.project || "未设置项目")} · ${escapeHtml(config.env || task.env || "test")} · 部署名 ${escapeHtml(config.deploymentName || task.name)}</span>
+              <span>${escapeHtml(task.name)} · ${escapeHtml(config.project || "未设置项目")} · ${escapeHtml(config.env || task.env || "test")} · ${isPages ? "CF Pages" : `部署名 ${escapeHtml(config.deploymentName || task.name)}`}</span>
             </div>
             <span class="status-chip success">${escapeHtml(deployConfigOrganizationIds(config, task).map(organizationName).join("、"))}</span>
           </div>
           <div class="cluster-meta">
             <span>集群：${escapeHtml(clustersText)}</span>
-            ${buildText ? `<span>编译：${escapeHtml(buildText)}</span>` : ""}
+            ${buildText ? `<span>${isPages ? "部署" : "编译"}：${escapeHtml(buildText)}</span>` : ""}
             <span>最近发布：${escapeHtml(task.lastDeployConfigId === config.id ? task.lastRun || "未发布" : "未发布")}</span>
           </div>
           <div class="cluster-actions">
@@ -3037,13 +3049,14 @@ function deployConfigClusterRow(configIndex, cluster, clusterIndex) {
 }
 
 function deployConfigCardHtml(config, index) {
-  const isFrontendK8s = normalizeDeployRule(formValue("deployRule")) !== "cf_pages" && normalizeAppType(formValue("appType")) === "frontend";
+  const isPages = normalizeDeployRule(formValue("deployRule")) === "cf_pages";
+  const isFrontendK8s = !isPages && normalizeAppType(formValue("appType")) === "frontend";
   return `
       <div class="config-card" data-deploy-config="${index}">
         <div class="cluster-row-main">
           <div>
             <strong>${escapeHtml(deployConfigLabel(config))}</strong>
-            <span>${escapeHtml(deployConfigOrganizationIds(config).map(organizationName).join("、") || "默认用户组")} · ${config.clusters.length} 个集群</span>
+            <span>${escapeHtml(deployConfigOrganizationIds(config).map(organizationName).join("、") || "默认用户组")} · ${isPages ? "CF Pages 本机部署" : `${config.clusters.length} 个集群`}</span>
           </div>
           <button class="icon-button danger-action" type="button" title="删除配置" data-remove-deploy-config="${index}">
             <i data-lucide="trash-2"></i>
@@ -3062,10 +3075,16 @@ function deployConfigCardHtml(config, index) {
             <span>环境</span>
             <input data-deploy-config-field="env" value="${escapeHtml(config.env || "test")}" />
           </label>
+          ${
+            isPages
+              ? ""
+              : `
           <label>
             <span>应用部署名</span>
             <input data-deploy-config-field="deploymentName" value="${escapeHtml(config.deploymentName || formValue("name"))}" placeholder="例如 a-sdk" />
           </label>
+          `
+          }
           ${
             isFrontendK8s
               ? `
@@ -3080,6 +3099,39 @@ function deployConfigCardHtml(config, index) {
           `
               : ""
           }
+          ${
+            isPages
+              ? `
+          <label>
+            <span>Pages 包管理器</span>
+            <select data-deploy-config-field="pagesPackageManager">
+              <option value="npm" ${config.pagesPackageManager === "pnpm" ? "" : "selected"}>npm</option>
+              <option value="pnpm" ${config.pagesPackageManager === "pnpm" ? "selected" : ""}>pnpm</option>
+            </select>
+          </label>
+          <label class="wide-field">
+            <span>Pages 部署命令</span>
+            <input data-deploy-config-field="pagesDeployCommand" value="${escapeHtml(config.pagesDeployCommand || formValue("pagesDeployCommand"))}" placeholder="${escapeHtml(defaultPagesDeployCommand(config.pagesPackageManager || formValue("pagesPackageManager") || "npm"))}" />
+          </label>
+          <label>
+            <span>Cloudflare Account ID</span>
+            <select data-deploy-config-field="cloudflareAccountIdSecretId">
+              ${secretOptionsByTypes("cloudflare_account_id", config.cloudflareAccountIdSecretId, "使用任务默认")}
+            </select>
+          </label>
+          <label>
+            <span>Cloudflare API Token</span>
+            <select data-deploy-config-field="cloudflareApiTokenSecretId">
+              ${secretOptionsByTypes("cloudflare_api_token", config.cloudflareApiTokenSecretId, "使用任务默认")}
+            </select>
+          </label>
+          `
+              : ""
+          }
+          ${
+            isPages
+              ? ""
+              : `
           <label class="wide-field">
             <span>运行环境变量</span>
             <textarea data-deploy-config-field="runtimeEnv">${escapeHtml(config.runtimeEnv || "")}</textarea>
@@ -3088,8 +3140,14 @@ function deployConfigCardHtml(config, index) {
             <span>JVM 启动参数</span>
             <textarea data-deploy-config-field="jvmOptions">${escapeHtml(config.jvmOptions || "")}</textarea>
           </label>
+          `
+          }
         </div>
         <div class="permission-list compact-permission-list">${organizationChecksHtml(deployConfigOrganizationIds(config), String(index))}</div>
+        ${
+          isPages
+            ? ""
+            : `
         <div class="section-title-row">
           <h3>配置集群</h3>
           <button class="mini-button" type="button" data-add-deploy-config-cluster="${index}">
@@ -3098,17 +3156,14 @@ function deployConfigCardHtml(config, index) {
           </button>
         </div>
         ${config.clusters.map((cluster, clusterIndex) => deployConfigClusterRow(index, cluster, clusterIndex)).join("")}
+        `
+        }
       </div>
   `;
 }
 
 function renderDeployConfigsEditor() {
   if (!deployConfigEditor || !deployConfigTabs) return;
-  if (normalizeDeployRule(formValue("deployRule")) === "cf_pages") {
-    deployConfigTabs.innerHTML = "";
-    deployConfigEditor.innerHTML = `<div class="empty-state compact"><strong>CF Pages 暂不需要发布配置</strong><span>第一版发布配置聚焦 K8s 服务。</span></div>`;
-    return;
-  }
   if (!deployConfigDrafts.length) {
     deployConfigTabs.innerHTML = "";
     deployConfigEditor.innerHTML = `<div class="empty-state compact"><strong>暂无发布配置</strong><span>点击“保存当前为配置”，为不同项目保存独立部署参数。</span></div>`;
@@ -3387,7 +3442,7 @@ function collectClusterDrafts() {
 }
 
 function collectDeployConfigDrafts() {
-  if (normalizeDeployRule(formValue("deployRule")) === "cf_pages") return;
+  const isPages = normalizeDeployRule(formValue("deployRule")) === "cf_pages";
   document.querySelectorAll("[data-deploy-config]").forEach((card) => {
     const index = Number(card.dataset.deployConfig);
     const config = deployConfigDrafts[index];
@@ -3398,18 +3453,22 @@ function collectDeployConfigDrafts() {
     const organizationIds = Array.from(card.querySelectorAll(`[data-deploy-config-org="${index}"]:checked`)).map((input) => input.dataset.orgId);
     config.organizationIds = organizationIds.length ? organizationIds : ["default"];
     config.organizationId = config.organizationIds[0];
-    config.clusters = Array.from(card.querySelectorAll(`[data-deploy-config-cluster="${index}"]`)).map((row) => ({
-      name: row.querySelector('[data-config-cluster-field="name"]').value,
-      namespace: row.querySelector('[data-config-cluster-field="namespace"]').value || "default",
-      replicas: Number(row.querySelector('[data-config-cluster-field="replicas"]').value || 1),
-      ingress: row.querySelector('[data-config-cluster-field="ingress"]').value,
-      imagePullSecretId: row.querySelector('[data-config-cluster-field="imagePullSecretId"]').value,
-    }));
+    config.clusters = isPages
+      ? []
+      : Array.from(card.querySelectorAll(`[data-deploy-config-cluster="${index}"]`)).map((row) => ({
+          name: row.querySelector('[data-config-cluster-field="name"]').value,
+          namespace: row.querySelector('[data-config-cluster-field="namespace"]').value || "default",
+          replicas: Number(row.querySelector('[data-config-cluster-field="replicas"]').value || 1),
+          ingress: row.querySelector('[data-config-cluster-field="ingress"]').value,
+          imagePullSecretId: row.querySelector('[data-config-cluster-field="imagePullSecretId"]').value,
+        }));
   });
 }
 
 function currentDeployConfigSnapshot() {
   collectClusterDrafts();
+  collectDeployConfigDrafts();
+  const isPages = normalizeDeployRule(formValue("deployRule")) === "cf_pages";
   const name = formValue("name") || "服务";
   const env = taskEnvValue();
   const baseConfig = deployConfigDrafts[activeDeployConfigIndex] || {};
@@ -3421,24 +3480,26 @@ function currentDeployConfigSnapshot() {
       deploymentName: name,
       buildCommand: baseConfig.buildCommand || formValue("buildCommand"),
       artifactPath: baseConfig.artifactPath || formValue("artifactPath"),
+      pagesPackageManager: baseConfig.pagesPackageManager || formValue("pagesPackageManager") || "npm",
       pagesDeployCommand: baseConfig.pagesDeployCommand || formValue("pagesDeployCommand"),
+      cloudflareAccountIdSecretId: baseConfig.cloudflareAccountIdSecretId || "",
+      cloudflareApiTokenSecretId: baseConfig.cloudflareApiTokenSecretId || "",
       organizationIds: [formValue("organizationId") || "default"],
-      clusters: clusterDrafts.map((cluster) => ({ ...cluster })),
+      clusters: isPages ? [] : clusterDrafts.map((cluster) => ({ ...cluster })),
       runtimeEnv: baseConfig.runtimeEnv || "",
       jvmOptions: baseConfig.jvmOptions || "",
     },
-    { name, env, organizationId: formValue("organizationId") || "default", clusters: clusterDrafts },
+    { name, env, organizationId: formValue("organizationId") || "default", deployRule: formValue("deployRule"), clusters: isPages ? [] : clusterDrafts },
   );
 }
 
 function buildPreviewObject() {
   collectClusterDrafts();
   collectDeployConfigDrafts();
-  const deployConfigs = normalizeDeployRule(formValue("deployRule")) === "cf_pages"
-    ? []
-    : deployConfigDrafts.map((config) =>
-        normalizeDeployConfig(config, { name: formValue("name"), env: taskEnvValue(), organizationId: formValue("organizationId"), clusters: clusterDrafts }),
-      );
+  const isPages = normalizeDeployRule(formValue("deployRule")) === "cf_pages";
+  const deployConfigs = deployConfigDrafts.map((config) =>
+    normalizeDeployConfig(config, { name: formValue("name"), env: taskEnvValue(), organizationId: formValue("organizationId"), deployRule: formValue("deployRule"), clusters: isPages ? [] : clusterDrafts }),
+  );
   return {
     task: {
       name: formValue("name"),
@@ -4386,6 +4447,8 @@ async function deleteSecret(secretId) {
   const usedByTask = tasks.find((task) => String(task.gitCredentialId) === String(secretId));
   const usedByCloudflareAccount = tasks.find((task) => String(task.cloudflareAccountIdSecretId) === String(secretId));
   const usedByCloudflareToken = tasks.find((task) => String(task.cloudflareApiTokenSecretId) === String(secretId));
+  const usedByConfigCloudflareAccount = tasks.find((task) => normalizeDeployConfigs(task.deployConfigs, task).some((config) => String(config.cloudflareAccountIdSecretId) === String(secretId)));
+  const usedByConfigCloudflareToken = tasks.find((task) => normalizeDeployConfigs(task.deployConfigs, task).some((config) => String(config.cloudflareApiTokenSecretId) === String(secretId)));
   const usedByImagePull = tasks.find((task) => (task.clusters || []).some((cluster) => String(cluster.imagePullSecretId) === String(secretId)));
   const usedByCluster = clusters.find((cluster) => String(cluster.imagePullSecretId) === String(secretId));
   const usedByPlatformRegistry = String(platformSettings.registrySecretId) === String(secretId);
@@ -4400,6 +4463,14 @@ async function deleteSecret(secretId) {
   }
   if (usedByCloudflareToken) {
     window.alert(`任务 ${usedByCloudflareToken.name} 正在使用该 Cloudflare API Token 秘钥，请先编辑任务取消绑定`);
+    return;
+  }
+  if (usedByConfigCloudflareAccount) {
+    window.alert(`任务 ${usedByConfigCloudflareAccount.name} 的发布配置正在使用该 Cloudflare Account ID 秘钥，请先编辑任务取消绑定`);
+    return;
+  }
+  if (usedByConfigCloudflareToken) {
+    window.alert(`任务 ${usedByConfigCloudflareToken.name} 的发布配置正在使用该 Cloudflare API Token 秘钥，请先编辑任务取消绑定`);
     return;
   }
   if (usedByImagePull) {
