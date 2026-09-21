@@ -1945,29 +1945,36 @@ def write_nginx_conf(context_dir, port):
 
 def java_artifact_candidates(task, src_dir, app_dir):
     artifact_path = str(task.get("artifactPath") or "").strip()
-    patterns = [artifact_path] if artifact_path else ["target/*.jar", "**/target/*.jar"]
-    candidates = []
-    for pattern in patterns:
-        if not pattern:
-            continue
-        pattern = normalize_artifact_pattern(pattern)
-        matches = []
-        if any(char in pattern for char in "*?["):
-            matches.extend(src_dir.glob(pattern))
-            if not artifact_path:
-                matches.extend(app_dir.glob(pattern))
-        else:
-            matches.append(src_dir / pattern)
-            if not artifact_path:
-                matches.append(app_dir / pattern)
-        candidates.extend(item for item in matches if item.is_file() and item.suffix == ".jar" and is_relative_child(item, src_dir))
 
     def sort_key(path):
         name = path.name
         classifier = name.endswith("-sources.jar") or name.endswith("-javadoc.jar") or name.endswith("-tests.jar")
         return (classifier, len(path.parts), str(path))
 
-    return sorted(set(candidates), key=sort_key)
+    def find_matches(patterns, include_app_dir=False):
+        candidates = []
+        for pattern in patterns:
+            pattern = normalize_artifact_pattern(pattern)
+            matches = []
+            if any(char in pattern for char in "*?["):
+                matches.extend(src_dir.glob(pattern))
+                if include_app_dir:
+                    matches.extend(app_dir.glob(pattern))
+            else:
+                matches.append(src_dir / pattern)
+                if include_app_dir:
+                    matches.append(app_dir / pattern)
+            candidates.extend(item for item in matches if item.is_file() and item.suffix == ".jar" and is_relative_child(item, src_dir))
+        return sorted(set(candidates), key=sort_key)
+
+    # A configured artifact is authoritative, but a missing artifact must not block the
+    # automatic target-directory fallback used by multi-module Maven projects.
+    if artifact_path:
+        configured_matches = find_matches([artifact_path])
+        if configured_matches:
+            return configured_matches
+
+    return find_matches(["target/*.jar", "**/target/*.jar"], include_app_dir=True)
 
 
 def dockerfile_env_value(value):
@@ -2232,7 +2239,7 @@ def effective_task_for_deploy_config(task, deploy_config):
     effective["deploymentName"] = deploy_config.get("deploymentName") or task.get("name")
     effective["env"] = deploy_config.get("env") or task.get("env")
     effective["buildCommand"] = deploy_config.get("buildCommand") or task.get("buildCommand") or ""
-    effective["artifactPath"] = deploy_config.get("artifactPath") if deploy_config.get("artifactPath") is not None else task.get("artifactPath") or ""
+    effective["artifactPath"] = deploy_config.get("artifactPath") or task.get("artifactPath") or ""
     effective["pagesPackageManager"] = deploy_config.get("pagesPackageManager") or task.get("pagesPackageManager") or "npm"
     effective["pagesDeployCommand"] = deploy_config.get("pagesDeployCommand") or task.get("pagesDeployCommand") or ""
     effective["cloudflareAccountIdSecretId"] = deploy_config.get("cloudflareAccountIdSecretId") or task.get("cloudflareAccountIdSecretId") or ""
