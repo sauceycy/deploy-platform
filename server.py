@@ -236,6 +236,8 @@ def deploy_config_repository_override(value, task):
     # A Git repository cannot validly continue after another repository's .git
     # suffix. Treat this historical concatenation as an empty configuration
     # override so the task's original repository is used unchanged.
+    if re.search(r"\.git[^/?#]", repo, flags=re.IGNORECASE):
+        return ""
     suffix = repo[len(task_repo) :] if repo.startswith(task_repo) else ""
     if suffix and suffix != "/" and task_repo.lower().endswith(".git"):
         return ""
