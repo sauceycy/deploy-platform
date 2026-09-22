@@ -3657,12 +3657,16 @@ function deployConfigsForTask(task) {
 
 function deployConfigById(task, deployConfigId) {
   const configs = deployConfigsForTask(task);
-  return configs.find((config) => String(config.id) === String(deployConfigId)) || configs[0] || null;
+  if (deployConfigId) {
+    return configs.find((config) => String(config.id) === String(deployConfigId)) || null;
+  }
+  return configs[0] || null;
 }
 
 function taskRepoForDeployConfig(task, deployConfigId = "") {
   const config = deployConfigById(task, deployConfigId);
-  return config?.repo || task?.repo || "";
+  if (!config) throw new Error("所选发布配置不存在或已被删除，请刷新页面后重试");
+  return config.repo || task?.repo || "";
 }
 
 function branchOptionsHtml(branches) {
@@ -3685,10 +3689,9 @@ function selectPreferredBranch(task, branchSelectElement, branches = null) {
 function renderDeployConfigSelect(task, selectElement) {
   const configs = deployConfigsForTask(task);
   selectElement.innerHTML = configs.map((config) => `<option value="${escapeHtml(config.id)}">${escapeHtml(config.name || "默认配置")}</option>`).join("");
-  const lastConfigId = task?.lastDeployConfigId || "";
-  if (lastConfigId && configs.some((config) => String(config.id) === String(lastConfigId))) {
-    selectElement.value = lastConfigId;
-  }
+  // Starting from the base configuration prevents a previous special release
+  // from silently switching the task to a repository-specific configuration.
+  if (configs[0]) selectElement.value = configs[0].id;
   selectElement.disabled = configs.length === 0;
   return configs;
 }
@@ -3859,10 +3862,6 @@ async function openBatchDialog(taskIds) {
     selectedTasks.map(async (task) => {
       const select = batchTaskList.querySelector(`[data-batch-branch="${task.id}"]`);
       const configSelect = batchTaskList.querySelector(`[data-batch-config="${task.id}"]`);
-      const configs = deployConfigsForTask(task);
-      if (task.lastDeployConfigId && configs.some((config) => String(config.id) === String(task.lastDeployConfigId))) {
-        configSelect.value = task.lastDeployConfigId;
-      }
       try {
         await loadBranchesIntoSelect(task, select, configSelect.value);
       } catch (error) {

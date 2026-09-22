@@ -2307,10 +2307,12 @@ spec:
 
 def deploy_config_by_id(task, deploy_config_id):
     configs = normalize_deploy_configs(task.get("deployConfigs"), task)
-    if deploy_config_id:
-        config = next((item for item in configs if str(item.get("id")) == str(deploy_config_id)), None)
-        if config:
-            return config
+    requested_id = str(deploy_config_id or "").strip()
+    if requested_id:
+        config = next((item for item in configs if str(item.get("id")) == requested_id), None)
+        if not config:
+            raise ValueError("所选发布配置不存在或已被删除，请刷新页面后重试")
+        return config
     return configs[0] if configs else normalize_deploy_configs([], task)[0]
 
 
@@ -2588,7 +2590,9 @@ def build_and_dispatch(execution_id):
     if not task:
         set_execution_status(execution_id, "failed", "任务不存在")
         return
-    deploy_config = deploy_config_by_id(task, execution.get("deployConfigId"))
+    # Freeze the selected configuration at enqueue time so later edits cannot
+    # change this execution's source repository or deployment parameters.
+    deploy_config = execution.get("deployConfigSnapshot") or deploy_config_by_id(task, execution.get("deployConfigId"))
     task = effective_task_for_deploy_config(task, deploy_config)
     platform_settings = state.get("platformSettings") if isinstance(state.get("platformSettings"), dict) else {}
     task["sdkImages"] = normalize_sdk_images(platform_settings.get("sdkImages"))
@@ -2768,6 +2772,7 @@ def create_execution_record(state, task, actor, branch, action="触发发布", d
         "taskName": task["name"],
         "deployConfigId": deploy_config.get("id") or "",
         "deployConfigName": deploy_config.get("name") or "默认配置",
+        "deployConfigSnapshot": copy.deepcopy(deploy_config),
         "deployRule": task_deploy_rule(task),
         "branch": branch,
         "actor": execution_actor,
