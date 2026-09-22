@@ -2324,7 +2324,9 @@ def effective_task_for_deploy_config(task, deploy_config):
     effective = copy.deepcopy(task)
     effective["deployConfigId"] = deploy_config.get("id")
     effective["deployConfigName"] = deploy_config.get("name")
-    effective["repo"] = deploy_config.get("repo") or task.get("repo") or ""
+    # A repository configured on the deployment config is an explicit override.
+    # An empty override must preserve the task's default repository byte-for-byte.
+    effective["repo"] = str(deploy_config.get("repo") or "").strip() or task.get("repo") or ""
     effective["deploymentName"] = deploy_config.get("deploymentName") or task.get("name")
     effective["env"] = deploy_config.get("env") or task.get("env")
     effective["buildCommand"] = deploy_config.get("buildCommand") or task.get("buildCommand") or ""
@@ -3946,12 +3948,28 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             try:
                 state = read_state()
-                secret_id = body.get("gitCredentialId")
+                task_id = body.get("taskId")
+                if task_id is not None:
+                    task = find_by_id(state.get("tasks", []), task_id)
+                    if not task:
+                        raise ValueError("任务不存在")
+                    require_actor_asset_access(state, actor, "task.deploy", task, "读取")
+                    deploy_config = deploy_config_by_id(task, body.get("deployConfigId"))
+                    actor_user = find_user(state, actor)
+                    if not user_can_access_deploy_config(state, actor_user, deploy_config):
+                        raise ValueError(f"当前用户组无权读取发布配置 {deploy_config.get('name')}")
+                    repo = str(deploy_config.get("repo") or "").strip() or task.get("repo") or ""
+                    secret_id = task.get("gitCredentialId")
+                else:
+                    # Keep the endpoint compatible with older clients. New clients
+                    # always resolve the repository from task and configuration IDs.
+                    repo = body.get("repo") or ""
+                    secret_id = body.get("gitCredentialId")
                 if secret_id:
                     secret = find_by_id(state.get("secrets", []), secret_id)
                     if secret:
                         require_actor_asset_access(state, actor, "secret.view", secret, "读取")
-                branches = list_repository_branches(body.get("repo") or "", body.get("gitCredentialId"))
+                branches = list_repository_branches(repo, secret_id)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return

@@ -3655,18 +3655,12 @@ function deployConfigsForTask(task) {
   return normalizeDeployConfigs(task?.deployConfigs, task).filter((config) => canAccessDeployConfig(config, task));
 }
 
-function deployConfigById(task, deployConfigId) {
-  const configs = deployConfigsForTask(task);
-  if (deployConfigId) {
-    return configs.find((config) => String(config.id) === String(deployConfigId)) || null;
-  }
-  return configs[0] || null;
-}
-
-function taskRepoForDeployConfig(task, deployConfigId = "") {
-  const config = deployConfigById(task, deployConfigId);
-  if (!config) throw new Error("所选发布配置不存在或已被删除，请刷新页面后重试");
-  return config.repo || task?.repo || "";
+function branchRequestPayload(task, deployConfigId) {
+  return {
+    actor: state.currentUser?.username || "system",
+    taskId: task.id,
+    deployConfigId,
+  };
 }
 
 function branchOptionsHtml(branches) {
@@ -3719,11 +3713,10 @@ async function openBranchDialog(taskId) {
   branchDialog.showModal();
 
   try {
-    const repo = taskRepoForDeployConfig(task, branchDeployConfigSelect.value);
     const response = await fetch("/api/repositories/branches", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ actor: state.currentUser?.username || "system", repo, gitCredentialId: task.gitCredentialId || "" }),
+      body: JSON.stringify(branchRequestPayload(task, branchDeployConfigSelect.value)),
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "读取仓库分支失败");
@@ -3741,11 +3734,10 @@ async function openBranchDialog(taskId) {
 async function loadBranchesIntoSelect(task, selectElement, deployConfigId = "") {
   selectElement.innerHTML = "";
   selectElement.disabled = true;
-  const repo = taskRepoForDeployConfig(task, deployConfigId);
   const response = await fetch("/api/repositories/branches", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ actor: state.currentUser?.username || "system", repo, gitCredentialId: task.gitCredentialId || "" }),
+    body: JSON.stringify(branchRequestPayload(task, deployConfigId)),
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "读取仓库分支失败");
