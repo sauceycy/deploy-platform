@@ -537,6 +537,7 @@ function normalizeDeployConfig(config = {}, task = {}) {
     name: String(config.name || config.project || "默认配置").trim() || "默认配置",
     project: String(config.project || "").trim(),
     env: String(config.env || task.env || "test").trim() || "test",
+    repo: String(config.repo || "").trim(),
     deploymentName: String(config.deploymentName || task.name || "").trim(),
     buildCommand: String(config.buildCommand ?? "").trim(),
     artifactPath: String(config.artifactPath ?? "").trim(),
@@ -569,6 +570,7 @@ function normalizeDeployConfigs(configs, task = {}) {
         id: "default",
         name: "默认配置",
         env: task.env || "test",
+        repo: "",
         deploymentName: task.name || "",
         buildCommand: "",
         artifactPath: "",
@@ -2313,6 +2315,7 @@ function renderDeployConfigView() {
           config.name,
           config.project,
           config.env,
+          config.repo,
           config.deploymentName,
           config.buildCommand,
           config.artifactPath,
@@ -2335,6 +2338,7 @@ function renderDeployConfigView() {
   deployConfigBody.innerHTML = pageData.rows
     .map(({ task, config }) => {
       const isPages = normalizeDeployRule(task.deployRule) === "cf_pages";
+      const configRepo = config.repo || task.repo || "";
       const clustersText = isPages ? "Cloudflare Pages / 本机部署" : (config.clusters || []).map((cluster) => `${cluster.name}/${cluster.namespace || "default"}`).join("、") || "未绑定集群";
       const buildText = isPages ? config.pagesDeployCommand || task.pagesDeployCommand || defaultPagesDeployCommand(config.pagesPackageManager || task.pagesPackageManager || "npm") : normalizeAppType(task.appType) === "frontend" ? config.buildCommand || task.buildCommand || "未设置编译命令" : "";
       return `
@@ -2348,6 +2352,7 @@ function renderDeployConfigView() {
           </div>
           <div class="cluster-meta">
             <span>集群：${escapeHtml(clustersText)}</span>
+            ${configRepo ? `<span>Git：${escapeHtml(configRepo)}</span>` : ""}
             ${buildText ? `<span>${isPages ? "部署" : "编译"}：${escapeHtml(buildText)}</span>` : ""}
             <span>最近发布：${escapeHtml(task.lastDeployConfigId === config.id ? task.lastRun || "未发布" : "未发布")}</span>
           </div>
@@ -3076,6 +3081,10 @@ function deployConfigCardHtml(config, index) {
             <span>环境</span>
             <input data-deploy-config-field="env" value="${escapeHtml(config.env || "test")}" />
           </label>
+          <label class="wide-field">
+            <span>Git 仓库</span>
+            <input data-deploy-config-field="repo" value="${escapeHtml(config.repo || "")}" placeholder="可选；不填使用任务仓库" />
+          </label>
           ${
             isPages
               ? ""
@@ -3478,6 +3487,7 @@ function currentDeployConfigSnapshot() {
       id: `cfg-${Date.now()}`,
       name: `${env}-${name}`,
       env,
+      repo: baseConfig.repo || "",
       deploymentName: name,
       buildCommand: baseConfig.buildCommand || formValue("buildCommand"),
       artifactPath: baseConfig.artifactPath || formValue("artifactPath"),
@@ -3645,6 +3655,16 @@ function deployConfigsForTask(task) {
   return normalizeDeployConfigs(task?.deployConfigs, task).filter((config) => canAccessDeployConfig(config, task));
 }
 
+function deployConfigById(task, deployConfigId) {
+  const configs = deployConfigsForTask(task);
+  return configs.find((config) => String(config.id) === String(deployConfigId)) || configs[0] || null;
+}
+
+function taskRepoForDeployConfig(task, deployConfigId = "") {
+  const config = deployConfigById(task, deployConfigId);
+  return config?.repo || task?.repo || "";
+}
+
 function branchOptionsHtml(branches) {
   return branches.map((branch) => `<option value="${escapeHtml(branch)}">${escapeHtml(branch)}</option>`).join("");
 }
@@ -3696,10 +3716,11 @@ async function openBranchDialog(taskId) {
   branchDialog.showModal();
 
   try {
+    const repo = taskRepoForDeployConfig(task, branchDeployConfigSelect.value);
     const response = await fetch("/api/repositories/branches", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ actor: state.currentUser?.username || "system", repo: task.repo, gitCredentialId: task.gitCredentialId || "" }),
+      body: JSON.stringify({ actor: state.currentUser?.username || "system", repo, gitCredentialId: task.gitCredentialId || "" }),
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "读取仓库分支失败");
@@ -3714,13 +3735,14 @@ async function openBranchDialog(taskId) {
   }
 }
 
-async function loadBranchesIntoSelect(task, selectElement) {
+async function loadBranchesIntoSelect(task, selectElement, deployConfigId = "") {
   selectElement.innerHTML = "";
   selectElement.disabled = true;
+  const repo = taskRepoForDeployConfig(task, deployConfigId);
   const response = await fetch("/api/repositories/branches", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ actor: state.currentUser?.username || "system", repo: task.repo, gitCredentialId: task.gitCredentialId || "" }),
+    body: JSON.stringify({ actor: state.currentUser?.username || "system", repo, gitCredentialId: task.gitCredentialId || "" }),
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "读取仓库分支失败");
@@ -3746,6 +3768,19 @@ function closeBatchDialog() {
 function closeScheduleDialog() {
   if (scheduleDialog.open) scheduleDialog.close();
   scheduleForm.reset();
+}
+
+async function reloadBranchOptionsForConfig(task, branchSelectElement, deployConfigId, statusElement = null) {
+  if (statusElement) statusElement.textContent = "正在读取仓库分支...";
+  try {
+    const branches = await loadBranchesIntoSelect(task, branchSelectElement, deployConfigId);
+    if (statusElement) statusElement.textContent = `已读取 ${branches.length} 个分支`;
+    return true;
+  } catch (error) {
+    branchSelectElement.innerHTML = `<option>${escapeHtml(error.message)}</option>`;
+    if (statusElement) statusElement.textContent = error.message;
+    return false;
+  }
 }
 
 async function runTask(taskId, branch) {
@@ -3829,7 +3864,7 @@ async function openBatchDialog(taskIds) {
         configSelect.value = task.lastDeployConfigId;
       }
       try {
-        await loadBranchesIntoSelect(task, select);
+        await loadBranchesIntoSelect(task, select, configSelect.value);
       } catch (error) {
         failed += 1;
         select.innerHTML = `<option>${error.message}</option>`;
@@ -3890,7 +3925,7 @@ async function openScheduleDialog(taskId) {
   scheduleStatus.textContent = "正在读取仓库分支...";
   scheduleDialog.showModal();
   try {
-    const branches = await loadBranchesIntoSelect(task, scheduleBranchSelect);
+    const branches = await loadBranchesIntoSelect(task, scheduleBranchSelect, scheduleDeployConfigSelect.value);
     scheduleStatus.textContent = `已读取 ${branches.length} 个分支`;
     confirmScheduleDeploy.disabled = false;
   } catch (error) {
@@ -5137,6 +5172,30 @@ scheduleForm.addEventListener("submit", saveSchedule);
 branchForm.addEventListener("submit", (event) => {
   event.preventDefault();
   runTask(branchForm.elements.taskId.value, branchForm.elements.branch.value);
+});
+branchDeployConfigSelect.addEventListener("change", async () => {
+  const task = tasks.find((item) => String(item.id) === String(branchForm.elements.taskId.value));
+  if (!task) return;
+  confirmBranchDeploy.disabled = true;
+  const ok = await reloadBranchOptionsForConfig(task, branchSelect, branchDeployConfigSelect.value, branchStatus);
+  confirmBranchDeploy.disabled = !ok;
+});
+scheduleDeployConfigSelect.addEventListener("change", async () => {
+  const task = tasks.find((item) => String(item.id) === String(scheduleForm.elements.taskId.value));
+  if (!task) return;
+  confirmScheduleDeploy.disabled = true;
+  const ok = await reloadBranchOptionsForConfig(task, scheduleBranchSelect, scheduleDeployConfigSelect.value, scheduleStatus);
+  confirmScheduleDeploy.disabled = !ok;
+});
+batchTaskList.addEventListener("change", async (event) => {
+  const configSelect = event.target.closest("[data-batch-config]");
+  if (!configSelect) return;
+  const task = tasks.find((item) => String(item.id) === String(configSelect.dataset.batchConfig));
+  const branchSelectElement = batchTaskList.querySelector(`[data-batch-branch="${configSelect.dataset.batchConfig}"]`);
+  if (!task || !branchSelectElement) return;
+  confirmBatchDeploy.disabled = true;
+  const ok = await reloadBranchOptionsForConfig(task, branchSelectElement, configSelect.value);
+  confirmBatchDeploy.disabled = !ok || Array.from(batchTaskList.querySelectorAll("[data-batch-branch]")).some((select) => select.disabled);
 });
 
 languageSelect.addEventListener("change", (event) => {

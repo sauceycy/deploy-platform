@@ -263,6 +263,7 @@ def normalize_deploy_config(config, task=None, index=0):
         "name": name,
         "project": str(config.get("project") or "").strip(),
         "env": str(config.get("env") or task.get("env") or "test").strip() or "test",
+        "repo": str(config.get("repo") or "").strip(),
         "deploymentName": str(config.get("deploymentName") or config.get("appName") or task.get("name") or "").strip(),
         "buildCommand": str(config.get("buildCommand") or "").strip(),
         "artifactPath": str(config.get("artifactPath") or "").strip(),
@@ -292,6 +293,7 @@ def normalize_deploy_configs(configs, task=None):
                 "id": "default",
                 "name": "默认配置",
                 "env": task.get("env") or "test",
+                "repo": "",
                 "deploymentName": task.get("name") or "",
                 "buildCommand": "",
                 "artifactPath": "",
@@ -1439,14 +1441,13 @@ def node_dependency_cache_name(task, src_dir):
     except ValueError:
         return ""
     package_json = app_dir / "package.json"
-    if not package_json.exists():
-        return ""
 
     fingerprint = hashlib.sha256()
     fingerprint.update(str(task.get("repo") or "").encode("utf-8"))
     fingerprint.update(relative_workdir.encode("utf-8"))
     fingerprint.update(str(task.get("sdk") or "").encode("utf-8"))
-    fingerprint.update(package_json.read_bytes())
+    if package_json.exists():
+        fingerprint.update(package_json.read_bytes())
     for filename in NODE_LOCK_FILES:
         lock_file = app_dir / filename
         if lock_file.exists():
@@ -1559,34 +1560,45 @@ def node_command_installs_dependencies(command):
     return bool(re.search(r"(^|[;&|]\s*)(npm|pnpm|yarn)\s+(ci|install|i|add)\b", str(command or "")))
 
 
-def node_dependency_install_command(task, src_dir):
-    if task_app_type(task) != "frontend" or not is_node_task(task) or node_command_installs_dependencies(task.get("_rawCommand") or ""):
+def node_dependency_install_script(task, command):
+    if task_app_type(task) != "frontend" or not is_node_task(task) or node_command_installs_dependencies(command):
         return ""
-    app_dir = (Path(src_dir).resolve() / (task.get("workdir") or ".")).resolve()
-    if not (app_dir / "package.json").exists():
-        return ""
-    if (app_dir / "pnpm-lock.yaml").exists():
-        return "pnpm install --frozen-lockfile"
-    if (app_dir / "yarn.lock").exists():
-        return "yarn install --frozen-lockfile || yarn install --immutable"
-    if (app_dir / "package-lock.json").exists() or (app_dir / "npm-shrinkwrap.json").exists():
-        return "npm ci --prefer-offline --no-audit --no-fund"
-    return "npm install --prefer-offline --no-audit --no-fund"
+    return """if [ -f package.json ]; then
+  DEP_HASH_FILES="package.json"
+  for DEP_LOCK_FILE in package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock; do
+    if [ -f "$DEP_LOCK_FILE" ]; then
+      DEP_HASH_FILES="$DEP_HASH_FILES $DEP_LOCK_FILE"
+    fi
+  done
+  CURRENT_DEP_HASH="$(cat $DEP_HASH_FILES 2>/dev/null | sha256sum | awk '{print $1}')"
+  if [ -f node_modules/.deploy-platform-deps.hash ] && [ "$(cat node_modules/.deploy-platform-deps.hash 2>/dev/null)" = "$CURRENT_DEP_HASH" ]; then
+    echo "前端依赖缓存命中，跳过依赖安装"
+  else
+    echo "前端依赖缓存未命中或依赖已变更，自动准备依赖"
+    if [ -f pnpm-lock.yaml ]; then
+      pnpm install --frozen-lockfile
+    elif [ -f yarn.lock ]; then
+      yarn install --frozen-lockfile || yarn install --immutable
+    elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+      npm ci --prefer-offline --no-audit --no-fund
+    else
+      npm install --prefer-offline --no-audit --no-fund
+    fi
+    mkdir -p node_modules
+    printf "%s" "$CURRENT_DEP_HASH" > node_modules/.deploy-platform-deps.hash
+  fi
+else
+  echo "当前工作目录未检测到 package.json，跳过前端依赖自动准备"
+fi"""
 
 
 def with_frontend_dependency_prepare(task, command, src_dir):
     if task_app_type(task) != "frontend" or not is_node_task(task):
         return command, False
-    install_task = {**task, "_rawCommand": command}
-    install_command = node_dependency_install_command(install_task, src_dir)
-    if not install_command:
+    install_script = node_dependency_install_script(task, command)
+    if not install_script:
         return command, False
-    prepared = f"""if [ -d node_modules ] && [ "$(ls -A node_modules 2>/dev/null)" ]; then
-  echo "前端依赖缓存命中，跳过依赖安装"
-else
-  echo "前端依赖缓存未命中，自动准备依赖"
-  {install_command}
-fi
+    prepared = f"""{install_script}
 {command}"""
     return prepared, True
 
@@ -2310,6 +2322,7 @@ def effective_task_for_deploy_config(task, deploy_config):
     effective = copy.deepcopy(task)
     effective["deployConfigId"] = deploy_config.get("id")
     effective["deployConfigName"] = deploy_config.get("name")
+    effective["repo"] = deploy_config.get("repo") or task.get("repo") or ""
     effective["deploymentName"] = deploy_config.get("deploymentName") or task.get("name")
     effective["env"] = deploy_config.get("env") or task.get("env")
     effective["buildCommand"] = deploy_config.get("buildCommand") or task.get("buildCommand") or ""
