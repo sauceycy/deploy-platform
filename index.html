@@ -280,7 +280,7 @@
             <div class="management-toolbar">
               <label class="search-box">
                 <i data-lucide="search"></i>
-                <input id="templateSearch" type="search" placeholder="搜索模板、SDK、命令、路径" />
+                <input id="templateSearch" type="search" placeholder="搜索模板、Git 仓库、SDK、命令、路径" />
               </label>
               <select id="templateCategoryFilter" aria-label="模板分类"></select>
             </div>
@@ -849,6 +849,10 @@
           <label>
             <span>编译工作路径</span>
             <input name="workdir" placeholder="." />
+          </label>
+          <label class="wide-field">
+            <span>Git 仓库</span>
+            <input name="repo" placeholder="可选；填写后创建任务时优先使用该仓库" />
           </label>
           <label class="wide-field">
             <span>默认构建命令</span>

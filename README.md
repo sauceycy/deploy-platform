@@ -343,6 +343,14 @@ mvn package -Dmaven.test.skip=true -pl ruoyi-admin -am
 
 平台自动生成 Java 镜像时，只会把最终 `app.jar` 放入 Docker build context，不再把整个代码仓库发送给 Docker，减少大仓库打镜像耗时。
 
+Node 前端和 CF Pages 发布会自动启用依赖缓存。平台会持久化 `/root/.npm`、Corepack、pnpm store，并按 `Git 仓库 + 工作路径 + SDK + package.json + 锁文件` 为前端项目缓存 `node_modules`。如果发布命令里没有 `npm install` / `npm ci` / `pnpm install` / `yarn install`，平台会先检查缓存：命中时跳过安装，未命中时按锁文件自动安装一次依赖。因此前端发布命令可以只保留构建和部署，例如：
+
+```text
+npm run build:web && npm run pages:deploy:test
+```
+
+如果你仍然在命令里显式写安装步骤，平台不会额外插入自动安装；已有的 npm/pnpm 下载缓存仍会生效。
+
 Java 任务可以在「运行配置」填写「JVM 启动参数」，例如：
 
 ```text

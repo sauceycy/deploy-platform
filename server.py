@@ -1426,7 +1426,39 @@ def docker_env_args(env):
     return args
 
 
-def build_cache_config(task):
+NODE_LOCK_FILES = ("package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock")
+
+
+def node_dependency_cache_name(task, src_dir):
+    if task_app_type(task) != "frontend" or not is_node_task(task) or not src_dir:
+        return ""
+    src_root = Path(src_dir).resolve()
+    app_dir = (src_root / (task.get("workdir") or ".")).resolve()
+    try:
+        relative_workdir = app_dir.relative_to(src_root).as_posix() or "."
+    except ValueError:
+        return ""
+    package_json = app_dir / "package.json"
+    if not package_json.exists():
+        return ""
+
+    fingerprint = hashlib.sha256()
+    fingerprint.update(str(task.get("repo") or "").encode("utf-8"))
+    fingerprint.update(relative_workdir.encode("utf-8"))
+    fingerprint.update(str(task.get("sdk") or "").encode("utf-8"))
+    fingerprint.update(package_json.read_bytes())
+    for filename in NODE_LOCK_FILES:
+        lock_file = app_dir / filename
+        if lock_file.exists():
+            fingerprint.update(filename.encode("utf-8"))
+            fingerprint.update(lock_file.read_bytes())
+
+    repo_hint = safe_name(Path(str(task.get("repo") or task.get("name") or "frontend")).stem)
+    workdir_hint = safe_name(relative_workdir)
+    return f"frontend-node-modules/{repo_hint}-{workdir_hint}-{fingerprint.hexdigest()[:20]}"
+
+
+def build_cache_config(task, src_dir=None):
     language = str(task.get("language") or "").lower()
     sdk = str(task.get("sdk") or "").lower()
     cache_dir = DATA_DIR / "cache"
@@ -1449,6 +1481,9 @@ def build_cache_config(task):
         env["npm_config_cache"] = "/root/.npm"
         env["COREPACK_HOME"] = "/root/.cache/corepack"
         env["npm_config_store_dir"] = "/root/.pnpm-store"
+        node_modules_cache = node_dependency_cache_name(task, src_dir)
+        if node_modules_cache:
+            add_cache(node_modules_cache, f"/workspace/{task.get('workdir') or '.'}/node_modules", "前端 node_modules")
     if language == "golang" or sdk.startswith("go"):
         add_cache("go-mod", "/go/pkg/mod", "Go modules")
         add_cache("go-build", "/root/.cache/go-build", "Go build")
@@ -1520,6 +1555,42 @@ def is_node_task(task):
     return str(task.get("language") or "").lower() == "node" or str(task.get("sdk") or "").lower().startswith("node")
 
 
+def node_command_installs_dependencies(command):
+    return bool(re.search(r"(^|[;&|]\s*)(npm|pnpm|yarn)\s+(ci|install|i|add)\b", str(command or "")))
+
+
+def node_dependency_install_command(task, src_dir):
+    if task_app_type(task) != "frontend" or not is_node_task(task) or node_command_installs_dependencies(task.get("_rawCommand") or ""):
+        return ""
+    app_dir = (Path(src_dir).resolve() / (task.get("workdir") or ".")).resolve()
+    if not (app_dir / "package.json").exists():
+        return ""
+    if (app_dir / "pnpm-lock.yaml").exists():
+        return "pnpm install --frozen-lockfile"
+    if (app_dir / "yarn.lock").exists():
+        return "yarn install --frozen-lockfile || yarn install --immutable"
+    if (app_dir / "package-lock.json").exists() or (app_dir / "npm-shrinkwrap.json").exists():
+        return "npm ci --prefer-offline --no-audit --no-fund"
+    return "npm install --prefer-offline --no-audit --no-fund"
+
+
+def with_frontend_dependency_prepare(task, command, src_dir):
+    if task_app_type(task) != "frontend" or not is_node_task(task):
+        return command, False
+    install_task = {**task, "_rawCommand": command}
+    install_command = node_dependency_install_command(install_task, src_dir)
+    if not install_command:
+        return command, False
+    prepared = f"""if [ -d node_modules ] && [ "$(ls -A node_modules 2>/dev/null)" ]; then
+  echo "前端依赖缓存命中，跳过依赖安装"
+else
+  echo "前端依赖缓存未命中，自动准备依赖"
+  {install_command}
+fi
+{command}"""
+    return prepared, True
+
+
 def sdk_command_for_task(task, command):
     if is_node_task(task) and "corepack" not in command:
         return f"corepack enable && {command}"
@@ -1527,11 +1598,14 @@ def sdk_command_for_task(task, command):
 
 
 def run_sdk_command(execution_id, task, command, src_dir, build_env):
-    cache_mounts, cache_env, cache_labels = build_cache_config(task)
+    cache_mounts, cache_env, cache_labels = build_cache_config(task, src_dir)
     effective_build_env = {**cache_env, **build_env}
     if cache_labels:
         append_log(execution_id, f"已启用构建缓存: {', '.join(cache_labels)}")
-    effective_command = sdk_command_for_task(task, command)
+    effective_command, dependency_prepare_enabled = with_frontend_dependency_prepare(task, command, src_dir)
+    if dependency_prepare_enabled:
+        append_log(execution_id, "已启用前端依赖自动准备：缓存命中时跳过安装，缓存未命中时自动安装一次。")
+    effective_command = sdk_command_for_task(task, effective_command)
     if effective_command != command:
         append_log(execution_id, "已为 Node 构建启用 Corepack，支持 package.json 脚本中调用 pnpm/yarn。")
     docker_src_dir = HOST_WORKSPACE_DIR / execution_id / "src"

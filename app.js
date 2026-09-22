@@ -2464,7 +2464,7 @@ function renderTemplateView() {
   );
   const visibleTemplates = accessibleTemplates.filter((template) => {
     const matchedCategory = filters.category === "all" || filters.category === `lang:${template.language}` || filters.category === `rule:${template.deployRule || "k8s"}`;
-    const matchedSearch = textIncludes([template.name, assetOrganizationLabel(template), template.language, template.sdk, template.command, template.workdir, template.artifactPath, template.mavenRepoUrl, template.mavenSnapshotsRepoUrl, template.pagesDeployCommand], query);
+    const matchedSearch = textIncludes([template.name, assetOrganizationLabel(template), template.repo, template.language, template.sdk, template.command, template.workdir, template.artifactPath, template.mavenRepoUrl, template.mavenSnapshotsRepoUrl, template.pagesDeployCommand], query);
     return matchedCategory && matchedSearch;
   });
   const pageData = paginateRows("templates", visibleTemplates);
@@ -2478,10 +2478,10 @@ function renderTemplateView() {
       (template) => `
       <div class="simple-row">
         <div>
-          <strong>${template.name}</strong>
-          <span>${assetOrganizationLabel(template)} · ${deployRuleLabel(template.deployRule || "k8s")} · ${appTypeLabel(template.appType || "backend")} · ${languageLabel(template.language)} · ${template.sdk} · ${template.command}</span>
+          <strong>${escapeHtml(template.name)}</strong>
+          <span>${escapeHtml(assetOrganizationLabel(template))} · ${escapeHtml(deployRuleLabel(template.deployRule || "k8s"))} · ${escapeHtml(appTypeLabel(template.appType || "backend"))} · ${escapeHtml(languageLabel(template.language))} · ${escapeHtml(template.sdk)} · ${template.repo ? `Git ${escapeHtml(template.repo)} · ` : ""}${escapeHtml(template.command)}</span>
         </div>
-        <span class="language-chip ${template.language}">${languageLabel(template.language)}</span>
+        <span class="language-chip ${escapeHtml(template.language)}">${escapeHtml(languageLabel(template.language))}</span>
       </div>
     `,
     )
@@ -2507,6 +2507,7 @@ function applyTaskTemplate(templateId) {
   };
   setValue("deployRule", template.deployRule || "k8s");
   setValue("appType", template.appType || "backend");
+  setValue("repo", template.repo);
   setValue("workdir", template.workdir || ".");
   setValue("language", template.language || "java");
   updateSdkOptions(taskForm.elements.language.value || "java", true);
@@ -4168,6 +4169,7 @@ async function saveTemplate(event) {
     language: formData.get("language"),
     sdk: formData.get("sdk"),
     command: formData.get("command"),
+    repo: String(formData.get("repo") || "").trim(),
     workdir: formData.get("workdir") || ".",
     artifactPath: formData.get("artifactPath") || "",
     containerPort: formData.get("containerPort") || "",
