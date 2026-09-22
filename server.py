@@ -227,6 +227,21 @@ def parse_time_text(value):
         return None
 
 
+def deploy_config_repository_override(value, task):
+    repo = str(value or "").strip()
+    task_repo = str((task or {}).get("repo") or "").strip().rstrip("/")
+    if not repo or not task_repo:
+        return repo
+
+    # A Git repository cannot validly continue after another repository's .git
+    # suffix. Treat this historical concatenation as an empty configuration
+    # override so the task's original repository is used unchanged.
+    suffix = repo[len(task_repo) :] if repo.startswith(task_repo) else ""
+    if suffix and suffix != "/" and task_repo.lower().endswith(".git"):
+        return ""
+    return repo
+
+
 def normalize_deploy_config(config, task=None, index=0):
     config = config if isinstance(config, dict) else {}
     task = task if isinstance(task, dict) else {}
@@ -263,7 +278,7 @@ def normalize_deploy_config(config, task=None, index=0):
         "name": name,
         "project": str(config.get("project") or "").strip(),
         "env": str(config.get("env") or task.get("env") or "test").strip() or "test",
-        "repo": str(config.get("repo") or "").strip(),
+        "repo": deploy_config_repository_override(config.get("repo"), task),
         "deploymentName": str(config.get("deploymentName") or config.get("appName") or task.get("name") or "").strip(),
         "buildCommand": str(config.get("buildCommand") or "").strip(),
         "artifactPath": str(config.get("artifactPath") or "").strip(),
@@ -2326,7 +2341,7 @@ def effective_task_for_deploy_config(task, deploy_config):
     effective["deployConfigName"] = deploy_config.get("name")
     # A repository configured on the deployment config is an explicit override.
     # An empty override must preserve the task's default repository byte-for-byte.
-    effective["repo"] = str(deploy_config.get("repo") or "").strip() or task.get("repo") or ""
+    effective["repo"] = deploy_config_repository_override(deploy_config.get("repo"), task) or task.get("repo") or ""
     effective["deploymentName"] = deploy_config.get("deploymentName") or task.get("name")
     effective["env"] = deploy_config.get("env") or task.get("env")
     effective["buildCommand"] = deploy_config.get("buildCommand") or task.get("buildCommand") or ""
@@ -3958,7 +3973,10 @@ class Handler(SimpleHTTPRequestHandler):
                     actor_user = find_user(state, actor)
                     if not user_can_access_deploy_config(state, actor_user, deploy_config):
                         raise ValueError(f"当前用户组无权读取发布配置 {deploy_config.get('name')}")
-                    repo = str(deploy_config.get("repo") or "").strip() or task.get("repo") or ""
+                    # Keep branch discovery on the exact same repository choice
+                    # as the queued deployment: only this configuration may
+                    # override the task repository, and an invalid append is ignored.
+                    repo = deploy_config_repository_override(deploy_config.get("repo"), task) or task.get("repo") or ""
                     secret_id = task.get("gitCredentialId")
                 else:
                     # Keep the endpoint compatible with older clients. New clients
