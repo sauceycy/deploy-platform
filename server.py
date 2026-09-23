@@ -1593,13 +1593,16 @@ def node_dependency_install_script(task, command):
   else
     echo "前端依赖缓存未命中或依赖已变更，自动准备依赖"
     if [ -f pnpm-lock.yaml ]; then
-      pnpm install --frozen-lockfile
+      pnpm install --frozen-lockfile || exit $?
     elif [ -f yarn.lock ]; then
-      yarn install --frozen-lockfile || yarn install --immutable
+      (yarn install --frozen-lockfile || yarn install --immutable) || exit $?
     elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
-      npm ci --prefer-offline --no-audit --no-fund
+      if ! npm ci --prefer-offline --no-audit --no-fund; then
+        echo "npm ci 检测到锁文件与 package.json 不一致，回退到 npm install；请随后更新并提交 package-lock.json。"
+        npm install --prefer-offline --no-audit --no-fund || exit $?
+      fi
     else
-      npm install --prefer-offline --no-audit --no-fund
+      npm install --prefer-offline --no-audit --no-fund || exit $?
     fi
     mkdir -p node_modules
     printf "%s" "$CURRENT_DEP_HASH" > node_modules/.deploy-platform-deps.hash
