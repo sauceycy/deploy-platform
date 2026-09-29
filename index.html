@@ -1351,11 +1351,17 @@
         </label>
         <label>
           <span>分支</span>
-          <select name="branch" id="branchSelect" required></select>
+          <div class="select-search-control">
+            <input id="branchSearch" type="search" placeholder="搜索分支" autocomplete="off" disabled />
+            <select name="branch" id="branchSelect" required></select>
+          </div>
         </label>
         <label>
           <span>发布配置</span>
-          <select name="deployConfigId" id="branchDeployConfigSelect" required></select>
+          <div class="select-search-control">
+            <input id="branchDeployConfigSearch" type="search" placeholder="搜索发布配置" autocomplete="off" disabled />
+            <select name="deployConfigId" id="branchDeployConfigSelect" required></select>
+          </div>
         </label>
         <p class="form-hint" id="branchStatus">正在读取仓库分支...</p>
         <div class="drawer-actions">

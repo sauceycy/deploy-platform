@@ -2254,6 +2254,15 @@ svg {
   font-weight: 700;
 }
 
+.select-search-control {
+  display: grid;
+  gap: 6px;
+}
+
+.select-search-control input[type="search"] {
+  min-height: 34px;
+}
+
 .compact-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }

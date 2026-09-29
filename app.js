@@ -230,7 +230,9 @@ const clusterNodeEditor = document.getElementById("clusterNodeEditor");
 const branchDialog = document.getElementById("branchDialog");
 const branchForm = document.getElementById("branchForm");
 const branchSelect = document.getElementById("branchSelect");
+const branchSearch = document.getElementById("branchSearch");
 const branchDeployConfigSelect = document.getElementById("branchDeployConfigSelect");
+const branchDeployConfigSearch = document.getElementById("branchDeployConfigSearch");
 const branchStatus = document.getElementById("branchStatus");
 const confirmBranchDeploy = document.getElementById("confirmBranchDeploy");
 const branchDeployText = document.getElementById("branchDeployText");
@@ -3667,6 +3669,37 @@ function branchOptionsHtml(branches) {
   return branches.map((branch) => `<option value="${escapeHtml(branch)}">${escapeHtml(branch)}</option>`).join("");
 }
 
+function setSearchableSelectOptions(selectElement, searchElement, items, selectedValue = "") {
+  const normalizedItems = items
+    .map((item) => ({ value: String(item?.value ?? ""), label: String(item?.label ?? item?.value ?? "") }))
+    .filter((item) => item.value);
+  selectElement._searchableOptions = normalizedItems;
+  searchElement.value = "";
+  searchElement.disabled = normalizedItems.length === 0;
+  renderSearchableSelectOptions(selectElement, searchElement, selectedValue);
+}
+
+function renderSearchableSelectOptions(selectElement, searchElement, selectedValue = selectElement.value) {
+  const query = searchElement.value.trim().toLowerCase();
+  const options = (selectElement._searchableOptions || []).filter((item) => item.label.toLowerCase().includes(query));
+  if (!options.length) {
+    selectElement.innerHTML = `<option value="">未找到匹配项</option>`;
+    selectElement.disabled = true;
+    return;
+  }
+  selectElement.innerHTML = options.map((item) => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`).join("");
+  selectElement.disabled = false;
+  if (options.some((item) => item.value === selectedValue)) selectElement.value = selectedValue;
+}
+
+function clearSearchableSelect(selectElement, searchElement) {
+  selectElement._searchableOptions = [];
+  selectElement.innerHTML = "";
+  selectElement.disabled = true;
+  searchElement.value = "";
+  searchElement.disabled = true;
+}
+
 function selectPreferredBranch(task, branchSelectElement, branches = null) {
   if (!branchSelectElement) return;
   const preferredBranch = task?.lastBranch || "";
@@ -3680,13 +3713,22 @@ function selectPreferredBranch(task, branchSelectElement, branches = null) {
   }
 }
 
-function renderDeployConfigSelect(task, selectElement) {
+function renderDeployConfigSelect(task, selectElement, searchElement = null) {
   const configs = deployConfigsForTask(task);
-  selectElement.innerHTML = configs.map((config) => `<option value="${escapeHtml(config.id)}">${escapeHtml(config.name || "默认配置")}</option>`).join("");
   // Starting from the base configuration prevents a previous special release
   // from silently switching the task to a repository-specific configuration.
-  if (configs[0]) selectElement.value = configs[0].id;
-  selectElement.disabled = configs.length === 0;
+  if (searchElement) {
+    setSearchableSelectOptions(
+      selectElement,
+      searchElement,
+      configs.map((config) => ({ value: config.id, label: config.name || "默认配置" })),
+      configs[0]?.id || "",
+    );
+  } else {
+    selectElement.innerHTML = configs.map((config) => `<option value="${escapeHtml(config.id)}">${escapeHtml(config.name || "默认配置")}</option>`).join("");
+    if (configs[0]) selectElement.value = configs[0].id;
+    selectElement.disabled = configs.length === 0;
+  }
   return configs;
 }
 
@@ -3701,13 +3743,12 @@ async function openBranchDialog(taskId) {
 
   branchForm.elements.taskId.value = task.id;
   branchForm.elements.taskName.value = task.name;
-  const deployConfigs = renderDeployConfigSelect(task, branchDeployConfigSelect);
+  const deployConfigs = renderDeployConfigSelect(task, branchDeployConfigSelect, branchDeployConfigSearch);
   if (!deployConfigs.length) {
     window.alert("当前用户组没有可发布的配置");
     return;
   }
-  branchSelect.innerHTML = "";
-  branchSelect.disabled = true;
+  clearSearchableSelect(branchSelect, branchSearch);
   confirmBranchDeploy.disabled = true;
   branchStatus.textContent = "正在读取仓库分支...";
   branchDialog.showModal();
@@ -3721,9 +3762,8 @@ async function openBranchDialog(taskId) {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "读取仓库分支失败");
     if (!result.branches.length) throw new Error("仓库没有可发布分支");
-    branchSelect.innerHTML = branchOptionsHtml(result.branches);
+    setSearchableSelectOptions(branchSelect, branchSearch, result.branches.map((branch) => ({ value: branch, label: branch })), task.lastBranch || "");
     selectPreferredBranch(task, branchSelect, result.branches);
-    branchSelect.disabled = false;
     confirmBranchDeploy.disabled = false;
     branchStatus.textContent = `已读取 ${result.branches.length} 个分支`;
   } catch (error) {
@@ -3765,10 +3805,14 @@ function closeScheduleDialog() {
   scheduleForm.reset();
 }
 
-async function reloadBranchOptionsForConfig(task, branchSelectElement, deployConfigId, statusElement = null) {
+async function reloadBranchOptionsForConfig(task, branchSelectElement, deployConfigId, statusElement = null, searchElement = null) {
   if (statusElement) statusElement.textContent = "正在读取仓库分支...";
   try {
     const branches = await loadBranchesIntoSelect(task, branchSelectElement, deployConfigId);
+    if (searchElement) {
+      setSearchableSelectOptions(branchSelectElement, searchElement, branches.map((branch) => ({ value: branch, label: branch })), branchSelectElement.value);
+      selectPreferredBranch(task, branchSelectElement, branches);
+    }
     if (statusElement) statusElement.textContent = `已读取 ${branches.length} 个分支`;
     return true;
   } catch (error) {
@@ -5164,11 +5208,18 @@ branchForm.addEventListener("submit", (event) => {
   event.preventDefault();
   runTask(branchForm.elements.taskId.value, branchForm.elements.branch.value);
 });
+branchSearch.addEventListener("input", () => {
+  renderSearchableSelectOptions(branchSelect, branchSearch);
+});
+branchDeployConfigSearch.addEventListener("input", () => {
+  renderSearchableSelectOptions(branchDeployConfigSelect, branchDeployConfigSearch);
+});
 branchDeployConfigSelect.addEventListener("change", async () => {
   const task = tasks.find((item) => String(item.id) === String(branchForm.elements.taskId.value));
   if (!task) return;
   confirmBranchDeploy.disabled = true;
-  const ok = await reloadBranchOptionsForConfig(task, branchSelect, branchDeployConfigSelect.value, branchStatus);
+  clearSearchableSelect(branchSelect, branchSearch);
+  const ok = await reloadBranchOptionsForConfig(task, branchSelect, branchDeployConfigSelect.value, branchStatus, branchSearch);
   confirmBranchDeploy.disabled = !ok;
 });
 scheduleDeployConfigSelect.addEventListener("change", async () => {
