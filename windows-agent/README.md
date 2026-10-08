@@ -235,3 +235,6 @@ foreach ($name in @('__init__.py', 'query_config.py', 'security.py')) {
 
 & "$release\.venv\Scripts\python.exe" -c "import python_mt5_sidecar as p, pkgutil; print('Package:', p.__file__); print('Modules:', ', '.join(m.name for m in pkgutil.iter_modules(p.__path__)))"
 ```
+```
+Get-Content -LiteralPath "$release\deploy\windows\inspect_runtime.py" -Raw
+```
