@@ -128,3 +128,13 @@ powershell.exe -ExecutionPolicy Bypass -File .\Initialize-Mt5Service.ps1 -Instal
 ```
 Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/sauceycy/deploy-platform/main/windows-agent/Install-Agent.ps1' -OutFile .\Install-Agent.ps1
 ```
+```
+$python = 'C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe'
+& $python -c "import json; json.load(open('config.json', encoding='utf-8-sig')); print('JSON OK')"
+```
+
+```
+Start-Service deploy-platform-windows-agent
+Get-Service deploy-platform-windows-agent
+Get-Content .\logs\*.err.log -Tail 40
+```
