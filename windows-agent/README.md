@@ -104,6 +104,6 @@ Agent 状态和任务日志：`stateDirectory`；业务 WinSW 日志：`InstallR
 
 
 ```
-powershell.exe -ExecutionPolicy Bypass -File .\Install-Agent.ps1 -Python 'C:\Python313\python.exe' -WinSW 'C:\Tools\WinSW-x64.exe'
-powershell.exe -ExecutionPolicy Bypass -File .\Initialize-Mt5Service.ps1 -InstallRoot 'C:\Users\Administrator\python-mt5-sidecar' -Python 'C:\Python313\python.exe' -WinSW 'C:\Tools\WinSW-x64.exe'
+powershell.exe -ExecutionPolicy Bypass -File .\Install-Agent.ps1 -Python 'C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe' -WinSW 'C:\Users\Administrator\AppData\Local\Programs\WinSW\WinSW-x64.exe'
+powershell.exe -ExecutionPolicy Bypass -File .\Initialize-Mt5Service.ps1 -InstallRoot 'C:\Users\Administrator\python-mt5-sidecar' -Python 'C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe' -WinSW 'C:\Users\Administrator\AppData\Local\Programs\WinSW\WinSW-x64.exe'
 ```
