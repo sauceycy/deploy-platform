@@ -224,3 +224,14 @@ foreach ($name in @('Start-Agent.cmd', 'Start-Agent.ps1', 'agent_check.py')) {
 }
 .\Start-Agent.cmd
 ```
+
+```
+$release = 'C:\Users\Administrator\python-mt5-sidecar\.deploy\releases\20261008-232155-192cabd0'
+
+foreach ($name in @('__init__.py', 'query_config.py', 'security.py')) {
+    $path = Join-Path $release "src\python_mt5_sidecar\$name"
+    Write-Host "$name exists=$(Test-Path -LiteralPath $path)"
+}
+
+& "$release\.venv\Scripts\python.exe" -c "import python_mt5_sidecar as p, pkgutil; print('Package:', p.__file__); print('Modules:', ', '.join(m.name for m in pkgutil.iter_modules(p.__path__)))"
+```
