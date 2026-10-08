@@ -206,12 +206,18 @@ try {
             }
         } catch { Write-Host 'Cannot read service state. Check Windows Services or Event Viewer.' }
     }
-    try { Show-Logs }
-    catch { Write-Host 'Cannot read WinSW logs. Check folder permissions or Windows Event Viewer.' -ForegroundColor Yellow }
-    Write-Host 'JSONDecodeError/Invalid escape: use C:/... paths in JSON.'
-    Write-Host 'PermissionError/Access denied: check service logon account access to Python, Agent folder and stateDirectory.'
-    Write-Host 'File lock error: another Agent instance may be running; do not delete its lock or database.'
-    Write-Host 'Error 1069: check the service logon account password and Log on as a service permission.'
+    if ($stage -eq 'Platform URL, server registration and Agent Token') {
+        Write-Host 'Platform preflight failed; the service startup step was not reached.' -ForegroundColor Yellow
+        Write-Host 'Check the platform domain proxy rules for /api/windows-agent/*. Skipping this check cannot restore platform connectivity.'
+    } elseif ($stage -in @('Existing Agent service', 'Generate WinSW service configuration', 'Register or repair Agent service', 'Start Agent and check for immediate process exit')) {
+        try { Show-Logs }
+        catch { Write-Host 'Cannot read WinSW logs. Check folder permissions or Windows Event Viewer.' -ForegroundColor Yellow }
+        if ($stage -eq 'Start Agent and check for immediate process exit') {
+            Write-Host 'Access denied: check service account access to Python, Agent folder and stateDirectory.'
+            Write-Host 'File lock error: another Agent instance may be running; do not delete its lock or database.'
+            Write-Host 'Error 1069: check the service account password and Log on as a service permission.'
+        }
+    }
 } finally {
     if ($Pause) { [void](Read-Host 'Press Enter to close') }
 }

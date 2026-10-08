@@ -133,6 +133,26 @@ class AgentStartupTests(unittest.TestCase):
         with patch.object(check, "urlopen", side_effect=URLError("secret connection details")):
             with self.assertRaisesRegex(check.CheckError, "DNS"):
                 check.check_platform(self.config)
+
+    def test_403_proxy_hints_do_not_echo_headers_or_response_body(self):
+        for headers, hint in (
+            ({"cf-mitigated": "challenge"}, "browser challenge"),
+            ({"CF-Ray": "private-ray-value"}, "passed through Cloudflare"),
+            ({"Content-Type": "text/html; charset=utf-8"}, "Response is HTML"),
+            ({}, "reverse-proxy"),
+        ):
+            with self.subTest(headers=headers):
+                body = io.BytesIO(b"private-test-token; private-response-value")
+                error = HTTPError("https://host", 403, "Forbidden", headers, body)
+                with patch.object(check, "urlopen", side_effect=error):
+                    with self.assertRaisesRegex(check.CheckError, hint) as failure:
+                        check.check_platform(self.config)
+                message = str(failure.exception)
+                self.assertIn("HTTP 401", message)
+                self.assertNotIn("private-test-token", message)
+                self.assertNotIn("private-ray-value", message)
+                self.assertNotIn("private-response-value", message)
+                self.assertTrue(body.closed)
         with patch.object(check, "urlopen", return_value=io.BytesIO(b"<html>Login</html>")):
             with self.assertRaisesRegex(check.CheckError, "non-JSON"):
                 check.check_platform(self.config)

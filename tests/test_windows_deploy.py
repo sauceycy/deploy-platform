@@ -81,6 +81,19 @@ class WindowsDeploymentTests(unittest.TestCase):
         self.assertIn("image: repo/demo:1", manifest)
         self.assertEqual(self.task["sdk"], "python3.13")
 
+    def test_heartbeat_distinguishes_unknown_server_wrong_token_and_success(self):
+        path = urlparse("/api/windows-agent/heartbeat")
+        body = {"cluster": "win-test", "instanceId": "win-01"}
+        wrong_token = self.handler(token="incorrect", body=body)
+        self.assertTrue(wrong_token.windows_post(path))
+        self.assertEqual(wrong_token.send_json.call_args.kwargs["status"], 401)
+        unknown = self.handler(body={**body, "cluster": "unregistered"})
+        self.assertTrue(unknown.windows_post(path))
+        self.assertEqual(unknown.send_json.call_args.kwargs["status"], 400)
+        accepted = self.handler(body=body)
+        self.assertTrue(accepted.windows_post(path))
+        accepted.send_json.assert_called_once_with({"ok": True})
+
     def test_claim_is_idempotent_and_does_not_take_over_running_task(self):
         self.enqueue()
         first = self.get("/api/windows-agent/tasks").send_json.call_args.args[0]["task"]

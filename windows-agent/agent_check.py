@@ -109,14 +109,23 @@ def check_platform(config):
         if not isinstance(result, dict) or result.get("ok") is not True:
             raise CheckError("Platform heartbeat returned an unexpected response; check platformUrl and reverse proxy")
     except HTTPError as error:
+        response_headers = error.headers or {}
+        proxy_hint = ""
+        if error.code == 403:
+            if response_headers.get("cf-mitigated", "").lower() == "challenge":
+                proxy_hint = " Cloudflare marked this response as a browser challenge; allow trusted Agent API traffic in the matching security rule."
+            elif response_headers.get("CF-Ray"):
+                proxy_hint = " Response passed through Cloudflare; inspect Cloudflare Security Events and Access logs to locate the rejection."
+            elif response_headers.get("Content-Type", "").split(";", 1)[0].strip().lower() == "text/html":
+                proxy_hint = " Response is HTML; check reverse-proxy access rules and browser-login protection."
         error.close()
         advice = {
             400: "Register this exact cluster name in the platform Cluster Management page",
             401: "agentToken must match the Token registered for this server",
-            403: "Check Cloudflare/WAF rules and service-account access to the platform",
+            403: "The project heartbeat route uses HTTP 401 for a wrong Token and HTTP 400 for an unregistered server. Check reverse-proxy, Cloudflare/WAF and Access policies for /api/windows-agent/heartbeat",
             404: "Update the platform to a version with Windows Agent routes and check platformUrl",
         }.get(error.code, "Check the platform service and reverse proxy")
-        raise CheckError(f"Platform heartbeat failed (HTTP {error.code}). {advice}.") from None
+        raise CheckError(f"Platform heartbeat failed (HTTP {error.code}). {advice}.{proxy_hint}") from None
     except (URLError, TimeoutError, OSError) as error:
         raise CheckError(f"Cannot connect to platform ({type(error).__name__}); check DNS, HTTPS certificate, proxy and firewall") from None
     except (ValueError, UnicodeError):
