@@ -505,6 +505,7 @@
               <select name="deployRule" id="deployRuleSelect">
                 <option value="k8s" selected>K8s 服务发布</option>
                 <option value="cf_pages">CF Pages 部署</option>
+                <option value="windows">Windows / WinSW 发布</option>
               </select>
             </label>
             <label>
@@ -657,9 +658,13 @@
           </div>
         </section>
 
-        <section class="form-section k8s-deploy-field">
+        <section class="form-section windows-deploy-field" hidden>
+          <h3>Windows / WinSW</h3>
+          <p class="form-hint">适用于 MT5 Sidecar：发布 ZIP 到已接入的 Windows Agent，由服务器安装锁定依赖并切换服务。安装目录、凭据和运行环境在服务器配置；“应用部署名”需与 Agent 本地应用名称一致。支持失败恢复和上一成功版本回滚。</p>
+        </section>
+        <section class="form-section agent-target-field">
           <div class="section-title-row">
-            <h3>多集群部署</h3>
+            <h3 id="agentTargetTitle">多集群部署</h3>
             <button class="mini-button" id="addCluster" type="button">
               <i data-lucide="plus"></i>
               <span>添加集群</span>

@@ -7,7 +7,7 @@ RUN apk add --no-cache bash curl docker-cli git kubectl openssh-client
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY index.html styles.css app.js server.py agent.py entrypoint.sh ./
+COPY index.html styles.css app.js server.py windows_deploy.py agent.py entrypoint.sh ./
 RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 80

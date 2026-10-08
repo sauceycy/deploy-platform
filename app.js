@@ -1037,7 +1037,9 @@ function renderExecutionSummary(execution) {
 function renderExecutionTimeline(execution) {
   const currentProgress = progressValue(execution);
   const isPages = normalizeDeployRule(execution?.deployRule) === "cf_pages";
-  const steps = isPages
+  const steps = normalizeDeployRule(execution?.deployRule) === "windows"
+    ? [["拉取代码", 10], ["打包产物", 40], ["Agent 部署", 86], ["发布完成", 100]]
+    : isPages
     ? [
         ["拉取代码", 10],
         ["CF Pages 部署", 55],
@@ -1198,10 +1200,12 @@ function languageLabel(language) {
 }
 
 function normalizeDeployRule(rule) {
+  if (String(rule || "").toLowerCase() === "windows") return "windows";
   return ["pages", "cf", "cf_pages", "cloudflare_pages"].includes(String(rule || "").toLowerCase()) ? "cf_pages" : "k8s";
 }
 
 function deployRuleLabel(rule) {
+  if (normalizeDeployRule(rule) === "windows") return "Windows / WinSW";
   return normalizeDeployRule(rule) === "cf_pages" ? "CF Pages" : "K8s 服务";
 }
 
@@ -1487,7 +1491,7 @@ function renderRows() {
           } · ${task.lastBranch ? `最近发布 ${task.lastBranch}` : "发布时选择分支"}</span>
         </div>
         <div>
-          <strong>${normalizeDeployRule(task.deployRule) === "cf_pages" ? "本机部署" : `${task.clusters.length} 个集群`}</strong>
+          <strong>${normalizeDeployRule(task.deployRule) === "cf_pages" ? "本机部署" : `${task.clusters.length} 个${normalizeDeployRule(task.deployRule) === "windows" ? "服务器" : "集群"}`}</strong>
           <span class="muted">${
             normalizeDeployRule(task.deployRule) === "cf_pages" ? "Cloudflare Pages" : task.clusters.map((cluster) => cluster.name).join("、") || "未绑定"
           }</span>
@@ -1514,6 +1518,7 @@ function renderRows() {
             <i data-lucide="clock"></i>
             <span>定时</span>
           </button>
+          ${normalizeDeployRule(task.deployRule) === "windows" ? `<button class="ghost-button" type="button" data-action="windows-rollback" data-task-id="${task.id}" ${canOperateAsset("task.deploy", task) && !isTaskActive(task) ? "" : "disabled"}><i data-lucide="undo-2"></i><span>回滚</span></button>` : ""}
           ${
             isTaskActive(task)
               ? `<button class="ghost-button danger-action" type="button" data-action="cancel" data-task-id="${task.id}" ${canOperateAsset("task.deploy", task) ? "" : "disabled"}>
@@ -2954,6 +2959,7 @@ function renderClusters() {
     return;
   }
   const selectableClusters = clusters.filter(canAccessAsset);
+  const isWindows = normalizeDeployRule(formValue("deployRule")) === "windows";
   const selectedClusterNames = new Set(clusterDrafts.map((cluster) => String(cluster.name || "").trim()).filter(Boolean));
   const clusterOptions = [
     ...selectableClusters,
@@ -2965,7 +2971,7 @@ function renderClusters() {
       (cluster, index) => `
       <div class="cluster-edit-row" data-index="${index}">
         <label>
-          <span>集群</span>
+          <span>${isWindows ? "Windows 服务器" : "集群"}</span>
           <select data-field="name">
             ${clusterOptions
               .map((item) => {
@@ -2975,19 +2981,19 @@ function renderClusters() {
               .join("")}
           </select>
         </label>
-        <label>
+        <label ${isWindows ? "hidden" : ""}>
           <span>Namespace</span>
           <input data-field="namespace" value="${cluster.namespace || ""}" />
         </label>
-        <label>
+        <label ${isWindows ? "hidden" : ""}>
           <span>副本</span>
           <input data-field="replicas" type="number" min="1" value="${cluster.replicas || 1}" />
         </label>
-        <label>
+        <label ${isWindows ? "hidden" : ""}>
           <span>Ingress</span>
           <input data-field="ingress" value="${cluster.ingress || ""}" />
         </label>
-        <label>
+        <label ${isWindows ? "hidden" : ""}>
           <span>镜像拉取秘钥</span>
           <select data-field="imagePullSecretId">
             ${imagePullSecretOptions(cluster.imagePullSecretId, "使用集群默认")}
@@ -3017,6 +3023,7 @@ function organizationChecksHtml(selectedIds = [], prefix = "") {
 }
 
 function deployConfigClusterRow(configIndex, cluster, clusterIndex) {
+  const isWindows = normalizeDeployRule(formValue("deployRule")) === "windows";
   const selectableClusters = clusters.filter(canAccessAsset);
   const selectedClusterNames = new Set([cluster.name, ...deployConfigDrafts[configIndex].clusters.map((item) => item.name)].filter(Boolean));
   const clusterOptions = [
@@ -3026,24 +3033,24 @@ function deployConfigClusterRow(configIndex, cluster, clusterIndex) {
   return `
     <div class="cluster-edit-row compact-config-row" data-deploy-config-cluster="${configIndex}" data-cluster-index="${clusterIndex}">
       <label>
-        <span>集群</span>
+        <span>${isWindows ? "Windows 服务器" : "集群"}</span>
         <select data-config-cluster-field="name">
           ${clusterOptions.map((item) => `<option value="${item.name}" ${item.name === cluster.name ? "selected" : ""}>${item.name}</option>`).join("")}
         </select>
       </label>
-      <label>
+      <label ${isWindows ? "hidden" : ""}>
         <span>Namespace</span>
         <input data-config-cluster-field="namespace" value="${cluster.namespace || "default"}" />
       </label>
-      <label>
+      <label ${isWindows ? "hidden" : ""}>
         <span>副本</span>
         <input data-config-cluster-field="replicas" type="number" min="1" value="${cluster.replicas || 1}" />
       </label>
-      <label>
+      <label ${isWindows ? "hidden" : ""}>
         <span>Ingress</span>
         <input data-config-cluster-field="ingress" value="${cluster.ingress || ""}" />
       </label>
-      <label>
+      <label ${isWindows ? "hidden" : ""}>
         <span>镜像拉取秘钥</span>
         <select data-config-cluster-field="imagePullSecretId">
           ${imagePullSecretOptions(cluster.imagePullSecretId, "使用集群默认")}
@@ -3058,13 +3065,14 @@ function deployConfigClusterRow(configIndex, cluster, clusterIndex) {
 
 function deployConfigCardHtml(config, index) {
   const isPages = normalizeDeployRule(formValue("deployRule")) === "cf_pages";
-  const isFrontendK8s = !isPages && normalizeAppType(formValue("appType")) === "frontend";
+  const isWindows = normalizeDeployRule(formValue("deployRule")) === "windows";
+  const isFrontendK8s = !isPages && !isWindows && normalizeAppType(formValue("appType")) === "frontend";
   return `
       <div class="config-card" data-deploy-config="${index}">
         <div class="cluster-row-main">
           <div>
             <strong>${escapeHtml(deployConfigLabel(config))}</strong>
-            <span>${escapeHtml(deployConfigOrganizationIds(config).map(organizationName).join("、") || "默认用户组")} · ${isPages ? "CF Pages 本机部署" : `${config.clusters.length} 个集群`}</span>
+              <span>${escapeHtml(deployConfigOrganizationIds(config).map(organizationName).join("、") || "默认用户组")} · ${isPages ? "CF Pages 本机部署" : `${config.clusters.length} 个${isWindows ? "Windows 服务器" : "集群"}`}</span>
           </div>
           <button class="icon-button danger-action" type="button" title="删除配置" data-remove-deploy-config="${index}">
             <i data-lucide="trash-2"></i>
@@ -3141,7 +3149,7 @@ function deployConfigCardHtml(config, index) {
               : ""
           }
           ${
-            isPages
+            isPages || isWindows
               ? ""
               : `
           <label class="wide-field">
@@ -3161,10 +3169,10 @@ function deployConfigCardHtml(config, index) {
             ? ""
             : `
         <div class="section-title-row">
-          <h3>配置集群</h3>
+          <h3>${isWindows ? "Windows 服务器" : "配置集群"}</h3>
           <button class="mini-button" type="button" data-add-deploy-config-cluster="${index}">
             <i data-lucide="plus"></i>
-            <span>添加集群</span>
+            <span>${isWindows ? "添加服务器" : "添加集群"}</span>
           </button>
         </div>
         ${config.clusters.map((cluster, clusterIndex) => deployConfigClusterRow(index, cluster, clusterIndex)).join("")}
@@ -3198,6 +3206,11 @@ function renderDeployConfigsEditor() {
 }
 
 function updateSdkOptions(language, force = false) {
+  if (normalizeDeployRule(taskForm.elements.deployRule?.value) === "windows") {
+    sdkSelect.innerHTML = '<option value="python3.13">python3.13 (Windows x64)</option>';
+    document.querySelectorAll(".java-build-field").forEach((field) => { field.hidden = true; });
+    return;
+  }
   const options = sdkOptionsForLanguage(language);
   const currentSdk = sdkSelect.value;
   const selectedSdk = options.includes(currentSdk) && !force ? currentSdk : options[0] || "";
@@ -3214,27 +3227,34 @@ function updateSdkOptions(language, force = false) {
 function syncDeployRuleFields() {
   const deployRule = normalizeDeployRule(taskForm.elements.deployRule?.value);
   const isPages = deployRule === "cf_pages";
-  const appType = isPages ? "frontend" : normalizeAppType(taskForm.elements.appType?.value);
+  const isWindows = deployRule === "windows";
+  const appType = isWindows ? "backend" : isPages ? "frontend" : normalizeAppType(taskForm.elements.appType?.value);
   const isFrontend = appType === "frontend";
   if (deployRuleSelect) deployRuleSelect.value = deployRule;
   if (appTypeSelect) appTypeSelect.value = appType;
-  if (appTypeSelect) appTypeSelect.disabled = isPages;
+  if (appTypeSelect) appTypeSelect.disabled = isPages || isWindows;
 
   document.querySelectorAll(".pages-deploy-field").forEach((field) => {
     field.hidden = !isPages;
   });
   document.querySelectorAll(".k8s-deploy-field, .k8s-build-field").forEach((field) => {
-    field.hidden = isPages;
+    field.hidden = isPages || isWindows;
   });
+  document.querySelectorAll(".windows-deploy-field").forEach((field) => { field.hidden = !isWindows; });
+  document.querySelectorAll(".agent-target-field").forEach((field) => { field.hidden = isPages; });
+  const targetTitle = document.getElementById("agentTargetTitle");
+  if (targetTitle) targetTitle.textContent = isWindows ? "Windows 服务器" : "多集群部署";
+  if (sdkSelect) sdkSelect.disabled = isWindows;
+  if (isWindows) taskForm.elements.language.value = "python";
 
   ["buildCommand", "containerPort", "servicePort", "replicas"].forEach((name) => {
     const field = taskForm.elements[name];
-    if (field) field.disabled = isPages;
+    if (field) field.disabled = isPages || isWindows;
   });
-  if (taskForm.elements.buildCommand) taskForm.elements.buildCommand.required = !isPages;
-  if (taskForm.elements.containerPort) taskForm.elements.containerPort.required = !isPages;
-  if (taskForm.elements.servicePort) taskForm.elements.servicePort.required = !isPages;
-  if (taskForm.elements.language) taskForm.elements.language.disabled = isPages || isFrontend;
+  if (taskForm.elements.buildCommand) taskForm.elements.buildCommand.required = !isPages && !isWindows;
+  if (taskForm.elements.containerPort) taskForm.elements.containerPort.required = !isPages && !isWindows;
+  if (taskForm.elements.servicePort) taskForm.elements.servicePort.required = !isPages && !isWindows;
+  if (taskForm.elements.language) taskForm.elements.language.disabled = isPages || isFrontend || isWindows;
 
   ["pagesPackageManager", "pagesDeployCommand"].forEach((name) => {
     const field = taskForm.elements[name];
@@ -3258,7 +3278,7 @@ function syncDeployRuleFields() {
   const artifactLabel = document.getElementById("artifactPathLabel");
   const artifactInput = document.getElementById("artifactPathInput");
   const showStaticArtifact = !isPages && isFrontend;
-  const showJavaArtifact = !isPages && !isFrontend && taskForm.elements.language.value === "java";
+  const showJavaArtifact = !isPages && !isWindows && !isFrontend && taskForm.elements.language.value === "java";
   if (artifactField) artifactField.hidden = !(showStaticArtifact || showJavaArtifact);
   if (artifactInput) {
     artifactInput.disabled = isPages || !(showStaticArtifact || showJavaArtifact);
@@ -3851,6 +3871,20 @@ async function runTask(taskId, branch) {
   } finally {
     if (branchDeployText) branchDeployText.textContent = "发布";
     if (branchDialog.open) confirmBranchDeploy.disabled = false;
+  }
+}
+
+async function rollbackWindowsTask(taskId) {
+  const task = tasks.find((item) => String(item.id) === String(taskId));
+  if (!task || !canOperateAsset("task.deploy", task) || isTaskActive(task)) return;
+  const configs = normalizeDeployConfigs(task.deployConfigs, task);
+  const config = configs.find((item) => item.id === task.lastDeployConfigId) || configs[0];
+  if (!window.confirm(`将「${task.name} / ${config.name}」回滚到目标服务器的上一成功版本？当前配置和持久化数据会保留。`)) return;
+  try {
+    await mutateJson(`/api/tasks/${taskId}/windows-rollback`, { deployConfigId: config.id });
+    render();
+  } catch (error) {
+    window.alert(error.message || "Windows 回滚请求失败");
   }
 }
 
@@ -5631,6 +5665,10 @@ document.addEventListener("click", (event) => {
     }
     if (action === "run") {
       openBranchDialog(taskId);
+      return;
+    }
+    if (action === "windows-rollback") {
+      rollbackWindowsTask(taskId);
       return;
     }
     if (action === "schedule") {

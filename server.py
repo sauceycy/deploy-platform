@@ -11,6 +11,7 @@ import signal
 import shutil
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import socket
@@ -23,6 +24,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 from xml.sax.saxutils import escape as xml_escape
+from windows_deploy import WindowsRoutes, package_and_dispatch
 
 try:
     import psycopg
@@ -1516,6 +1518,8 @@ def build_cache_config(task, src_dir=None):
 
 def task_deploy_rule(task):
     value = str(task.get("deployRule") or "k8s").strip().lower()
+    if value == "windows":
+        return "windows"
     if value in {"pages", "cf", "cf_pages", "cloudflare_pages"}:
         return "cf_pages"
     return "k8s"
@@ -2658,6 +2662,12 @@ def build_and_dispatch(execution_id):
         if not app_dir.exists():
             raise RuntimeError(f"工作路径不存在: {task.get('workdir')}")
 
+        if deploy_rule == "windows":
+            if not is_relative_child(app_dir, src_dir):
+                raise ValueError("Windows 项目工作路径必须位于仓库内")
+            package_and_dispatch(sys.modules[__name__], execution_id, task, app_dir)
+            return
+
         if deploy_rule == "cf_pages":
             failure_event = "DEPLOY_FAILED"
             pages_task = {**task, "language": "node"}
@@ -2927,7 +2937,7 @@ def normalize_task_payload(payload):
         raise ValueError("任务配置格式不正确")
     notify = payload.get("notify") if isinstance(payload.get("notify"), dict) else {}
     deploy_rule = task_deploy_rule(payload)
-    app_type = "frontend" if deploy_rule == "cf_pages" else task_app_type(payload)
+    app_type = "backend" if deploy_rule == "windows" else "frontend" if deploy_rule == "cf_pages" else task_app_type(payload)
     package_manager = pages_package_manager(payload)
     clusters = payload.get("clusters") if isinstance(payload.get("clusters"), list) else []
     normalized_clusters = []
@@ -3009,6 +3019,8 @@ def normalize_task_payload(payload):
         task_payload["cloudflareAccountIdSecretId"] = ""
         task_payload["cloudflareApiTokenSecretId"] = ""
     task_payload["healthPath"] = task_payload["healthCheck"]["path"]
+    if deploy_rule == "windows":
+        task_payload.update(language="python", sdk="python3.13", buildCommand="", buildEnv="", runtimeEnv="")
     return task_payload
 
 
@@ -3665,7 +3677,7 @@ def update_agent_result(agent_task_id, status, logs, agent_instance=None):
     return item, state
 
 
-class Handler(SimpleHTTPRequestHandler):
+class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(APP_DIR), **kwargs)
 
@@ -3796,6 +3808,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if self.windows_get(parsed):
+            return
         if parsed.path == "/api/health":
             self.send_json({"status": "ok", "database": "postgres" if use_postgres() else "sqlite"})
             return
@@ -3836,7 +3850,7 @@ class Handler(SimpleHTTPRequestHandler):
             state = read_state()
             if not self.require_agent_token(parsed, cluster_agent_token(state, cluster)):
                 return
-            task = next_agent_task_for_cluster(state["agentTasks"], cluster)
+            task = next_agent_task_for_cluster([item for item in state["agentTasks"] if item.get("kind") != "windows"], cluster)
             if not task:
                 self.send_json({"task": None})
                 return
@@ -3850,6 +3864,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if self.windows_post(parsed):
+            return
         if parsed.path == "/api/auth/login":
             body = self.read_json_body()
             try:
@@ -4003,6 +4019,9 @@ class Handler(SimpleHTTPRequestHandler):
             body = self.read_json_body()
             state = read_state()
             agent_task = find_by_id(state.get("agentTasks", []), match.group(1))
+            if agent_task and agent_task.get("kind") == "windows":
+                self.send_json({"error": "Windows 任务请使用 Windows Agent 接口"}, status=400)
+                return
             cluster_name = (agent_task or {}).get("clusterName") or str(body.get("cluster") or "").strip()
             if not self.require_agent_token(parsed, cluster_agent_token(state, cluster_name)):
                 return

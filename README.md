@@ -160,6 +160,8 @@ location /api/ws {
 
 ## Agent 部署
 
+Windows / WinSW 的 MT5 Sidecar 发布是独立可选扩展，安装、首次部署和上一成功版本回滚见 [Windows Agent 部署说明](windows-agent/README.md)。现有 Kubernetes 和 CF Pages 流程沿用原实现。
+
 1. 先在平台「集群管理」里添加集群，例如：
 
 ```text
