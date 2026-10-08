@@ -133,12 +133,18 @@ class WindowsEnvTests(unittest.TestCase):
 
     def test_agent_masks_dotenv_content_and_values_from_deployment_logs(self):
         instance = self.instance()
-        content = 'APP_ENV=prod\nNACOS_PASSWORD=unique-secret\nSHORT=x'
+        content = 'APP_ENV=prod\nNACOS_PASSWORD=unique-secret\nSHORT_TOKEN=x'
         instance.current = {'payload': {'envFile': {'content': content, 'variables': windows.parse_windows_env(content)}}}
         text = instance.redact('unique-secret\n' + content + '\nx')
         self.assertNotIn('unique-secret', text)
-        self.assertNotIn('prod', text)
         self.assertNotIn('x', text)
+
+    def test_agent_does_not_mask_operational_values_inside_paths_or_errors(self):
+        instance = self.instance()
+        content = 'APP_ENV=local\nNACOS_NAMESPACE=st\nSERVICE_NAME=python-mt5-sidecar\nLOG_FILE_BACKUP_DAYS=30'
+        instance.current = {'payload': {'envFile': {'content': content, 'variables': windows.parse_windows_env(content)}}}
+        message = 'Installed python-mt5-sidecar in C:/Users/Administrator; most recent call last; timeout=30'
+        self.assertEqual(instance.redact(message), message)
 
     def test_agent_rejects_invalid_environment_payload(self):
         for env_file in (None, {'content': 'text', 'variables': {'BAD KEY': 'secret'}},

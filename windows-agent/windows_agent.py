@@ -112,12 +112,13 @@ class Agent:
 
     def redact(self, text):
         values = [self.headers["X-Agent-Token"]]
+        sensitive_name = re.compile(r'password|secret|token|credential|username|login|authorization|cookie|(?:^|_)key(?:_|$)', re.I)
         if self.current:
             env_file = self.current.get('payload', {}).get('envFile') or {}
             values.append(env_file.get('content', ''))
-            values.extend(env_file.get('variables', {}).values())
+            values.extend(value for key, value in env_file.get('variables', {}).items() if sensitive_name.search(key))
         for application in self.config["applications"].values():
-            values.extend(str(value) for value in application.get("Environment", {}).values())
+            values.extend(str(value) for key, value in application.get("Environment", {}).items() if sensitive_name.search(key))
         for value in sorted((value for value in values if isinstance(value, str)), key=len, reverse=True):
             if value:
                 text = text.replace(value, "***")

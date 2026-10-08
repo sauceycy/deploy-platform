@@ -100,7 +100,7 @@ try {
     $runtime = Join-Path $release '.venv\Scripts\python.exe'
     Push-Location $root
     try {
-        $settingsText = & $runtime (Join-Path $PSScriptRoot 'inspect_application.py') --config (Join-Path $deploy 'bootstrap-http.yaml')
+        $settingsText = & $runtime (Join-Path $PSScriptRoot 'inspect_application.py') --release-root $release --config (Join-Path $deploy 'bootstrap-http.yaml')
         if ($LASTEXITCODE -ne 0) { throw 'Runtime preflight failed before cutover.' }
         $settings = $settingsText | ConvertFrom-Json
         $capabilities = $settings

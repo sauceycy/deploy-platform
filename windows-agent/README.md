@@ -129,6 +129,7 @@ Agent 把原文以 UTF-8 写入 `InstallRoot\.env`，并将解析出的变量显
 
 Agent 校验 ZIP 和逐文件清单，调用项目的 `Expand-Release.ps1` 准备独立版本及锁定依赖，再使用本地 WinSW 适配器完成切换。
 适配器只管理 `python-mt5-http` 和项目原先的 `python-mt5-sidecar` 采集服务；不管理 MT5 Access/Trade/History 服务。
+额外运行检查明确从本次选中的版本 `src` 加载 Sidecar 模块，避免 Agent 目录或继承的 `PYTHONPATH` 中的旧包遮蔽新版本。更新此检查时需同时更新 `Invoke-Mt5Release.ps1` 和 `inspect_application.py`。
 启动验收包括 `/health/ready`、已启用推送的 `/health/streaming`、已配置 Manager 网关的 `/api/v1/manager/health`，不会发送真实交易作为探测。
 
 Windows 主机需要能访问依赖源、Nacos、Java 账户目录/Lease 接口、MT5 Manager，以及启用推送时的全部 Kafka broker。
