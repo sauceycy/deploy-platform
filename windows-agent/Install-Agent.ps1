@@ -2,16 +2,19 @@
 param(
     [Parameter(Mandatory=$true)][string]$Python,
     [Parameter(Mandatory=$true)][string]$WinSW,
-    [string]$ConfigPath = (Join-Path $PSScriptRoot 'config.json'),
+    [string]$ConfigPath = '',
     [switch]$Start
 )
 $ErrorActionPreference = 'Stop'
+if (-not $ConfigPath) {
+    $ConfigPath = Join-Path $PSScriptRoot 'config.json'
+}
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Run as Administrator.' }
 $Python = (Resolve-Path -LiteralPath $Python).Path
 $WinSW = (Resolve-Path -LiteralPath $WinSW).Path
 $ConfigPath = (Resolve-Path -LiteralPath $ConfigPath).Path
-& $Python -c 'import sys; assert sys.version_info >= (3, 13), "Python 3.13 or newer required for Agent"'
+& $Python -c "import sys; assert sys.version_info >= (3, 13), 'Python 3.13 or newer required for Agent'"
 if ($LASTEXITCODE -ne 0) { throw 'Agent Python runtime check failed.' }
 if (Get-Service -Name 'deploy-platform-windows-agent' -ErrorAction SilentlyContinue) { throw 'Agent service is already installed; stop it before updating files.' }
 $wrapper = Join-Path $PSScriptRoot 'deploy-platform-windows-agent.exe'
@@ -21,6 +24,7 @@ $xml = @"
 <service>
   <id>deploy-platform-windows-agent</id>
   <name>Deploy Platform Windows Agent</name>
+  <description>Receives Windows release tasks and manages MT5 Sidecar deployment and rollback.</description>
   <executable>$(& $escape $Python)</executable>
   <arguments>&quot;$(& $escape (Join-Path $PSScriptRoot 'windows_agent.py'))&quot; --config &quot;$(& $escape $ConfigPath)&quot;</arguments>
   <workingdirectory>$(& $escape $PSScriptRoot)</workingdirectory>

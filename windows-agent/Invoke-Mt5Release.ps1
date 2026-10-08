@@ -102,6 +102,7 @@ try {
 <service>
   <id>python-mt5-http</id>
   <name>Trader MT5 HTTP Service</name>
+  <description>MT5 HTTP queries, streaming and Manager API hosted by the Windows deployment agent.</description>
   <executable>$(& $escape $runtime)</executable>
   <arguments>-m python_mt5_sidecar http-server --config &quot;$(& $escape (Join-Path $deploy 'bootstrap-http.yaml'))&quot;</arguments>
   <workingdirectory>$(& $escape $root)</workingdirectory>
