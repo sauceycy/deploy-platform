@@ -125,3 +125,6 @@ powershell.exe -ExecutionPolicy Bypass -File .\Install-Agent.ps1 -Python $python
 
 powershell.exe -ExecutionPolicy Bypass -File .\Initialize-Mt5Service.ps1 -InstallRoot 'C:\Users\Administrator\python-mt5-sidecar' -Python $python -WinSW $winsw
 ```
+```
+Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/sauceycy/deploy-platform/main/windows-agent/Install-Agent.ps1' -OutFile .\Install-Agent.ps1
+```
