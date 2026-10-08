@@ -3,13 +3,13 @@
   "cluster": "trader-sidecar",
   "instanceId": "trader-sidecar-01",
   "agentToken": "Z5cN1pR8vT3mK6xQ9dH2sL7fW0aJ4uA",
-  "stateDirectory": "C:\\ProgramData\\DeployPlatformAgent",
+  "stateDirectory": "C:/ProgramData/DeployPlatformAgent",
   "applications": {
     "python-mt5-http": {
-      "InstallRoot": "C:\Users\Administrator\python-mt5-sidecar",
-      "Python": "C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe",
-      "Uv": "C:\Users\Administrator\.local\bin\uv.exe",
-      "ServiceWrapper": "C:\Users\Administrator\AppData\Local\Programs\WinSW\WinSW-x64.exe",
+      "InstallRoot": "C:/Users/Administrator/python-mt5-sidecar",
+      "Python": "C:/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe",
+      "Uv": "C:/Users/Administrator/.local/bin/uv.exe",
+      "ServiceWrapper": "C:/Users/Administrator/AppData/Local/Programs/WinSW/WinSW-x64.exe",
       "StartupTimeoutSeconds": 600,
       "Environment": {}
     }

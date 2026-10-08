@@ -1,3 +1,4 @@
+import json
 import re
 import unittest
 import xml.etree.ElementTree as ET
@@ -8,6 +9,17 @@ AGENT_DIR = Path(__file__).resolve().parents[1] / "windows-agent"
 
 
 class WinSWTemplateTests(unittest.TestCase):
+    def test_shipped_agent_configs_have_valid_json_and_windows_paths(self):
+        for filename in ("config.json", "config.example.json"):
+            with self.subTest(config=filename):
+                config = json.loads((AGENT_DIR / filename).read_text(encoding="utf-8-sig"))
+                paths = [config["stateDirectory"]]
+                for application in config["applications"].values():
+                    paths.extend(application[key] for key in ("InstallRoot", "Python", "Uv", "ServiceWrapper"))
+                for path in paths:
+                    self.assertRegex(path, r"^[A-Za-z]:/")
+                    self.assertNotIn("\\", path)
+
     def test_all_service_templates_include_winsw_required_metadata(self):
         for filename in ("Install-Agent.ps1", "Initialize-Mt5Service.ps1", "Invoke-Mt5Release.ps1"):
             with self.subTest(script=filename):

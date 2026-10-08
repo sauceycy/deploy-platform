@@ -16,6 +16,8 @@ $WinSW = (Resolve-Path -LiteralPath $WinSW).Path
 $ConfigPath = (Resolve-Path -LiteralPath $ConfigPath).Path
 & $Python -c "import sys; assert sys.version_info >= (3, 13), 'Python 3.13 or newer required for Agent'"
 if ($LASTEXITCODE -ne 0) { throw 'Agent Python runtime check failed.' }
+& $Python -c "import json, sys; json.load(open(sys.argv[1], encoding='utf-8-sig')); print('Agent JSON syntax OK')" $ConfigPath
+if ($LASTEXITCODE -ne 0) { throw 'Agent config.json is invalid. Use forward slashes in JSON paths, for example C:/Python313/python.exe.' }
 if (Get-Service -Name 'deploy-platform-windows-agent' -ErrorAction SilentlyContinue) { throw 'Agent service is already installed; stop it before updating files.' }
 $wrapper = Join-Path $PSScriptRoot 'deploy-platform-windows-agent.exe'
 Copy-Item -LiteralPath $WinSW -Destination $wrapper

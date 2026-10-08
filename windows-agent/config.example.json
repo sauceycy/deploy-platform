@@ -3,13 +3,13 @@
   "cluster": "windows-mt5-test",
   "instanceId": "windows-mt5-test-01",
   "agentToken": "REPLACE_WITH_SERVER_AGENT_TOKEN",
-  "stateDirectory": "C:\\ProgramData\\DeployPlatformAgent",
+  "stateDirectory": "C:/ProgramData/DeployPlatformAgent",
   "applications": {
     "python-mt5-http": {
-      "InstallRoot": "C:\\Users\\Administrator\\python-mt5-sidecar",
-      "Python": "C:\\Python313\\python.exe",
-      "Uv": "C:\\Tools\\uv.exe",
-      "ServiceWrapper": "C:\\Tools\\WinSW-x64.exe",
+      "InstallRoot": "C:/Users/Administrator/python-mt5-sidecar",
+      "Python": "C:/Python313/python.exe",
+      "Uv": "C:/Tools/uv.exe",
+      "ServiceWrapper": "C:/Tools/WinSW-x64.exe",
       "StartupTimeoutSeconds": 600,
       "Environment": {}
     }
