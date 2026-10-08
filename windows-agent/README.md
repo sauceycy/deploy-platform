@@ -29,6 +29,31 @@ Agent 可以独立启动，不需要先安装或部署 Sidecar。首次业务发
 
 已有 Agent 时，以往的 `Install-Agent.ps1` 拒绝重复安装；现在直接使用 `Start-Agent.cmd` 即可修复 Agent 注册。
 
+## 一键环境检测
+
+双击 `Check-Environment.cmd`，或在 Agent 目录执行：
+
+```powershell
+.\Check-Environment.cmd
+```
+
+检查 JSON、Python/WinSW/uv 路径、状态目录写入权限和任务数据库可读性、Agent/Sidecar 服务状态与登录账号、遗留的服务路径和 XML、代理环境、DNS、TCP 和 HTTPS 证书。
+Sidecar 未部署和 uv 缺失会列为提醒；不影响独立检测 Agent 平台连接。
+网络检测依次请求首页 GET、Python 心跳 POST、curl 相同心跳 POST、curl 使用 Python User-Agent 的心跳 POST，显示实际 URL、HTTP 状态、响应类型、重定向和 Cloudflare Ray ID。
+首页请求不携带凭据；三次心跳携带相同 Token 和请求体，不跟随重定向。原始响应正文、Cookie 和凭据不写入报告。
+报告末尾的 `Diagnosis` 区分已确认的现象、可能原因和下一步检查；CF-Ray 可用于 Cloudflare 安全事件/Access 日志定位，但经过 Cloudflare 本身不能证明拦截发生在 Cloudflare。
+
+文本和 JSON 报告保存在 `diagnostics/environment-*.txt`、`*.json`，窗口完成后等待回车。
+检测不注册、启动或停止服务，不读取任务领取接口；心跳会更新平台在线记录，目录权限检查会短暂创建并删除测试文件。
+结果反映当前运行账号，不能代替 Windows 服务账号的权限和网络检测。报告包含实际域名、路径、账号和解析出的 IP；凭据已隐藏。
+每个网络请求有超时限制；curl 未安装时跳过对比并继续其他检查。
+
+可以指定工具和报告目录：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Check-Environment.ps1 -Python 'C:/Python313/python.exe' -OutputDirectory 'C:/Temp/AgentDiagnostics'
+```
+
 ## 一次性准备
 
 1. Windows Server x64 安装 CPython 3.13 x64、uv、经过校验的 WinSW x64（2.12 或更新版本，支持 `refresh`）。Agent 使用独立的系统 Python，不使用业务服务的 `.venv`。

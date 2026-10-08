@@ -9,3 +9,4 @@ data/
 postgres-data/
 *.sqlite3
 __pycache__/
+windows-agent/diagnostics/
