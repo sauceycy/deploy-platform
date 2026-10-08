@@ -18,6 +18,9 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
+AGENT_USER_AGENT = "DeployPlatform-Windows-Agent/0.1"
+
+
 def save_json(path, value):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=True, indent=2), encoding="utf-8")
@@ -74,7 +77,7 @@ class Agent:
         token = self.config.get("agentToken") or os.environ.get("WINDOWS_AGENT_TOKEN")
         if not token:
             raise ValueError("Configure agentToken or WINDOWS_AGENT_TOKEN")
-        self.headers = {"X-Agent-Token": token, "Accept": "application/json"}
+        self.headers = {"X-Agent-Token": token, "Accept": "application/json", "User-Agent": AGENT_USER_AGENT}
         for key, env_name in (("CF-Access-Client-Id", "CF_ACCESS_CLIENT_ID"), ("CF-Access-Client-Secret", "CF_ACCESS_CLIENT_SECRET")):
             if os.environ.get(env_name):
                 self.headers[key] = os.environ[env_name]

@@ -14,6 +14,9 @@ from urllib.request import Request, urlopen
 from urllib.parse import urlparse
 
 
+AGENT_USER_AGENT = "DeployPlatform-Windows-Agent/0.1"
+
+
 class CheckError(Exception):
     pass
 
@@ -96,7 +99,7 @@ def check_runtime(config):
 
 def check_platform(config):
     token = config.get("agentToken") or os.environ.get("WINDOWS_AGENT_TOKEN")
-    headers = {"X-Agent-Token": token, "Content-Type": "application/json", "Accept": "application/json"}
+    headers = {"X-Agent-Token": token, "Content-Type": "application/json", "Accept": "application/json", "User-Agent": AGENT_USER_AGENT}
     for key, environment in (("CF-Access-Client-Id", "CF_ACCESS_CLIENT_ID"), ("CF-Access-Client-Secret", "CF_ACCESS_CLIENT_SECRET")):
         if os.environ.get(environment):
             headers[key] = os.environ[environment]

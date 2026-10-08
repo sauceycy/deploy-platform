@@ -253,6 +253,27 @@ class PackageTests(unittest.TestCase):
         finally:
             second.db.close()
 
+    def test_background_agent_uses_same_identifier_as_startup_heartbeat(self):
+        config_path = self.root / "config.json"
+        config_path.write_text(json.dumps({"platformUrl": "https://example.com", "cluster": "win-test",
+                                          "agentToken": "private-test-token", "stateDirectory": str(self.root / "state"),
+                                          "applications": {"python-mt5-http": {}}}))
+        instance = agent.Agent(config_path)
+        check_spec = importlib.util.spec_from_file_location("startup_headers", Path(__file__).resolve().parents[1] / "windows-agent/agent_check.py")
+        startup = importlib.util.module_from_spec(check_spec)
+        check_spec.loader.exec_module(startup)
+        try:
+            for route, payload in (("/api/windows-agent/heartbeat", {}), ("/api/windows-agent/tasks", None),
+                                   ("/api/windows-agent/tasks/abc123/progress", {})):
+                with self.subTest(route=route), patch.object(agent, "urlopen", return_value=io.BytesIO(b'{"ok":true}')) as request:
+                    instance.request(route, payload)
+                    self.assertEqual(request.call_args.args[0].get_header("User-agent"), startup.AGENT_USER_AGENT)
+                    self.assertNotIn("Python-urllib", startup.AGENT_USER_AGENT)
+        finally:
+            instance.db.close()
+            if instance.lock:
+                instance.lock.close()
+
 
 if __name__ == "__main__":
     unittest.main()

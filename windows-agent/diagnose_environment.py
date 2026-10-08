@@ -17,12 +17,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, getproxies
 
-from agent_check import CheckError, check_runtime, load_config
+from agent_check import AGENT_USER_AGENT, CheckError, check_runtime, load_config
 
 
 TIMEOUT = 10
 BODY_LIMIT = 65536
-AGENT_UA = 'Python-urllib/' + '.'.join(map(str, sys.version_info[:2]))
+LEGACY_USER_AGENT = 'Python-urllib/' + '.'.join(map(str, sys.version_info[:2]))
 
 
 def safe_url(value):
@@ -190,13 +190,16 @@ def verdicts(probes):
     if root.get('status') == 200 and not (heartbeat.get('status') == 200 and heartbeat.get('jsonOk')):
         messages.append('CONFIRMED: homepage GET works while Agent POST heartbeat fails. Homepage access does not validate API access or Agent authentication.')
     curl = probes.get('curl heartbeat', {})
-    matched = probes.get('curl with Python User-Agent', {})
+    matched = probes.get('curl with Agent User-Agent', {})
+    legacy = probes.get('Python legacy User-Agent', {})
+    if heartbeat.get('status') == 200 and heartbeat.get('jsonOk') and legacy.get('status') == 403:
+        messages.append('CONFIRMED: Agent User-Agent succeeds while legacy Python-urllib gets 403 from the same Python client. Keep the new Agent files; inspect gateway User-Agent rules for the legacy rejection.')
     if curl.get('status') == 200 and curl.get('jsonOk') and not (heartbeat.get('status') == 200 and heartbeat.get('jsonOk')):
-        messages.append('CONFIRMED: curl succeeds with the same heartbeat URL, headers and body while Python fails. Compare proxy settings, User-Agent and TLS/client filtering.')
+        messages.append('CONFIRMED: default curl succeeds with the same heartbeat URL, authentication headers and body while Python fails. Compare User-Agent, proxy settings and TLS/client filtering.')
         if matched.get('status') == 403:
-            messages.append('LIKELY: a User-Agent rule rejects Python-urllib; curl also gets 403 when using that User-Agent. Confirm the matching rule in gateway logs.')
+            messages.append('LIKELY: a User-Agent rule rejects the Agent identifier; curl also gets 403 when using that User-Agent. Confirm the matching rule in gateway logs.')
         elif matched.get('status') == 200 and matched.get('jsonOk'):
-            messages.append('CHECK: curl still succeeds with the Python User-Agent. Investigate Python vs curl proxy/TLS differences; User-Agent alone does not explain the result.')
+            messages.append('CHECK: curl still succeeds with the Agent User-Agent. Investigate Python vs curl proxy/TLS differences; User-Agent alone does not explain the result.')
     return messages or ['CHECK: use the failed checks and HTTP response metadata below to locate the failing layer.']
 
 
@@ -326,19 +329,22 @@ def collect(report, path):
                     report.add('PASS', 'Direct TLS', 'Certificate verified; expires=' + certificate.get('notAfter', 'unknown'))
         except OSError as error:
             report.add('WARN', 'Direct TLS', network_error(error) + '; HTTP probes use their own proxy route')
-    headers = {'X-Agent-Token': config.get('agentToken') or os.environ.get('WINDOWS_AGENT_TOKEN'), 'Content-Type': 'application/json', 'Accept': 'application/json'}
+    headers = {'X-Agent-Token': config.get('agentToken') or os.environ.get('WINDOWS_AGENT_TOKEN'), 'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': AGENT_USER_AGENT}
+    report.add('INFO', 'Agent User-Agent', AGENT_USER_AGENT + '; startup check and background Agent use this same identifier')
     for key, env in (('CF-Access-Client-Id', 'CF_ACCESS_CLIENT_ID'), ('CF-Access-Client-Secret', 'CF_ACCESS_CLIENT_SECRET')):
         if os.environ.get(env):
             headers[key] = os.environ[env]
     body = json.dumps({'cluster': config['cluster'], 'instanceId': config.get('instanceId') or socket.gethostname()}).encode('ascii')
     endpoint = url + '/api/windows-agent/heartbeat'
-    # Homepage gets no credentials. Both clients send the exact same Agent POST.
-    report.probe('Python homepage', 'GET', url + '/', python_probe(url + '/', {'Accept': 'text/html'}))
+    # Homepage gets no credentials. Only User-Agent differs in comparison probes.
+    report.probe('Python homepage', 'GET', url + '/', python_probe(url + '/', {'Accept': 'text/html', 'User-Agent': AGENT_USER_AGENT}))
     report.probe('Python heartbeat', 'POST', endpoint, python_probe(endpoint, headers, body))
+    report.probe('Python legacy User-Agent', 'POST', endpoint, python_probe(endpoint, {**headers, 'User-Agent': LEGACY_USER_AGENT}, body))
     curl = shutil.which('curl.exe' if os.name == 'nt' else 'curl')
     if curl:
-        report.probe('curl heartbeat', 'POST', endpoint, curl_probe(curl, endpoint, headers, body))
-        report.probe('curl with Python User-Agent', 'POST', endpoint, curl_probe(curl, endpoint, headers, body, AGENT_UA))
+        default_headers = {key: value for key, value in headers.items() if key != 'User-Agent'}
+        report.probe('curl heartbeat', 'POST', endpoint, curl_probe(curl, endpoint, default_headers, body))
+        report.probe('curl with Agent User-Agent', 'POST', endpoint, curl_probe(curl, endpoint, headers, body))
     else:
         report.add('WARN', 'curl comparison', 'curl.exe not found; Python probes and all other checks completed')
 

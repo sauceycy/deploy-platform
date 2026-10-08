@@ -118,6 +118,7 @@ class AgentStartupTests(unittest.TestCase):
         self.assertTrue(sent.full_url.endswith("/api/windows-agent/heartbeat"))
         self.assertEqual(json.loads(sent.data)["cluster"], "win-test")
         self.assertNotIn("agentToken", json.loads(sent.data))
+        self.assertEqual(sent.get_header("User-agent"), check.AGENT_USER_AGENT)
 
     def test_http_failures_explain_registration_token_proxy_and_platform_version(self):
         for code, hint in ((400, "cluster name"), (401, "agentToken"), (403, "Cloudflare"), (404, "Update the platform")):

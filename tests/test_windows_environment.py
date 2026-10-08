@@ -82,7 +82,7 @@ class EnvironmentDiagnosticTests(unittest.TestCase):
         output = b'HTTP/1.1 200 Connection established\r\n\r\nHTTP/1.1 100 Continue\r\n\r\nHTTP/2 200\r\nContent-Type: application/json\r\n\r\n{"ok":true}\nDIAG_STATUS:200'
         process = subprocess.CompletedProcess([], 0, output, b'')
         with patch.object(diagnostic.subprocess, 'run', return_value=process) as run:
-            result = diagnostic.curl_probe('curl.exe', 'https://platform.example/api/windows-agent/heartbeat', self.headers, self.body, diagnostic.AGENT_UA)
+            result = diagnostic.curl_probe('curl.exe', 'https://platform.example/api/windows-agent/heartbeat', self.headers, self.body, diagnostic.AGENT_USER_AGENT)
         self.assertTrue(result['jsonOk'])
         args = run.call_args.args[0]
         self.assertIn('--disable', args)
@@ -91,7 +91,7 @@ class EnvironmentDiagnosticTests(unittest.TestCase):
         self.assertNotIn(self.config['agentToken'], ' '.join(args))
         stdin = run.call_args.kwargs['input'].decode()
         self.assertIn('X-Agent-Token: private-agent-value', stdin)
-        self.assertIn('user-agent = "' + diagnostic.AGENT_UA + '"', stdin)
+        self.assertIn('user-agent = "' + diagnostic.AGENT_USER_AGENT + '"', stdin)
         self.assertEqual(result['contentType'], 'application/json')
 
     def test_curl_failure_reports_code_not_raw_stderr_or_body(self):
@@ -105,7 +105,7 @@ class EnvironmentDiagnosticTests(unittest.TestCase):
         findings = diagnostic.verdicts({'Python homepage': {'status': 200},
                                        'Python heartbeat': {'status': 403, 'cloudflare': True},
                                        'curl heartbeat': {'status': 200, 'jsonOk': True},
-                                       'curl with Python User-Agent': {'status': 403}})
+                                       'curl with Agent User-Agent': {'status': 403}})
         self.assertTrue(any('LIKELY:' in item and 'User-Agent' in item for item in findings))
         self.assertTrue(any('cannot prove' in item for item in findings))
         self.assertTrue(any('homepage GET works' in item for item in findings))
@@ -113,8 +113,13 @@ class EnvironmentDiagnosticTests(unittest.TestCase):
     def test_matching_user_agent_success_points_to_client_or_proxy_differences(self):
         findings = diagnostic.verdicts({'Python heartbeat': {'status': 403},
                                        'curl heartbeat': {'status': 200, 'jsonOk': True},
-                                       'curl with Python User-Agent': {'status': 200, 'jsonOk': True}})
+                                       'curl with Agent User-Agent': {'status': 200, 'jsonOk': True}})
         self.assertTrue(any('User-Agent alone does not explain' in item for item in findings))
+
+    def test_agent_identifier_success_and_legacy_rejection_produce_clear_verdict(self):
+        findings = diagnostic.verdicts({'Python heartbeat': {'status': 200, 'jsonOk': True},
+                                       'Python legacy User-Agent': {'status': 403}})
+        self.assertTrue(any('Agent User-Agent succeeds while legacy Python-urllib gets 403' in item for item in findings))
 
     def test_200_html_is_not_accepted_as_a_successful_heartbeat(self):
         result = diagnostic.describe_response(200, {'Content-Type': 'text/html'}, b'<html>Login</html>')
@@ -149,13 +154,18 @@ class EnvironmentDiagnosticTests(unittest.TestCase):
         success = {'status': 200, 'jsonOk': True}
         with patch.object(diagnostic, 'load_config', return_value=self.config), patch.object(diagnostic, 'check_runtime', return_value={'runningTasks': 0}), patch.object(diagnostic, 'check_services'), patch.object(diagnostic, 'getproxies', return_value={'https': 'http://user:private-proxy@proxy.example:8080'}), patch.object(diagnostic.socket, 'getaddrinfo', side_effect=socket.gaierror), patch.object(diagnostic.socket, 'create_connection', side_effect=TimeoutError), patch.object(diagnostic, 'python_probe', return_value=success) as python, patch.object(diagnostic, 'curl_probe', return_value=success) as curl, patch.object(diagnostic.shutil, 'which', return_value='curl.exe'), patch('sys.stdout', io.StringIO()):
             diagnostic.collect(report, self.root / 'config.json')
-        homepage, heartbeat = python.call_args_list
+        homepage, heartbeat, legacy = python.call_args_list
         self.assertNotIn('X-Agent-Token', homepage.args[1])
         self.assertTrue(heartbeat.args[0].endswith('/api/windows-agent/heartbeat'))
         for call in curl.call_args_list:
             self.assertEqual(call.args[1], heartbeat.args[0])
-            self.assertEqual(call.args[2], heartbeat.args[1])
+            self.assertEqual({key: value for key, value in call.args[2].items() if key != 'User-Agent'},
+                             {key: value for key, value in heartbeat.args[1].items() if key != 'User-Agent'})
             self.assertEqual(call.args[3], heartbeat.args[2])
+        self.assertEqual(heartbeat.args[1]['User-Agent'], diagnostic.AGENT_USER_AGENT)
+        self.assertEqual(legacy.args[1]['User-Agent'], diagnostic.LEGACY_USER_AGENT)
+        self.assertEqual(heartbeat.args[2], legacy.args[2])
+        self.assertEqual(curl.call_args_list[1].args[2], heartbeat.args[1])
         self.assertNotIn('private-proxy', json.dumps(report.checks))
         self.assertTrue(any(item['check'] == 'Uv' and item['level'] == 'WARN' for item in report.checks))
         self.assertTrue(any(item['check'] == 'Sidecar directory' and item['level'] == 'WARN' for item in report.checks))
@@ -174,6 +184,13 @@ class EnvironmentDiagnosticTests(unittest.TestCase):
                 if self.path == '/redirect':
                     self.send_response(302)
                     self.send_header('Location', '/must-not-be-called?private-query')
+                elif self.path == '/user-agent-check':
+                    accepted = self.headers.get('User-Agent') == diagnostic.AGENT_USER_AGENT
+                    self.send_response(200 if accepted else 403)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(b'{"ok":true}' if accepted else b'{"error":"blocked"}')
+                    return
                 else:
                     self.send_response(403)
                     self.send_header('Content-Type', 'text/html')
@@ -192,6 +209,8 @@ class EnvironmentDiagnosticTests(unittest.TestCase):
                 native = diagnostic.curl_probe(curl, url + '/heartbeat', self.headers, self.body)
                 redirect = diagnostic.python_probe(url + '/redirect', self.headers, self.body)
                 curl_redirect = diagnostic.curl_probe(curl, url + '/redirect', self.headers, self.body)
+                accepted_agent = diagnostic.python_probe(url + '/user-agent-check', {**self.headers, 'User-Agent': diagnostic.AGENT_USER_AGENT}, self.body)
+                rejected_legacy = diagnostic.python_probe(url + '/user-agent-check', {**self.headers, 'User-Agent': diagnostic.LEGACY_USER_AGENT}, self.body)
             self.assertEqual(python['status'], 403)
             self.assertEqual(native['status'], 403)
             self.assertEqual(python['cfRay'], native['cfRay'])
@@ -200,7 +219,9 @@ class EnvironmentDiagnosticTests(unittest.TestCase):
             self.assertEqual(requests[0][2], self.body)
             self.assertEqual(redirect['status'], 302)
             self.assertEqual(curl_redirect['status'], 302)
-            self.assertEqual(len(requests), 4)
+            self.assertEqual(len(requests), 6)
+            self.assertTrue(accepted_agent['jsonOk'])
+            self.assertEqual(rejected_legacy['status'], 403)
             self.assertFalse(any('private-query' in item['redirect'] for item in (redirect, curl_redirect)))
         finally:
             server.shutdown()

@@ -22,6 +22,8 @@ Agent 可以独立启动，不需要先安装或部署 Sidecar。首次业务发
 失败窗口会显示 `[FAILED] Stage: ...`、具体错误和最近的 WinSW 日志，并保留窗口等待回车。
 平台检查会区别 HTTP 400（服务器未登记）、401（Token 不一致）、403（访问拦截）、404（平台版本/地址不正确）。
 本项目心跳接口自身不返回 403，遇到 403 时优先检查平台域名反向代理、Cloudflare WAF/Access 对 `/api/windows-agent/*` 的访问策略。
+Agent 和启动预检统一使用 `DeployPlatform-Windows-Agent/0.1` 作为 User-Agent，便于网关识别客户端，避免使用默认 `Python-urllib`；Token 鉴权保持原逻辑。
+客户端标识改变不保证网关放行；如果仍被拒绝，按检测报告中的请求记录核对实际规则。
 脚本根据响应头提示浏览器挑战、经过 Cloudflare 或 HTML 拦截页，不显示原始响应正文或凭据；平台预检失败时只显示相关提示。
 成功表示平台接受了当前启动账号的心跳，且 WinSW 服务持续运行 10 秒；请在平台确认服务账号后续心跳持续更新。
 仅希望离线启动时可显式加 `-SkipPlatformCheck`，这时不会报告平台连通性已通过。
@@ -39,8 +41,8 @@ Agent 可以独立启动，不需要先安装或部署 Sidecar。首次业务发
 
 检查 JSON、Python/WinSW/uv 路径、状态目录写入权限和任务数据库可读性、Agent/Sidecar 服务状态与登录账号、遗留的服务路径和 XML、代理环境、DNS、TCP 和 HTTPS 证书。
 Sidecar 未部署和 uv 缺失会列为提醒；不影响独立检测 Agent 平台连接。
-网络检测依次请求首页 GET、Python 心跳 POST、curl 相同心跳 POST、curl 使用 Python User-Agent 的心跳 POST，显示实际 URL、HTTP 状态、响应类型、重定向和 Cloudflare Ray ID。
-首页请求不携带凭据；三次心跳携带相同 Token 和请求体，不跟随重定向。原始响应正文、Cookie 和凭据不写入报告。
+网络检测依次请求首页 GET、Python 实际 Agent 心跳 POST、Python 旧 `Python-urllib` 标识心跳、默认 curl 心跳 POST、curl 使用 Agent 标识的心跳 POST，显示实际 URL、HTTP 状态、响应类型、重定向和 Cloudflare Ray ID。
+首页请求不携带凭据；四次心跳携带相同 Token 和请求体，仅客户端标识/HTTP 客户端不同，不跟随重定向。原始响应正文、Cookie 和凭据不写入报告。
 报告末尾的 `Diagnosis` 区分已确认的现象、可能原因和下一步检查；CF-Ray 可用于 Cloudflare 安全事件/Access 日志定位，但经过 Cloudflare 本身不能证明拦截发生在 Cloudflare。
 
 文本和 JSON 报告保存在 `diagnostics/environment-*.txt`、`*.json`，窗口完成后等待回车。
