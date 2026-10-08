@@ -74,6 +74,26 @@ Windows 主机需要能访问依赖源、Nacos、Java 账户目录/Lease 接口�
 }
 ```
 
+、、、
+{
+  "platformUrl": "https://deploy.dream22.xyz",
+  "cluster": "windows-mt5-test",
+  "instanceId": "windows-mt5-test-01",
+  "agentToken": "Z5cN1pR8vT3mK6xQ9dH2sL7fW0aJ4uA",
+  "stateDirectory": "C:\\ProgramData\\DeployPlatformAgent",
+  "applications": {
+    "python-mt5-http": {
+      "InstallRoot": "C:\\Users\\Administrator\\python-mt5-sidecar",
+      "Python": "C:\\Python313\\python.exe",
+      "Uv": "C:\\Tools\\uv.exe",
+      "ServiceWrapper": "C:\\Tools\\WinSW-x64.exe",
+      "StartupTimeoutSeconds": 600,
+      "Environment": {}
+    }
+  }
+}
+、、、
+
 需要认证时增加 Nacos 环境变量；凭据管理器保存 MT5 登录凭据。配置的环境变量同时用于部署前检查及 WinSW 子进程。
 本地 JSON、任务目录中的应用配置和业务 WinSW XML可能含敏感环境变量，限制为服务账号和管理员可读写。
 项目的 SQLite 命令日志放在稳定目录，不能放到 `.deploy\releases` 中。
