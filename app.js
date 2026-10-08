@@ -559,6 +559,7 @@ function normalizeDeployConfig(config = {}, task = {}) {
         imagePullSecretId: cluster.imagePullSecretId || "",
       })),
     runtimeEnv: config.runtimeEnv ?? task.runtimeEnv ?? "",
+    windowsEnv: config.windowsEnv ?? "",
     jvmOptions: config.jvmOptions ?? task.jvmOptions ?? "",
   };
 }
@@ -3149,6 +3150,17 @@ function deployConfigCardHtml(config, index) {
               : ""
           }
           ${
+            isWindows
+              ? `
+          <label class="wide-field">
+            <span>Sidecar .env 配置</span>
+            <textarea data-deploy-config-field="windowsEnv" spellcheck="false" placeholder="APP_ENV=test&#10;NACOS_SERVER_ADDR=http://nacos:8848&#10;NACOS_NAMESPACE=test">${escapeHtml(config.windowsEnv || "")}</textarea>
+            <small>有内容时每次发布完整替换服务器 .env；留空保留原文件。每行 KEY=VALUE，支持注释和引号，不支持跨行值或变量展开。</small>
+          </label>
+          `
+              : ""
+          }
+          ${
             isPages || isWindows
               ? ""
               : `
@@ -3520,6 +3532,7 @@ function currentDeployConfigSnapshot() {
       organizationIds: [formValue("organizationId") || "default"],
       clusters: isPages ? [] : clusterDrafts.map((cluster) => ({ ...cluster })),
       runtimeEnv: baseConfig.runtimeEnv || "",
+      windowsEnv: baseConfig.windowsEnv || "",
       jvmOptions: baseConfig.jvmOptions || "",
     },
     { name, env, organizationId: formValue("organizationId") || "default", deployRule: formValue("deployRule"), clusters: isPages ? [] : clusterDrafts },

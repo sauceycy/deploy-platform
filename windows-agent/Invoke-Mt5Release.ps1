@@ -9,7 +9,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+$OutputEncoding = [Console]::OutputEncoding
+$config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $root = [IO.Path]::GetFullPath($config.InstallRoot)
 if (-not [IO.Path]::IsPathRooted($config.InstallRoot) -or $root.TrimEnd('\') -eq [IO.Path]::GetPathRoot($root).TrimEnd('\')) {
     throw 'InstallRoot must be an application directory, not a drive root.'
@@ -43,36 +45,79 @@ $wasRunning = $null -ne $oldService -and $oldService.Status -eq 'Running'
 $oldRelease = if ($oldActive) { ($oldActive | ConvertFrom-Json).releasePath } else { $null }
 $timeout = [int]$config.StartupTimeoutSeconds
 if ($timeout -lt 30 -or $timeout -gt 1200) { throw 'StartupTimeoutSeconds must be between 30 and 1200.' }
-if ($Action -eq 'deploy') {
-    $expand = Join-Path $VerifiedDirectory 'deploy\windows\Expand-Release.ps1'
-    Write-Output 'Preparing isolated release and locked Windows dependencies'
-    & $expand -Package $Package -ExpectedSha256 $ExpectedSha256 -InstallRoot $root -Python $config.Python -Uv $config.Uv
-    $release = (Get-Content -LiteralPath (Join-Path $deploy 'prepared-release.txt') -Raw).Trim()
-} else {
-    if (-not (Test-Path -LiteralPath $historyPath)) { throw 'No previous successful release is available.' }
-    $history = Get-Content -LiteralPath $historyPath -Raw | ConvertFrom-Json
-    if (-not $history.previous) { throw 'No previous successful release is available.' }
-    if ($oldRelease -ne $history.current) { throw 'Active release changed outside Agent; inspect history before rollback.' }
-    $release = $history.previous
-}
-$release = (Resolve-Path -LiteralPath $release).Path
-$releasePrefix = (Join-Path $deploy 'releases').TrimEnd('\') + '\'
-if (-not $release.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Release path is outside the application release directory.' }
-$runtime = Join-Path $release '.venv\Scripts\python.exe'
-Push-Location $root
-try {
-    $settingsText = & $runtime (Join-Path $PSScriptRoot 'inspect_application.py') --config (Join-Path $deploy 'bootstrap-http.yaml')
-    if ($LASTEXITCODE -ne 0) { throw 'Runtime preflight failed before cutover.' }
-    $settings = $settingsText | ConvertFrom-Json
-    $capabilities = $settings
-    if ($settings.journalPath) {
-        $journalPath = [IO.Path]::GetFullPath($settings.journalPath)
-        if ($journalPath.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'Manager command journal must be outside versioned release directories.'
-        }
+$envPath = Join-Path $root '.env'
+$envSupplied = $null -ne $config.PSObject.Properties['EnvContent'] -and -not [string]::IsNullOrWhiteSpace([string]$config.EnvContent)
+$envExisted = $envSupplied -and (Test-Path -LiteralPath $envPath)
+$oldEnv = $null
+if ($envExisted) { $oldEnv = [IO.File]::ReadAllBytes($envPath) }
+$envApplied = $false
+function Write-EnvironmentFile([byte[]]$bytes) {
+    $temporary = $envPath + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+        [IO.File]::WriteAllBytes($temporary, $bytes)
+        if (Test-Path -LiteralPath $envPath) {
+            # File.Replace keeps the existing file's access control on Windows.
+            [IO.File]::Replace($temporary, $envPath, $null)
+        } else { [IO.File]::Move($temporary, $envPath) }
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
     }
-} finally { Pop-Location }
-if ($CancellationFile -and (Test-Path -LiteralPath $CancellationFile)) { throw 'Release cancelled before cutover.' }
+}
+function Apply-ConfiguredEnvironment {
+    if ($envSupplied) {
+        Write-EnvironmentFile -bytes ((New-Object Text.UTF8Encoding($false)).GetBytes([string]$config.EnvContent))
+        $script:envApplied = $true
+        Write-Output 'Selected deployment configuration .env applied; values are not logged.'
+    }
+}
+function Restore-EnvironmentFile {
+    if ($envApplied) {
+        if (-not $envExisted) { Remove-Item -LiteralPath $envPath -Force }
+        else { Write-EnvironmentFile -bytes $oldEnv }
+        $script:envApplied = $false
+        Write-Output 'Previous .env restored.'
+    }
+}
+try {
+    # Existing services keep their .env until cutover. Explicit process variables
+    # let the preparation checks use the selected configuration in the meantime.
+    if ($envSupplied -and -not (Test-Path -LiteralPath $envPath)) { Apply-ConfiguredEnvironment }
+    if ($Action -eq 'deploy') {
+        $expand = Join-Path $VerifiedDirectory 'deploy\windows\Expand-Release.ps1'
+        Write-Output 'Preparing isolated release and locked Windows dependencies'
+        & $expand -Package $Package -ExpectedSha256 $ExpectedSha256 -InstallRoot $root -Python $config.Python -Uv $config.Uv
+        $release = (Get-Content -LiteralPath (Join-Path $deploy 'prepared-release.txt') -Raw).Trim()
+    } else {
+        if (-not (Test-Path -LiteralPath $historyPath)) { throw 'No previous successful release is available.' }
+        $history = Get-Content -LiteralPath $historyPath -Raw | ConvertFrom-Json
+        if (-not $history.previous) { throw 'No previous successful release is available.' }
+        if ($oldRelease -ne $history.current) { throw 'Active release changed outside Agent; inspect history before rollback.' }
+        $release = $history.previous
+    }
+    $release = (Resolve-Path -LiteralPath $release).Path
+    $releasePrefix = (Join-Path $deploy 'releases').TrimEnd('\') + '\'
+    if (-not $release.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Release path is outside the application release directory.' }
+    $runtime = Join-Path $release '.venv\Scripts\python.exe'
+    Push-Location $root
+    try {
+        $settingsText = & $runtime (Join-Path $PSScriptRoot 'inspect_application.py') --config (Join-Path $deploy 'bootstrap-http.yaml')
+        if ($LASTEXITCODE -ne 0) { throw 'Runtime preflight failed before cutover.' }
+        $settings = $settingsText | ConvertFrom-Json
+        $capabilities = $settings
+        if ($settings.journalPath) {
+            $journalPath = [IO.Path]::GetFullPath($settings.journalPath)
+            if ($journalPath.StartsWith($releasePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Manager command journal must be outside versioned release directories.'
+            }
+        }
+    } finally { Pop-Location }
+    if ($CancellationFile -and (Test-Path -LiteralPath $CancellationFile)) { throw 'Release cancelled before cutover.' }
+} catch {
+    $preparationFailure = $_
+    try { Restore-EnvironmentFile }
+    catch { throw 'Preparation failed and .env restoration failed. Inspect the application directory before retrying.' }
+    throw $preparationFailure
+}
 $installedNow = $false
 $cutoverStarted = $false
 try {
@@ -87,6 +132,7 @@ try {
     }
     $cutoverStarted = $true
     & (Join-Path $release 'deploy\windows\Stop-PreviousService.ps1') -InstallRoot $root
+    Apply-ConfiguredEnvironment
     New-Item -ItemType Directory -Force (Split-Path -Parent $wrapper),(Join-Path $deploy 'logs') | Out-Null
     if (-not (Test-Path -LiteralPath $wrapper)) {
         Copy-Item -LiteralPath $config.ServiceWrapper -Destination $wrapper
@@ -146,7 +192,7 @@ try {
     }
     if (-not $healthy) { throw 'Full application health check timed out.' }
     Set-Service -Name 'python-mt5-http' -StartupType Automatic
-    [ordered]@{releasePath=$release; service='python-mt5-http'; port=$settings.port; activatedAtUtc=[DateTime]::UtcNow.ToString('o')} |
+    [ordered]@{releasePath=$release; service='python-mt5-http'; port=$settings.port; healthUrl=$settings.healthUrl; activatedAtUtc=[DateTime]::UtcNow.ToString('o')} |
         ConvertTo-Json | Set-Content -LiteralPath ($activePath + '.tmp') -Encoding UTF8
     Move-Item -LiteralPath ($activePath + '.tmp') -Destination $activePath -Force
     [ordered]@{current=$release; previous=$oldRelease; activatedAtUtc=[DateTime]::UtcNow.ToString('o')} |
@@ -155,8 +201,12 @@ try {
     Write-Output "SUCCESS: $Action complete; queries, enabled streams and Manager connections verified. Persistent command journal was preserved."
 } catch {
     $failure = $_
+    if (-not $cutoverStarted) {
+        try { Restore-EnvironmentFile }
+        catch { throw 'Deployment failed before cutover and .env restoration failed. Inspect the application directory.' }
+        throw $failure
+    }
     try {
-        if (-not $cutoverStarted) { throw $failure }
         Stop-Service -Name 'python-mt5-http' -ErrorAction SilentlyContinue
         $service = Get-Service -Name 'python-mt5-http' -ErrorAction SilentlyContinue
         if ($service) { $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(60)) }
@@ -164,6 +214,7 @@ try {
             & $wrapper uninstall
             if ($LASTEXITCODE -ne 0) { throw 'Failed to uninstall unsuccessful service.' }
         }
+        Restore-EnvironmentFile
         if ($oldXml) {
             [IO.File]::WriteAllText($xmlPath, $oldXml, (New-Object Text.UTF8Encoding($false)))
             if ($oldService) {
@@ -176,11 +227,17 @@ try {
         elseif (Test-Path -LiteralPath $activePath) { Remove-Item -LiteralPath $activePath }
         if ($wasRunning) {
             Start-Service -Name 'python-mt5-http'
+            $restoreHealthUrl = $settings.healthUrl
+            if ($oldActive) {
+                $previousActive = $oldActive | ConvertFrom-Json
+                if ($null -ne $previousActive.PSObject.Properties['healthUrl']) { $restoreHealthUrl = $previousActive.healthUrl }
+                elseif ($null -ne $previousActive.PSObject.Properties['port']) { $restoreHealthUrl = 'http://127.0.0.1:' + $previousActive.port }
+            }
             $restoreDeadline = [DateTime]::UtcNow.AddSeconds($timeout)
             $restored = $false
             while ([DateTime]::UtcNow -lt $restoreDeadline) {
                 try {
-                    $health = Invoke-RestMethod -Uri ($settings.healthUrl + '/health/ready') -TimeoutSec 5
+                    $health = Invoke-RestMethod -Uri ($restoreHealthUrl + '/health/ready') -TimeoutSec 5
                     if ($health.status -eq 'UP') { $restored = $true; break }
                 } catch {}
                 Start-Sleep -Seconds 2

@@ -62,7 +62,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Check-Environment.ps1 
 
 1. Windows Server x64 安装 CPython 3.13 x64、uv、经过校验且支持本项目 XML 配置的 WinSW x64。无需 `refresh` 命令。Agent 使用独立的系统 Python，不使用业务服务的 `.venv`。
 2. 将本目录放在固定目录，例如 `C:\DeployPlatformAgent`。将 `config.example.json` 另存为 `config.json` 并填写实际地址、服务器名称、Token 和工具路径。
-3. 创建业务目录，准备根目录 `.env` 和 `.deploy\bootstrap-http.yaml`。test 可使用项目现有 `.env`；生产配置见下文。根目录 `.env` 是项目现有解压脚本的前置要求，prod 可以保留一个不含凭据的空文件。
+3. 在平台的每个 Windows 发布配置填写独立的「Sidecar .env 配置」，并按需准备 `.deploy\bootstrap-http.yaml`。有内容时 Agent 在首次发布自动创建根目录 `.env`，以后每次发布完整替换为本次配置，不合并旧文件；留空时保留服务器原文件，首次留空则需手工准备 `.env`。
 4. 在平台的「集群管理」登记服务器，例如 `windows-mt5-test`，设置独立 Agent Token。名称和 Token 必须与本地配置一致。namespace、镜像拉取秘钥不用于 Windows 发布。
 5. 配置 Windows 账号对业务目录、Agent 状态目录和 Manager 命令数据库的访问权限。Agent 和业务服务使用同一登录账号，该账号必须能够管理这两个服务，并能读取 MT5 Windows 通用凭据；现有项目脚本要求管理员权限。
 
@@ -103,6 +103,30 @@ Start-Service deploy-platform-windows-agent
 3. 选择已在线的 Windows 服务器，发布配置「应用部署名」设为 `python-mt5-http`，与 Agent 配置一致。
 4. 选择分支并发布。平台执行仓库的 `deploy/package_windows.py --package-only`，持久化发布 ZIP，再下发 Agent 任务。
 
+## 发布配置中的 .env
+
+更新平台后，在 Windows 任务的「编辑任务 → 发布配置」中填写「Sidecar .env 配置」。各配置独立保存，例如 test/prod 分别填写自己的 `APP_ENV`、Nacos 地址/namespace 和 MT5 地址。
+
+```dotenv
+APP_ENV=test
+NACOS_CONFIG_ENABLED=true
+NACOS_SERVER_ADDR=http://nacos.internal:8848
+NACOS_NAMESPACE=test-namespace-id
+NACOS_GROUP=DEFAULT_GROUP
+NACOS_DATA_ID=python-mt5-sidecar.yaml
+MT5_MANAGER_SERVER=mt5.internal:443
+```
+
+需要认证时填写 `NACOS_USERNAME`、`NACOS_PASSWORD` 等实际变量。支持每行 `KEY=VALUE`、注释、单/双引号和 `export KEY=VALUE`，不支持变量展开或跨行值；最多 64 KiB。错误提示仅显示行号，不显示配置值。
+每次新发布从当前保存的发布配置取值，并在入队时保存快照。执行期间再编辑配置只影响下一次发布。内容为空或只有空白时不下发、不替换服务器 `.env`。
+Agent 把原文以 UTF-8 写入 `InstallRoot\.env`，并将解析出的变量显式传给准备检查和业务 WinSW 服务，因此 staging/prod 无需自动加载 dotenv。
+有内容时所选配置完整替换业务环境变量，不合并本地 `applications.<app>.Environment`；留空或旧平台下发的不含 `.env` 的任务仍沿用本地配置和原行为。
+配置准备期间，已有 `.env` 保持不变；停止旧服务后再替换。首次没有 `.env` 时会先创建；准备或切换失败时还原原文件字节（原来没有文件则删除新文件），再按原逻辑恢复旧服务。
+手动版本回滚仍使用本次所选发布配置的最新 `.env`（留空时保留服务器当前文件），不恢复历史配置值。Agent 崩溃/服务器断电后的中断仍需检查实际文件和服务状态，不自动重放任务。
+日志不输出 `.env` 内容，执行历史摘要不返回该快照字段；发布配置编辑器、平台存储、Agent 任务目录和 WinSW XML 会保存实际配置，沿用应用目录和平台数据目录的访问权限。
+
+平台和 Agent 都需更新。更新 `windows_agent.py` 和 `Invoke-Mt5Release.ps1` 后，在无发布任务运行时执行 `Start-Agent.cmd` 重启 Agent，等新心跳上报 `dotenv-v1` 能力；有 `.env` 内容的任务会明确拒绝未更新的 Agent，留空的任务仍兼容旧 Agent。
+
 Agent 校验 ZIP 和逐文件清单，调用项目的 `Expand-Release.ps1` 准备独立版本及锁定依赖，再使用本地 WinSW 适配器完成切换。
 适配器只管理 `python-mt5-http` 和项目原先的 `python-mt5-sidecar` 采集服务；不管理 MT5 Access/Trade/History 服务。
 启动验收包括 `/health/ready`、已启用推送的 `/health/streaming`、已配置 Manager 网关的 `/api/v1/manager/health`，不会发送真实交易作为探测。
@@ -114,18 +138,16 @@ Windows 主机需要能访问依赖源、Nacos、Java 账户目录/Lease 接口�
 ## 生产环境配置
 
 提前创建 `.deploy\bootstrap-http.yaml`，明确 `service.environment: prod` 和实际 Nacos 配置。未预建时，原项目脚本默认生成 test 引导配置。
-在 `config.json` 的应用 `Environment` 中提供服务环境，例如：
+在平台 prod 发布配置的「Sidecar .env 配置」中提供服务环境，例如：
 
-```json
-"Environment": {
-  "APP_ENV": "prod",
-  "PYTHON_MT5_SIDECAR_DOTENV_ENABLED": "false",
-  "NACOS_SERVER_ADDR": "http://nacos.internal:8848",
-  "NACOS_NAMESPACE": "actual-production-namespace-id",
-  "NACOS_GROUP": "DEFAULT_GROUP",
-  "NACOS_DATA_ID": "python-mt5-sidecar.yaml",
-  "MT5_MANAGER_SERVER": "mt5.internal:443"
-}
+```dotenv
+APP_ENV=prod
+NACOS_CONFIG_ENABLED=true
+NACOS_SERVER_ADDR=http://nacos.internal:8848
+NACOS_NAMESPACE=actual-production-namespace-id
+NACOS_GROUP=DEFAULT_GROUP
+NACOS_DATA_ID=python-mt5-sidecar.yaml
+MT5_MANAGER_SERVER=mt5.internal:443
 ```
 
 
@@ -141,7 +163,7 @@ Windows 主机需要能访问依赖源、Nacos、Java 账户目录/Lease 接口�
 发布切换失败会恢复原 WinSW XML，并尝试恢复原服务；已有 HTTP 服务恢复后检查查询就绪。恢复失败会单独写出 `ROLLBACK FAILED`，平台仍将本次发布记为失败。
 首次从旧采集服务切换失败时，恢复项目保存的旧服务状态。
 
-回滚只切换代码及 Python 虚拟环境，继续使用当前 Nacos/本地环境和持久化命令日志，不删除、恢复旧副本或重放交易命令。
+手动回滚切换代码及 Python 虚拟环境，所选配置有 `.env` 内容时替换，为空时保留服务器文件；继续使用当前 Nacos/持久化命令日志，不删除、恢复旧副本或重放交易命令。
 需提前确保代码与配置及命令日志兼容；启用交易写入时，发布前在 Java 暂停派发并处理未决命令，验收后刷新会话再恢复。此版本不自动操作 Java 控制面。
 取消会在下载或切换前检查；进入服务切换后先完成切换/恢复，不强杀业务服务。已取消的任务不会在平台被改写为成功。
 Agent 部署期间持续心跳，运行任务不自动转交其他实例。异常退出后，将未完成任务标记失败并补报，不自动重放；先检查实际服务，再发起新的发布或回滚。
@@ -154,6 +176,7 @@ Agent 状态和任务日志：`stateDirectory`；业务 WinSW 日志：`InstallR
 
 平台与 ZIP 协议测试：`python3 -m unittest discover -s tests -v`；前端模式检查：`node --test tests/windows_form.test.cjs`。
 本地开发环境不具备 Windows SCM 和真实 MT5 SDK，仍需在目标 Windows 上验证首次注册、连续两次发布、回滚、错误配置恢复和完整业务健康检查。
+Windows 原生 `.env` 文件事务测试：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/test-env-file.ps1`，只使用临时目录，不操作服务。
 
 
 

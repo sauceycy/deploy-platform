@@ -8,10 +8,49 @@ import uuid
 from urllib.parse import parse_qs
 
 
+def parse_windows_env(content):
+    if not isinstance(content, str) or len(content.encode('utf-8')) > 65536 or '\x00' in content:
+        raise ValueError('Windows .env 必须是文本，大小不超过 64 KiB，且不能包含空字符')
+    values = {}
+    names = set()
+    for number, line in enumerate(content.lstrip('\ufeff').splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('export '):
+            line = line[7:].lstrip()
+        key, separator, value = line.partition('=')
+        key, value = key.strip(), value.strip()
+        if not separator or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key):
+            raise ValueError(f'Windows .env 第 {number} 行需要 KEY=VALUE 格式')
+        if key.lower() in names:
+            raise ValueError(f'Windows .env 第 {number} 行变量重复（Windows 不区分大小写）')
+        names.add(key.lower())
+        if value.startswith("'"):
+            match = re.fullmatch(r"'([^']*)'\s*(?:#.*)?", value)
+            if not match:
+                raise ValueError(f'Windows .env 第 {number} 行单引号未闭合；不支持跨行值')
+            value = match[1]
+        elif value.startswith('"'):
+            match = re.fullmatch(r'"((?:[^"\\]|\\.)*)"\s*(?:#.*)?', value)
+            if not match:
+                raise ValueError(f'Windows .env 第 {number} 行双引号未闭合；不支持跨行值')
+            escapes = {'n': '\n', 'r': '\r', 't': '\t', '"': '"', '\\': '\\'}
+            value = re.sub(r'\\([nrt"\\])', lambda found: escapes[found[1]], match[1])
+        else:
+            value = re.split(r'\s+#', value, maxsplit=1)[0].rstrip()
+        if '${' in value:
+            raise ValueError(f'Windows .env 第 {number} 行不支持变量展开，请填写最终值')
+        values[key] = value
+    return values
+
+
 def dispatch(s, state, execution, task, action, artifact=None):
     targets = task.get("clusters") or []
     if not targets:
         raise ValueError("请选择 Windows Agent 服务器")
+    content = task.get('windowsEnv') or ''
+    env_file = {'content': content, 'variables': parse_windows_env(content)} if content.strip() else None
     names = []
     for target in targets:
         name = str(target.get("name") or "").strip()
@@ -22,6 +61,8 @@ def dispatch(s, state, execution, task, action, artifact=None):
         heartbeat = s.cluster_heartbeat_for_name(state, name) or {}
         if heartbeat.get("kind") != "windows" or not s.cluster_agent_is_fresh(state, name):
             raise ValueError(f"Windows Agent 未在线: {name}")
+        if env_file is not None and 'dotenv-v1' not in heartbeat.get('capabilities', []):
+            raise ValueError(f'Windows Agent {name} 尚不支持发布配置 .env；请更新并重启 Agent，等待新心跳')
         if name in names:
             raise ValueError(f"重复的 Windows 服务器: {name}")
         names.append(name)
@@ -35,6 +76,8 @@ def dispatch(s, state, execution, task, action, artifact=None):
         if artifact:
             payload.update(artifact)
             payload["downloadPath"] = f"/api/windows-agent/artifacts/{task_id}"
+        if env_file is not None:
+            payload['envFile'] = env_file
         state["agentTasks"].append({
             "id": task_id, "kind": "windows", "executionId": execution["id"],
             "taskId": task["id"], "clusterName": name, "status": "pending",
@@ -162,7 +205,7 @@ class WindowsRoutes:
                 try:
                     body = self.read_json_body()
                     execution, state = rollback(s, rollback_match.group(1), actor, body.get("deployConfigId"))
-                    self.send_json({"execution": execution, "state": s.client_state(state, compact=True)})
+                    self.send_json({"execution": s.execution_summary(execution), "state": s.client_state(state, compact=True)})
                 except Exception as error:
                     self.send_json({"error": str(error)}, status=400)
             return True
@@ -175,7 +218,8 @@ class WindowsRoutes:
         if parsed.path == "/api/windows-agent/heartbeat":
             def heartbeat(state):
                 state["agentHeartbeats"] = [h for h in state["agentHeartbeats"] if s.normalize_cluster_key(h.get("cluster")) != s.normalize_cluster_key(cluster)]
-                state["agentHeartbeats"].append({"cluster": cluster, "instanceId": instance, "version": "windows-0.1", "kind": "windows", "time": s.now_text()})
+                capabilities = ['dotenv-v1'] if isinstance(body.get('capabilities'), list) and 'dotenv-v1' in body['capabilities'] else []
+                state["agentHeartbeats"].append({"cluster": cluster, "instanceId": instance, "version": "windows-0.1", "kind": "windows", "time": s.now_text(), "capabilities": capabilities})
             s.mutate_state(heartbeat)
             self.send_json({"ok": True})
             return True

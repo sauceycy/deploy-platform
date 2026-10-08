@@ -25,7 +25,7 @@ class WindowsDeploymentTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.state = copy.deepcopy(s.DEFAULT_STATE)
         self.state["clusters"] = [{"name": "win-test", "agentToken": "win-secret", "organizationId": "default"}]
-        self.state["agentHeartbeats"] = [{"cluster": "win-test", "instanceId": "win-01", "kind": "windows", "time": s.now_text()}]
+        self.state["agentHeartbeats"] = [{"cluster": "win-test", "instanceId": "win-01", "kind": "windows", "time": s.now_text(), "capabilities": ["dotenv-v1"]}]
         self.task = s.normalize_task_payload({
             "name": "python-mt5-http", "repo": "https://example.com/repo.git", "deployRule": "windows",
             "clusters": [{"name": "win-test"}], "organizationId": "default",
@@ -93,6 +93,12 @@ class WindowsDeploymentTests(unittest.TestCase):
         accepted = self.handler(body=body)
         self.assertTrue(accepted.windows_post(path))
         accepted.send_json.assert_called_once_with({"ok": True})
+
+    def test_heartbeat_advertises_environment_support_only_when_agent_supplies_it(self):
+        self.post('/api/windows-agent/heartbeat', capabilities=['dotenv-v1', 'unknown'])
+        self.assertEqual(self.state['agentHeartbeats'][0]['capabilities'], ['dotenv-v1'])
+        self.post('/api/windows-agent/heartbeat', capabilities='dotenv-v1')
+        self.assertEqual(self.state['agentHeartbeats'][0]['capabilities'], [])
 
     def test_claim_is_idempotent_and_does_not_take_over_running_task(self):
         self.enqueue()

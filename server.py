@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
 from xml.sax.saxutils import escape as xml_escape
-from windows_deploy import WindowsRoutes, package_and_dispatch
+from windows_deploy import WindowsRoutes, package_and_dispatch, parse_windows_env
 
 try:
     import psycopg
@@ -294,6 +294,7 @@ def normalize_deploy_config(config, task=None, index=0):
         "organizationId": organization_ids[0],
         "clusters": normalized_clusters,
         "runtimeEnv": str(config.get("runtimeEnv") if config.get("runtimeEnv") is not None else task.get("runtimeEnv") or ""),
+        "windowsEnv": str(config.get("windowsEnv") or ""),
         "jvmOptions": str(config.get("jvmOptions") if config.get("jvmOptions") is not None else task.get("jvmOptions") or ""),
         "createdAt": str(config.get("createdAt") or now_text()),
         "updatedAt": str(config.get("updatedAt") or now_text()),
@@ -692,6 +693,8 @@ def compact_error_logs(logs):
 def execution_summary(execution, compact=False):
     logs = execution.get("logs") if isinstance(execution.get("logs"), list) else []
     item = {key: copy.deepcopy(value) for key, value in execution.items() if key != "logs"}
+    if isinstance(item.get('deployConfigSnapshot'), dict):
+        item['deployConfigSnapshot'].pop('windowsEnv', None)
     item["logCount"] = len(logs)
     if logs:
         item["latestLog"] = compact_log_entry(logs[-1]) if compact else copy.deepcopy(logs[-1])
@@ -2361,6 +2364,7 @@ def effective_task_for_deploy_config(task, deploy_config):
     effective["cloudflareApiTokenSecretId"] = deploy_config.get("cloudflareApiTokenSecretId") or task.get("cloudflareApiTokenSecretId") or ""
     effective["clusters"] = copy.deepcopy(deploy_config.get("clusters") or task.get("clusters") or [])
     effective["runtimeEnv"] = deploy_config.get("runtimeEnv") if deploy_config.get("runtimeEnv") is not None else task.get("runtimeEnv") or ""
+    effective['windowsEnv'] = deploy_config.get('windowsEnv') or ''
     effective["jvmOptions"] = deploy_config.get("jvmOptions") if deploy_config.get("jvmOptions") is not None else task.get("jvmOptions") or ""
     return effective
 
@@ -2994,6 +2998,9 @@ def normalize_task_payload(payload):
     }
     task_payload["organizationIds"] = [task_payload["organizationId"]]
     task_payload["deployConfigs"] = normalize_deploy_configs(payload.get("deployConfigs"), task_payload)
+    if deploy_rule == 'windows':
+        for config in task_payload['deployConfigs']:
+            parse_windows_env(config['windowsEnv'])
     if app_type == "frontend":
         task_payload["language"] = "node"
         if not task_payload["sdk"] or not task_payload["sdk"].startswith("node"):
@@ -3923,7 +3930,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"executions": executions, "state": client_state(state, compact=True)})
+            self.send_json({"executions": [execution_summary(item) for item in executions], "state": client_state(state, compact=True)})
             return
         match = re.match(r"^/api/tasks/([^/]+)/run$", parsed.path)
         if match:
@@ -3936,7 +3943,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"execution": execution, "state": client_state(state, compact=True)})
+            self.send_json({"execution": execution_summary(execution), "state": client_state(state, compact=True)})
             return
         match = re.match(r"^/api/tasks/([^/]+)/schedule$", parsed.path)
         if match:
@@ -3962,7 +3969,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
                 return
-            self.send_json({"execution": execution, "state": client_state(state, compact=True)})
+            self.send_json({"execution": execution_summary(execution), "state": client_state(state, compact=True)})
             return
         match = re.match(r"^/api/schedules/([^/]+)/cancel$", parsed.path)
         if match:

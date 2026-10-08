@@ -112,10 +112,14 @@ class Agent:
 
     def redact(self, text):
         values = [self.headers["X-Agent-Token"]]
+        if self.current:
+            env_file = self.current.get('payload', {}).get('envFile') or {}
+            values.append(env_file.get('content', ''))
+            values.extend(env_file.get('variables', {}).values())
         for application in self.config["applications"].values():
             values.extend(str(value) for value in application.get("Environment", {}).values())
-        for value in sorted(values, key=len, reverse=True):
-            if len(value) >= 4:
+        for value in sorted((value for value in values if isinstance(value, str)), key=len, reverse=True):
+            if value:
                 text = text.replace(value, "***")
         text = "\n".join("[sensitive configuration output omitted]" if re.search(r"input_value=|credentialRef|(?:password|secret|token)\s*[:=]", line, re.I) else line for line in text.splitlines())
         return text
@@ -123,7 +127,7 @@ class Agent:
     def background(self):
         while not self.stopped.is_set():
             try:
-                self.request("/api/windows-agent/heartbeat", {})
+                self.request("/api/windows-agent/heartbeat", {'capabilities': ['dotenv-v1']})
                 task = self.current
                 if task:
                     result = self.request(f"/api/windows-agent/tasks/{task['id']}/progress", {})
@@ -158,14 +162,32 @@ class Agent:
             raise ValueError("Release ZIP download incomplete")
         temporary.replace(destination)
 
+    def deployment_settings(self, payload):
+        settings = self.config['applications'].get(payload['application'])
+        if not settings:
+            raise ValueError(f"Application is not configured locally: {payload['application']}")
+        settings = dict(settings)
+        if 'envFile' in payload:
+            env_file = payload['envFile']
+            if not isinstance(env_file, dict) or not isinstance(env_file.get('content'), str) or not isinstance(env_file.get('variables'), dict) or len(env_file['content'].encode('utf-8')) > 65536 or '\x00' in env_file['content']:
+                raise ValueError('Invalid Windows environment payload')
+            variables = env_file['variables']
+            if any(not isinstance(key, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key) or not isinstance(value, str) or '\x00' in value for key, value in variables.items()):
+                raise ValueError('Invalid Windows environment variables')
+            if not env_file['content'].strip():
+                return settings
+            settings['EnvContent'] = env_file['content']
+            environment = {key: value for key, value in variables.items() if key.lower() != 'python_mt5_sidecar_dotenv_enabled'}
+            # Inject explicitly so production does not need automatic dotenv loading.
+            environment['PYTHON_MT5_SIDECAR_DOTENV_ENABLED'] = 'false'
+            settings['Environment'] = environment
+        return settings
+
     def execute(self, task):
         payload = task["payload"]
-        application = payload["application"]
-        settings = self.config["applications"].get(application)
-        if not settings:
-            raise ValueError(f"Application is not configured locally: {application}")
         if payload["action"] not in {"deploy", "rollback"}:
             raise ValueError("Unsupported Windows action")
+        settings = self.deployment_settings(payload)
         task_dir = self.root / task["id"]
         task_dir.mkdir(exist_ok=True)
         local_config = task_dir / "application.json"

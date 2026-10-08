@@ -70,3 +70,29 @@ test('Pages form still uses Node and does not display Agent server selection', (
   assert.equal(groups['.agent-target-field'][0].hidden, true);
   assert.equal(groups['.pages-deploy-field'][0].hidden, false);
 });
+
+test('Windows deployment configs preserve independent dotenv and escape editor contents', () => {
+  const context = {
+    formValue(name) { return name === 'deployRule' ? 'windows' : 'mt5'; },
+    assetOrganizationIds() { return ['default']; },
+    escapeHtml(value) { return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;'); },
+    normalizeAppType() { return 'backend'; },
+    deployConfigLabel(config) { return config.name; },
+    deployConfigOrganizationIds() { return ['default']; },
+    organizationName() { return 'default'; },
+    organizationChecksHtml() { return ''; },
+  };
+  vm.createContext(context);
+  vm.runInContext(functionSource('normalizeDeployRule', 'normalizeAppType'), context);
+  vm.runInContext(functionSource('normalizeDeployConfig', 'normalizeDeployConfigs'), context);
+  vm.runInContext(functionSource('deployConfigCardHtml', 'renderDeployConfigsEditor'), context);
+  const configs = ['APP_ENV=test\nSECRET=</textarea><script>', 'APP_ENV=prod'].map((windowsEnv) => context.normalizeDeployConfig({ windowsEnv, clusters: [] }, { name: 'mt5', deployRule: 'windows' }));
+  assert.equal(configs[0].windowsEnv, 'APP_ENV=test\nSECRET=</textarea><script>');
+  assert.equal(configs[1].windowsEnv, 'APP_ENV=prod');
+  const html = context.deployConfigCardHtml(configs[0], 0);
+  assert.match(html, /data-deploy-config-field="windowsEnv"/);
+  assert.match(html, /&lt;\/textarea&gt;&lt;script&gt;/);
+  assert.doesNotMatch(html, /SECRET=<\/textarea>/);
+  context.formValue = (name) => name === 'deployRule' ? 'k8s' : 'mt5';
+  assert.doesNotMatch(context.deployConfigCardHtml(configs[0], 0), /data-deploy-config-field="windowsEnv"/);
+});
