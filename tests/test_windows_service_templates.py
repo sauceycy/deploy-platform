@@ -21,7 +21,7 @@ class WinSWTemplateTests(unittest.TestCase):
                     self.assertNotIn("\\", path)
 
     def test_all_service_templates_include_winsw_required_metadata(self):
-        for filename in ("Install-Agent.ps1", "Initialize-Mt5Service.ps1", "Invoke-Mt5Release.ps1"):
+        for filename in ("Install-Agent.ps1", "Initialize-Mt5Service.ps1", "Invoke-Mt5Release.ps1", "Start-Agent.ps1"):
             with self.subTest(script=filename):
                 source = (AGENT_DIR / filename).read_text()
                 template = re.search(r'\$xml = @"\r?\n(.*?)\r?\n"@', source, re.S).group(1)

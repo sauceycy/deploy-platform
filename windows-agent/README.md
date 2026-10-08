@@ -4,6 +4,29 @@
 Windows Agent 主动拉取 ZIP 发布任务，通过 WinSW 管理 `python-mt5-http`；不需要平台通过 SSH 登录 Windows。
 当前仅适配你提供的 python-mt5-sidecar 项目，每台服务器运行一个 Agent、一个 MT5 HTTP 服务。
 
+## 一键启动 Agent（推荐）
+
+配置好本目录的 `config.json` 后，双击 `Start-Agent.cmd`，同意管理员权限提示。也可在 PowerShell 执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-Agent.ps1
+```
+
+Agent 可以独立启动，不需要先安装或部署 Sidecar。首次业务发布前仍需准备业务配置、凭据和服务账号。
+脚本读取应用配置中的 `Python` 和 `ServiceWrapper` 路径，检查 Python、JSON 格式、状态目录权限和平台心跳。
+新服务器自动注册 Agent；重复执行会更新已注册 Agent 的程序路径和 XML，保留原来的登录账号和密码。
+重新解压到其他目录后也可以用它修复原注册，但不要在 Agent 部署任务执行期间移动文件。
+已登记的 Agent 处于运行状态且记录未完成发布时，脚本拒绝重启；Agent 已停止时，启动会沿用原有中断任务失败补报行为。
+新 Agent 默认使用 LocalSystem；实际业务发布前，将 Agent 和业务服务的登录身份调整为 MT5 凭据所属的同一账号。
+
+失败窗口会显示 `[FAILED] Stage: ...`、具体错误和最近的 WinSW 日志，并保留窗口等待回车。
+平台检查会区别 HTTP 400（服务器未登记）、401（Token 不一致）、403（访问拦截）、404（平台版本/地址不正确）。
+成功表示平台接受了当前启动账号的心跳，且 WinSW 服务持续运行 10 秒；请在平台确认服务账号后续心跳持续更新。
+仅希望离线启动时可显式加 `-SkipPlatformCheck`，这时不会报告平台连通性已通过。
+这些启动检查不领取部署任务、不重置命令数据库，也不安装或启动业务 Sidecar。
+
+已有 Agent 时，以往的 `Install-Agent.ps1` 拒绝重复安装；现在直接使用 `Start-Agent.cmd` 即可修复 Agent 注册。
+
 ## 一次性准备
 
 1. Windows Server x64 安装 CPython 3.13 x64、uv、经过校验的 WinSW x64（2.12 或更新版本，支持 `refresh`）。Agent 使用独立的系统 Python，不使用业务服务的 `.venv`。
