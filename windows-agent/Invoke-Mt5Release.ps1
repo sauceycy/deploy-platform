@@ -53,14 +53,17 @@ if ($envExisted) { $oldEnv = [IO.File]::ReadAllBytes($envPath) }
 $envApplied = $false
 function Write-EnvironmentFile([byte[]]$bytes) {
     $temporary = $envPath + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    $backup = $temporary + '.bak'
     try {
         [IO.File]::WriteAllBytes($temporary, $bytes)
         if (Test-Path -LiteralPath $envPath) {
-            # File.Replace keeps the existing file's access control on Windows.
-            [IO.File]::Replace($temporary, $envPath, $null)
+            # Windows PowerShell converts $null to an empty string for this .NET
+            # argument. Use a real backup path; Replace preserves destination ACLs.
+            [IO.File]::Replace($temporary, $envPath, $backup)
         } else { [IO.File]::Move($temporary, $envPath) }
     } finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+        if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
     }
 }
 function Apply-ConfiguredEnvironment {

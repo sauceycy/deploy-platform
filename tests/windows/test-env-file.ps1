@@ -30,6 +30,10 @@ try {
         Apply-ConfiguredEnvironment
         if ([IO.File]::ReadAllText($envPath) -ne $config.EnvContent) { throw ('New .env content differs: ' + $scenario) }
         if (-not $envApplied) { throw 'Environment application was not recorded.' }
+        # The first release creates .env during preparation and replaces it at cutover.
+        # Exercise the second write even when this scenario began without a file.
+        Apply-ConfiguredEnvironment
+        if ([IO.File]::ReadAllText($envPath) -ne $config.EnvContent) { throw ('Repeated replacement differs: ' + $scenario) }
         Restore-EnvironmentFile
         if ($envExisted) {
             if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($envPath)) -ne [Convert]::ToBase64String($oldEnv)) {
@@ -39,6 +43,7 @@ try {
         if ($envApplied) { throw 'Environment restoration state was not reset.' }
         Restore-EnvironmentFile
         if (@(Get-ChildItem -LiteralPath $testRoot -Filter '*.tmp').Count -ne 0) { throw 'Temporary environment files remain.' }
+        if (@(Get-ChildItem -LiteralPath $testRoot -Filter '*.bak').Count -ne 0) { throw 'Temporary environment backups remain.' }
         Write-Host ('PASS: ' + $scenario)
     }
     $envSupplied = $false
