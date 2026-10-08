@@ -100,3 +100,10 @@ Agent 状态和任务日志：`stateDirectory`；业务 WinSW 日志：`InstallR
 
 平台与 ZIP 协议测试：`python3 -m unittest discover -s tests -v`；前端模式检查：`node --test tests/windows_form.test.cjs`。
 本地开发环境不具备 Windows SCM 和真实 MT5 SDK，仍需在目标 Windows 上验证首次注册、连续两次发布、回滚、错误配置恢复和完整业务健康检查。
+
+
+
+```
+powershell.exe -ExecutionPolicy Bypass -File .\Install-Agent.ps1 -Python 'C:\Python313\python.exe' -WinSW 'C:\Tools\WinSW-x64.exe'
+powershell.exe -ExecutionPolicy Bypass -File .\Initialize-Mt5Service.ps1 -InstallRoot 'C:\Users\Administrator\python-mt5-sidecar' -Python 'C:\Python313\python.exe' -WinSW 'C:\Tools\WinSW-x64.exe'
+```
