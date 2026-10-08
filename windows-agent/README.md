@@ -107,3 +107,21 @@ Agent 状态和任务日志：`stateDirectory`；业务 WinSW 日志：`InstallR
 powershell.exe -ExecutionPolicy Bypass -File .\Install-Agent.ps1 -Python 'C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe' -WinSW 'C:\Users\Administrator\AppData\Local\Programs\WinSW\WinSW-x64.exe'
 powershell.exe -ExecutionPolicy Bypass -File .\Initialize-Mt5Service.ps1 -InstallRoot 'C:\Users\Administrator\python-mt5-sidecar' -Python 'C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe' -WinSW 'C:\Users\Administrator\AppData\Local\Programs\WinSW\WinSW-x64.exe'
 ```
+
+
+```
+$base = 'https://raw.githubusercontent.com/sauceycy/deploy-platform/7673d7a/windows-agent'
+
+foreach ($name in @('Install-Agent.ps1', 'Initialize-Mt5Service.ps1', 'Invoke-Mt5Release.ps1')) {
+    Invoke-WebRequest -UseBasicParsing -Uri "$base/$name" -OutFile ".\$name"
+}
+```
+
+```
+$python = 'C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe'
+$winsw = 'C:\Users\Administrator\AppData\Local\Programs\WinSW\WinSW-x64.exe'
+
+powershell.exe -ExecutionPolicy Bypass -File .\Install-Agent.ps1 -Python $python -WinSW $winsw -ConfigPath .\config.json
+
+powershell.exe -ExecutionPolicy Bypass -File .\Initialize-Mt5Service.ps1 -InstallRoot 'C:\Users\Administrator\python-mt5-sidecar' -Python $python -WinSW $winsw
+```
