@@ -161,3 +161,11 @@ Start-Service deploy-platform-windows-agent
 Get-Service deploy-platform-windows-agent
 Get-Content .\logs\*.err.log -Tail 40
 ```
+
+```
+$base = 'https://raw.githubusercontent.com/sauceycy/deploy-platform/dc58957/windows-agent'
+foreach ($name in @('Start-Agent.cmd', 'Start-Agent.ps1', 'agent_check.py')) {
+    Invoke-WebRequest -UseBasicParsing -Uri "$base/$name" -OutFile ".\$name"
+}
+.\Start-Agent.cmd
+```
