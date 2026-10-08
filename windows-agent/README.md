@@ -15,6 +15,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-Agent.ps1
 Agent 可以独立启动，不需要先安装或部署 Sidecar。首次业务发布前仍需准备业务配置、凭据和服务账号。
 脚本读取应用配置中的 `Python` 和 `ServiceWrapper` 路径，检查 Python、JSON 格式、状态目录权限和平台心跳。
 新服务器自动注册 Agent；重复执行会更新已注册 Agent 的程序路径和 XML，保留原来的登录账号和密码。
+已有服务通过 Windows 服务接口修改路径和启动类型，WinSW 启动时重新读取 XML；Agent、业务发布和回滚均不依赖 `refresh` 命令。
+已有服务的 Windows 故障恢复策略沿用已注册设置；首次注册时由 WinSW 根据 XML 设置，新建业务占位服务的恢复策略可在 Windows「服务 → 恢复」配置。
 重新解压到其他目录后也可以用它修复原注册，但不要在 Agent 部署任务执行期间移动文件。
 已登记的 Agent 处于运行状态且记录未完成发布时，脚本拒绝重启；Agent 已停止时，启动会沿用原有中断任务失败补报行为。
 新 Agent 默认使用 LocalSystem；实际业务发布前，将 Agent 和业务服务的登录身份调整为 MT5 凭据所属的同一账号。
@@ -58,7 +60,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Check-Environment.ps1 
 
 ## 一次性准备
 
-1. Windows Server x64 安装 CPython 3.13 x64、uv、经过校验的 WinSW x64（2.12 或更新版本，支持 `refresh`）。Agent 使用独立的系统 Python，不使用业务服务的 `.venv`。
+1. Windows Server x64 安装 CPython 3.13 x64、uv、经过校验且支持本项目 XML 配置的 WinSW x64。无需 `refresh` 命令。Agent 使用独立的系统 Python，不使用业务服务的 `.venv`。
 2. 将本目录放在固定目录，例如 `C:\DeployPlatformAgent`。将 `config.example.json` 另存为 `config.json` 并填写实际地址、服务器名称、Token 和工具路径。
 3. 创建业务目录，准备根目录 `.env` 和 `.deploy\bootstrap-http.yaml`。test 可使用项目现有 `.env`；生产配置见下文。根目录 `.env` 是项目现有解压脚本的前置要求，prod 可以保留一个不含凭据的空文件。
 4. 在平台的「集群管理」登记服务器，例如 `windows-mt5-test`，设置独立 Agent Token。名称和 Token 必须与本地配置一致。namespace、镜像拉取秘钥不用于 Windows 发布。

@@ -162,8 +162,7 @@ try {
         # Updating ImagePath preserves the existing service logon identity and password.
         $changed = Invoke-CimMethod -InputObject $existing -MethodName Change -Arguments @{PathName=(Quote-Path $wrapper); StartMode='Automatic'}
         if ($changed.ReturnValue -ne 0) { throw ('Windows service update failed; SCM return code ' + $changed.ReturnValue) }
-        & $wrapper refresh
-        if ($LASTEXITCODE -ne 0) { throw 'WinSW refresh failed. Use WinSW 2.12 or newer; see the wrapper output above.' }
+        # WinSW reads the updated adjacent XML when the stopped service starts.
         Write-Host ('[OK] Existing Agent registration updated; service logon account kept: ' + $existing.StartName) -ForegroundColor Green
     } else {
         & $wrapper install

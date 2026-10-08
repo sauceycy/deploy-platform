@@ -122,8 +122,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'WinSW service installation failed.' }
         $installedNow = $true
     } else {
-        & $wrapper refresh
-        if ($LASTEXITCODE -ne 0) { throw 'WinSW refresh failed; use WinSW 2.12 or newer.' }
+        # The existing wrapper reads the new XML on start; older WinSW has no refresh.
+        Set-Service -Name 'python-mt5-http' -StartupType Automatic
     }
     Start-Service -Name 'python-mt5-http'
     $deadline = [DateTime]::UtcNow.AddSeconds($timeout)
@@ -167,8 +167,7 @@ try {
         if ($oldXml) {
             [IO.File]::WriteAllText($xmlPath, $oldXml, (New-Object Text.UTF8Encoding($false)))
             if ($oldService) {
-                & $wrapper refresh
-                if ($LASTEXITCODE -ne 0) { throw 'Cannot refresh previous WinSW configuration.' }
+                # Restarting uses the restored XML and keeps the service logon account.
                 $priorMode = switch ($serviceInfo.StartMode) { 'Auto' { 'Automatic' } 'Disabled' { 'Disabled' } default { 'Manual' } }
                 Set-Service -Name 'python-mt5-http' -StartupType $priorMode
             }
