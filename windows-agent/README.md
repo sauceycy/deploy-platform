@@ -181,6 +181,7 @@ Agent 状态和任务日志：`stateDirectory`；业务 WinSW 日志：`InstallR
 本地开发环境不具备 Windows SCM 和真实 MT5 SDK，仍需在目标 Windows 上验证首次注册、连续两次发布、回滚、错误配置恢复和完整业务健康检查。
 Windows 原生 `.env` 文件事务测试：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/test-env-file.ps1`，只使用临时目录，不操作服务。
 主备推送验收测试：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/test-streaming-health.ps1`，只检查响应判定，不操作服务。
+HTTP 503 优先从 PowerShell 的 `ErrorDetails.Message` 读取正文，缺少正文时才读取响应流，兼容 Windows PowerShell 5.1 已消费响应流的情况；测试覆盖这两种读取路径及无效响应。
 
 
 

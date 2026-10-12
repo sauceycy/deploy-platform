@@ -104,9 +104,18 @@ function Get-StreamingHealth([string]$url) {
     } catch {
         $response = $_.Exception.Response
         if ($null -eq $response -or [int]$response.StatusCode -ne 503) { throw }
-        $reader = [IO.StreamReader]::new($response.GetResponseStream(), [Text.Encoding]::UTF8)
-        try { $body = $reader.ReadToEnd() | ConvertFrom-Json }
-        finally { $reader.Dispose(); $response.Close() }
+        $requestFailure = $_
+        try {
+            # PowerShell 5.1 may consume the response stream into ErrorDetails.
+            $content = if ($null -ne $requestFailure.ErrorDetails) { $requestFailure.ErrorDetails.Message } else { '' }
+            if ([string]::IsNullOrWhiteSpace($content)) {
+                $reader = [IO.StreamReader]::new($response.GetResponseStream(), [Text.Encoding]::UTF8)
+                try { $content = $reader.ReadToEnd() }
+                finally { $reader.Dispose() }
+            }
+            if ([string]::IsNullOrWhiteSpace($content)) { throw 'Streaming health HTTP 503 returned an empty response body.' }
+            $body = $content | ConvertFrom-Json
+        } finally { $response.Close() }
         return @{ statusCode = 503; body = $body }
     }
 }
