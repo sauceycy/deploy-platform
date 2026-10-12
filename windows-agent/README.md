@@ -132,7 +132,7 @@ Agent 校验 ZIP 和逐文件清单，调用项目的 `Expand-Release.ps1` 准�
 适配器只管理 `python-mt5-http` 和项目原先的 `python-mt5-sidecar` 采集服务；不管理 MT5 Access/Trade/History 服务。
 额外运行检查明确从本次选中的版本 `src` 加载 Sidecar 模块，避免 Agent 目录或继承的 `PYTHONPATH` 中的旧包遮蔽新版本。更新此检查时需同时更新 `Invoke-Mt5Release.ps1` 和 `inspect_application.py`。
 检查支持新版 `config_loader.load_config` / `mt5.credentials` 和旧版 `query_config.load_query_config` / `security` 接口；新版加载失败时直接报告错误，不降级读取旧接口。
-启动验收包括 `/health/ready`、已启用推送的 `/health/streaming`、已配置 Manager 网关的 `/api/v1/manager/health`，不会发送真实交易作为探测。
+启动验收包括 `/health/ready`、已启用推送的 `/health/streaming`、已配置 Manager 网关的 `/api/v1/manager/health`，不会发送真实交易作为探测。推送可以是 `LIVE`；主备部署中，如果接口返回 HTTP 503、`enabled=true`、`status=DOWN` 且每个已启用的推送组件均处于 `LIVE` 或 `STANDBY`（至少一个为 `STANDBY`），也视为发布成功。其他 `DOWN` 状态仍等待并在超时后回滚。
 
 Windows 主机需要能访问依赖源、Nacos、Java 账户目录/Lease 接口、MT5 Manager，以及启用推送时的全部 Kafka broker。
 平台需要从 Windows 可访问；生产使用 HTTPS。业务 HTTP 端口仅向 Java 内网来源开放。无需开放 Windows Agent 入站端口。
@@ -180,6 +180,7 @@ Agent 状态和任务日志：`stateDirectory`；业务 WinSW 日志：`InstallR
 平台与 ZIP 协议测试：`python3 -m unittest discover -s tests -v`；前端模式检查：`node --test tests/windows_form.test.cjs`。
 本地开发环境不具备 Windows SCM 和真实 MT5 SDK，仍需在目标 Windows 上验证首次注册、连续两次发布、回滚、错误配置恢复和完整业务健康检查。
 Windows 原生 `.env` 文件事务测试：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/test-env-file.ps1`，只使用临时目录，不操作服务。
+主备推送验收测试：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/test-streaming-health.ps1`，只检查响应判定，不操作服务。
 
 
 

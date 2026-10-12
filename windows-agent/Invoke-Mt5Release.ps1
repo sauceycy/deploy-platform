@@ -81,6 +81,35 @@ function Restore-EnvironmentFile {
         Write-Output 'Previous .env restored.'
     }
 }
+function Test-StreamingHealth($stream, [int]$statusCode) {
+    if (-not $stream.enabled) { return $false }
+    if ($statusCode -eq 200) { return $stream.status -eq 'LIVE' }
+    if ($statusCode -ne 503 -or $stream.status -ne 'DOWN') { return $false }
+    $enabled = 0
+    $standby = 0
+    foreach ($name in @('accountState', 'groupPrice')) {
+        $property = $stream.PSObject.Properties[$name]
+        if ($null -eq $property -or $null -eq $property.Value) { return $false }
+        $component = $property.Value
+        if (-not $component.enabled) { continue }
+        $enabled++
+        if ($component.status -eq 'STANDBY') { $standby++ }
+        elseif ($component.status -ne 'LIVE') { return $false }
+    }
+    return $enabled -gt 0 -and $standby -gt 0
+}
+function Get-StreamingHealth([string]$url) {
+    try {
+        return @{ statusCode = 200; body = (Invoke-RestMethod -Uri $url -TimeoutSec 5) }
+    } catch {
+        $response = $_.Exception.Response
+        if ($null -eq $response -or [int]$response.StatusCode -ne 503) { throw }
+        $reader = [IO.StreamReader]::new($response.GetResponseStream(), [Text.Encoding]::UTF8)
+        try { $body = $reader.ReadToEnd() | ConvertFrom-Json }
+        finally { $reader.Dispose(); $response.Close() }
+        return @{ statusCode = 503; body = $body }
+    }
+}
 try {
     # Existing services keep their .env until cutover. Explicit process variables
     # let the preparation checks use the selected configuration in the meantime.
@@ -182,8 +211,8 @@ try {
             $ready = Invoke-RestMethod -Uri ($settings.healthUrl + '/health/ready') -TimeoutSec 5
             if ($ready.status -ne 'UP') { throw 'Query service is not ready.' }
             if ($capabilities.streaming) {
-                $stream = Invoke-RestMethod -Uri ($settings.healthUrl + '/health/streaming') -TimeoutSec 5
-                if (-not $stream.enabled -or $stream.status -ne 'LIVE') { throw 'Streaming is not ready.' }
+                $streamHealth = Get-StreamingHealth ($settings.healthUrl + '/health/streaming')
+                if (-not (Test-StreamingHealth $streamHealth.body $streamHealth.statusCode)) { throw 'Streaming is not ready.' }
             }
             if ($capabilities.manager) {
                 $manager = Invoke-RestMethod -Uri ($settings.healthUrl + '/api/v1/manager/health') -TimeoutSec 30
@@ -201,7 +230,7 @@ try {
     [ordered]@{current=$release; previous=$oldRelease; activatedAtUtc=[DateTime]::UtcNow.ToString('o')} |
         ConvertTo-Json | Set-Content -LiteralPath ($historyPath + '.tmp') -Encoding UTF8
     Move-Item -LiteralPath ($historyPath + '.tmp') -Destination $historyPath -Force
-    Write-Output "SUCCESS: $Action complete; queries, enabled streams and Manager connections verified. Persistent command journal was preserved."
+    Write-Output "SUCCESS: $Action complete; queries and Manager connections verified; enabled streams are LIVE or STANDBY. Persistent command journal was preserved."
 } catch {
     $failure = $_
     if (-not $cutoverStarted) {
