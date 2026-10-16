@@ -19,9 +19,10 @@ class JavaRuntimeTests(unittest.TestCase):
 
             self.assertEqual(artifact, "target/demo.jar")
             self.assertEqual((context / "app.jar").read_bytes(), b"jar")
+            self.assertIn('RUN ["/bin/bash","-c","true"]', content)
             self.assertIn('ENV VM_OPTS="-Xms256m -Xmx512m"', content)
             self.assertIn('ENV APP_OPTS=""', content)
-            self.assertIn('ENTRYPOINT ["/bin/sh","-c","exec java ${VM_OPTS:-} -jar /app/app.jar ${APP_OPTS:-}"]', content)
+            self.assertIn('ENTRYPOINT ["/bin/bash","-c","exec java $VM_OPTS -jar /app/app.jar $APP_OPTS"]', content)
 
             task["jvmOptions"] = ""
             dockerfile, _, _ = server.generate_dockerfile(task, src_dir, src_dir)

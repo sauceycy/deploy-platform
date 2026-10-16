@@ -2177,7 +2177,7 @@ def generate_dockerfile(task, app_dir, src_dir):
         jvm_options = normalize_jvm_options(task.get("jvmOptions"))
         vm_opts_line = f"ENV VM_OPTS={dockerfile_env_value(jvm_options)}\n" if jvm_options else "ENV VM_OPTS=\"\"\n"
         generated.write_text(
-            f"FROM {runtime_base(task)}\nWORKDIR /app\nCOPY app.jar app.jar\n{vm_opts_line}ENV APP_OPTS=\"\"\nEXPOSE {port}\nENTRYPOINT [\"/bin/sh\",\"-c\",\"exec java ${{VM_OPTS:-}} -jar /app/app.jar ${{APP_OPTS:-}}\"]\n",
+            f"FROM {runtime_base(task)}\nRUN [\"/bin/bash\",\"-c\",\"true\"]\nWORKDIR /app\nCOPY app.jar app.jar\n{vm_opts_line}ENV APP_OPTS=\"\"\nEXPOSE {port}\nENTRYPOINT [\"/bin/bash\",\"-c\",\"exec java $VM_OPTS -jar /app/app.jar $APP_OPTS\"]\n",
             encoding="utf-8",
         )
         return generated, context_dir, jars[0].relative_to(src_dir).as_posix()
