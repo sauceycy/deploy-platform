@@ -359,7 +359,7 @@ Java 任务可以在「运行配置」填写「JVM 启动参数」，例如：
 -Xms512m -Xmx1024m -Dspring.profiles.active=test
 ```
 
-平台自动生成 Java Dockerfile 时会把它写入 `JAVA_OPTS`，并用 `java $JAVA_OPTS -jar /app/app.jar` 启动；发布到 Kubernetes 时也会在 Pod 环境变量里注入同样的 `JAVA_OPTS`。
+平台自动生成 Java Dockerfile 时会把「JVM 启动参数」写入 `VM_OPTS`，并用 `java $VM_OPTS -jar /app/app.jar $APP_OPTS` 启动。未配置的变量默认为空；需要在 JAR 后追加应用参数时，可在「运行环境变量」中填写 `APP_OPTS=--spring.profiles.active=test`。发布到 Kubernetes 时会在 Pod 环境变量里注入已配置的 `VM_OPTS` 和 `APP_OPTS`。参数按空格拆分，包含空格的单个参数不适合通过这两个变量传入。
 
 「编译工作路径」只决定编译命令在哪里执行；「JAR 包路径」决定自动生成 Dockerfile 时复制哪个产物，路径相对仓库根目录，支持通配符。多模块 Maven 项目可以这样配置：
 

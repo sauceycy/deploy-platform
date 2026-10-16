@@ -2175,9 +2175,9 @@ def generate_dockerfile(task, app_dir, src_dir):
         shutil.copy2(jars[0], context_dir / "app.jar")
         generated = context_dir / "Dockerfile"
         jvm_options = normalize_jvm_options(task.get("jvmOptions"))
-        java_opts_line = f"ENV JAVA_TOOL_OPTIONS={dockerfile_env_value(jvm_options)}\n" if jvm_options else "ENV JAVA_TOOL_OPTIONS=\"\"\n"
+        vm_opts_line = f"ENV VM_OPTS={dockerfile_env_value(jvm_options)}\n" if jvm_options else "ENV VM_OPTS=\"\"\n"
         generated.write_text(
-            f"FROM {runtime_base(task)}\nWORKDIR /app\nCOPY app.jar app.jar\n{java_opts_line}EXPOSE {port}\nENTRYPOINT [\"java\",\"-jar\",\"/app/app.jar\"]\n",
+            f"FROM {runtime_base(task)}\nWORKDIR /app\nCOPY app.jar app.jar\n{vm_opts_line}ENV APP_OPTS=\"\"\nEXPOSE {port}\nENTRYPOINT [\"/bin/sh\",\"-c\",\"exec java ${{VM_OPTS:-}} -jar /app/app.jar ${{APP_OPTS:-}}\"]\n",
             encoding="utf-8",
         )
         return generated, context_dir, jars[0].relative_to(src_dir).as_posix()
@@ -2229,7 +2229,7 @@ def create_manifest(task, target, image, pull_secret=None):
     jvm_options = normalize_jvm_options(task.get("jvmOptions"))
     env_block = ""
     if task.get("language") == "java" and jvm_options:
-        runtime_env["JAVA_TOOL_OPTIONS"] = jvm_options
+        runtime_env["VM_OPTS"] = jvm_options
     if runtime_env:
         env_lines = ["          env:"]
         for key, value in runtime_env.items():
