@@ -11,8 +11,8 @@ function functionSource(name, next) {
 function formContext(rule) {
   const elements = {};
   for (const name of ['deployRule', 'appType', 'language', 'buildCommand', 'containerPort', 'servicePort', 'replicas',
-    'buildMode', 'dockerfilePath', 'dockerContext', 'dockerPlatform', 'dockerBuildArgs', 'pagesPackageManager', 'pagesDeployCommand', 'cloudflareAccountIdSecretId', 'cloudflareApiTokenSecretId']) {
-    elements[name] = { value: '', disabled: false, required: false, closest() { return this.label ||= {}; } };
+    'pagesPackageManager', 'pagesDeployCommand', 'cloudflareAccountIdSecretId', 'cloudflareApiTokenSecretId']) {
+    elements[name] = { value: '', disabled: false, required: false };
   }
   elements.deployRule.value = rule;
   elements.appType.value = 'backend';
@@ -95,19 +95,4 @@ test('Windows deployment configs preserve independent dotenv and escape editor c
   assert.doesNotMatch(html, /SECRET=<\/textarea>/);
   context.formValue = (name) => name === 'deployRule' ? 'k8s' : 'mt5';
   assert.doesNotMatch(context.deployConfigCardHtml(configs[0], 0), /data-deploy-config-field="windowsEnv"/);
-});
-
-test('Custom Dockerfile mode skips SDK compilation and enables context fields', () => {
-  const { context, elements, groups } = formContext('k8s');
-  elements.buildMode.value = 'dockerfile';
-  context.syncDeployRuleFields();
-  assert.equal(elements.buildCommand.required, false);
-  assert.equal(elements.buildCommand.disabled, true);
-  assert.equal(elements.dockerContext.disabled, false);
-  assert.equal(groups['.docker-build-field'][0].hidden, false);
-  elements.buildMode.value = 'auto';
-  context.syncDeployRuleFields();
-  assert.equal(elements.buildCommand.required, true);
-  assert.equal(elements.buildCommand.disabled, false);
-  assert.equal(elements.dockerContext.disabled, true);
 });

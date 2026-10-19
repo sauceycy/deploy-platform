@@ -66,13 +66,11 @@ SDK_OPTIONS = {
     "java": ["jdk8", "oraclejdk8u381", "jdk11", "jdk17", "jdk21", "jdk25"],
     "node": ["node18", "node20", "node22", "node24"],
     "golang": ["go1.21", "go1.22", "go1.23"],
-    "python": ["python3.10", "python3.11", "python3.12", "pywine:3.13"],
+    "python": ["python3.10", "python3.11", "python3.12"],
 }
 
 
 def default_sdk_builder_image(language, sdk):
-    if language == "python" and sdk == "pywine:3.13":
-        return "tobix/pywine:3.13"
     version = re.sub(r"^(jdk|node|go|python)", "", str(sdk or ""))
     if language == "java" and sdk == "oraclejdk8u381":
         return ""
@@ -88,8 +86,6 @@ def default_sdk_builder_image(language, sdk):
 
 
 def default_sdk_runtime_image(language, sdk):
-    if language == "python" and sdk == "pywine:3.13":
-        return "tobix/pywine:3.13"
     version = re.sub(r"^(jdk|node|go|python)", "", str(sdk or ""))
     if language == "java" and sdk == "oraclejdk8u381":
         return "eclipse-temurin:8-jre"
@@ -376,7 +372,7 @@ def normalize_sdk_images(value):
                 language = "node"
             elif sdk.startswith("go"):
                 language = "golang"
-            elif sdk.startswith("python") or sdk.startswith("pywine:"):
+            elif sdk.startswith("python"):
                 language = "python"
         key = f"{language}:{sdk}"
         if not language or not sdk or key in seen:
@@ -398,14 +394,11 @@ def normalize_platform_settings(state):
             merged[f"{item['language']}:{item['sdk']}"] = item
         sdk_images = list(merged.values())
         initialized = True
-    if not settings.get("pywineImagesInitialized") and not any(item["sdk"] == "pywine:3.13" for item in sdk_images):
-        sdk_images.append(next(item for item in default_sdk_images() if item["sdk"] == "pywine:3.13"))
     state["platformSettings"] = {
         "registrySecretId": str(settings.get("registrySecretId") or "").strip(),
         "imageNamespace": str(settings.get("imageNamespace") or IMAGE_NAMESPACE or "deploy-platform").strip().strip("/") or "deploy-platform",
         "sdkImages": sdk_images,
         "sdkImagesInitialized": initialized,
-        "pywineImagesInitialized": True,
     }
 
 
@@ -1278,8 +1271,6 @@ def builder_image(task):
         return custom_image
     if sdk in CUSTOM_IMAGE_REQUIRED_SDKS:
         raise RuntimeError(CUSTOM_IMAGE_REQUIRED_SDKS[sdk])
-    if sdk == "pywine:3.13":
-        return "tobix/pywine:3.13"
     if sdk.startswith("jdk"):
         return f"maven:3-eclipse-temurin-{sdk.replace('jdk', '')}"
     if sdk.startswith("node"):
@@ -1296,8 +1287,6 @@ def runtime_base(task):
     custom_runtime = sdk_image_mapping(task, sdk).get("runtimeImage")
     if custom_runtime:
         return custom_runtime
-    if sdk == "pywine:3.13":
-        return "tobix/pywine:3.13"
     if task.get("language") == "java" and sdk == "oraclejdk8u381":
         return "eclipse-temurin:8-jre"
     if task.get("language") == "java" and sdk.startswith("jdk"):
@@ -2147,43 +2136,7 @@ def normalize_health_check(value, fallback=None):
     }
 
 
-def custom_docker_build(task):
-    return task.get("deployRule", "k8s") == "k8s" and task.get("buildMode") == "dockerfile"
-
-
-def repository_build_path(root, value, label):
-    relative = Path(value)
-    if relative.is_absolute():
-        raise ValueError(f"{label}必须是仓库内的相对路径")
-    root = root.resolve()
-    result = (root / relative).resolve()
-    if not result.is_relative_to(root):
-        raise ValueError(f"{label}不能超出仓库目录")
-    return result
-
-
-def docker_build_command(task, image, dockerfile, context):
-    command = ["docker", "build", "-t", image, "-f", str(dockerfile)]
-    if custom_docker_build(task):
-        if task.get("dockerPlatform"):
-            command += ["--platform", task["dockerPlatform"]]
-        arguments = parse_key_value_env(task.get("dockerBuildArgs"), "Docker 构建参数")
-        if task.get("sdk") == "pywine:3.13":
-            arguments.setdefault("PYWINE_IMAGE", builder_image(task))
-        for key, value in arguments.items():
-            command += ["--build-arg", f"{key}={value}"]
-    return command + [str(context)]
-
-
 def generate_dockerfile(task, app_dir, src_dir):
-    if custom_docker_build(task):
-        dockerfile = repository_build_path(src_dir, task.get("dockerfilePath") or "Dockerfile", "Dockerfile 路径")
-        context = repository_build_path(src_dir, task.get("dockerContext") or ".", "构建上下文")
-        if not dockerfile.is_file():
-            raise ValueError(f"Dockerfile 不存在: {task.get('dockerfilePath') or 'Dockerfile'}")
-        if not context.is_dir():
-            raise ValueError("Docker 构建上下文目录不存在")
-        return dockerfile, context, None
     existing = app_dir / "Dockerfile"
     language = task.get("language")
     port = int(task.get("containerPort") or 8080)
@@ -2283,10 +2236,6 @@ def create_manifest(task, target, image, pull_secret=None):
             env_lines.append(f"            - name: {key}")
             env_lines.append(f"              value: {json.dumps(value, ensure_ascii=False)}")
         env_block = "\n".join(env_lines) + "\n"
-    node_selector_block = ""
-    if custom_docker_build(task) and task.get("dockerPlatform"):
-        architecture = task["dockerPlatform"].split("/")[1]
-        node_selector_block = f"      nodeSelector:\n        kubernetes.io/os: linux\n        kubernetes.io/arch: {architecture}\n"
     docs = []
     if AUTO_CREATE_NAMESPACE:
         docs.append(
@@ -2336,7 +2285,7 @@ spec:
       labels:
         app: {app}
     spec:
-{node_selector_block}{image_pull_secret_block}      containers:
+{image_pull_secret_block}      containers:
         - name: {app}
           image: {image}
           imagePullPolicy: Always
@@ -2744,9 +2693,7 @@ def build_and_dispatch(execution_id):
             return
 
         command = task.get("buildCommand") or ""
-        if custom_docker_build(task):
-            append_log(execution_id, f"自定义 Dockerfile 构建，跳过 SDK 编译；Dockerfile: {task.get('dockerfilePath') or 'Dockerfile'}；上下文: {task.get('dockerContext') or '.'}；架构: {task.get('dockerPlatform') or '构建机默认'}")
-        if command and not custom_docker_build(task):
+        if command:
             set_execution_status(execution_id, "building", f"使用 {task.get('sdk')} 执行编译命令", stage="执行编译", progress=35)
             command, fast_options = apply_maven_fast_options(command)
             if fast_options:
@@ -2782,14 +2729,14 @@ def build_and_dispatch(execution_id):
         ensure_execution_active(execution_id)
         if selected_artifact:
             append_log(execution_id, f"已选择构建产物: {selected_artifact}")
-        if task_app_type(task) == "frontend" and not custom_docker_build(task):
+        if task_app_type(task) == "frontend":
             append_log(execution_id, "前端静态站点使用平台生成的 nginx 镜像，不执行项目自带 Dockerfile。")
         set_execution_status(execution_id, "building", f"开始构建镜像 {image}", stage="构建镜像", progress=65)
         build_env = None
-        if custom_docker_build(task) or (task_app_type(task) != "frontend" and task.get("language") in {"java", "node", "python"}):
-            runtime_image = (parse_key_value_env(task.get("dockerBuildArgs"), "Docker 构建参数").get("PYWINE_IMAGE") or builder_image(task)) if custom_docker_build(task) else runtime_base(task)
+        if task_app_type(task) != "frontend" and task.get("language") in {"java", "node", "python"}:
+            runtime_image = runtime_base(task)
             build_env = docker_login_env_for_secret(execution_id, sdk_pull_secret(task, runtime_image), runtime_image, work_dir / ".docker-build", "运行基础镜像")
-        code, output, elapsed = run_command_stream(docker_build_command(task, image, dockerfile, docker_context), execution_id, cwd=docker_context, env=build_env)
+        code, output, elapsed = run_command_stream(["docker", "build", "-t", image, "-f", str(dockerfile), "."], execution_id, cwd=docker_context, env=build_env)
         if code != 0:
             raise RuntimeError("Docker 镜像构建失败")
         append_log(execution_id, f"Docker 镜像构建耗时: {format_duration(elapsed)}")
@@ -3026,11 +2973,6 @@ def normalize_task_payload(payload):
         "language": str(payload.get("language") or "java").strip().lower(),
         "sdk": str(payload.get("sdk") or "").strip(),
         "buildCommand": str(payload.get("buildCommand") or "").strip(),
-        "buildMode": str(payload.get("buildMode") or "auto"),
-        "dockerfilePath": str(payload.get("dockerfilePath") or "Dockerfile").strip(),
-        "dockerContext": str(payload.get("dockerContext") or ".").strip(),
-        "dockerPlatform": str(payload.get("dockerPlatform") or "").strip(),
-        "dockerBuildArgs": str(payload.get("dockerBuildArgs") or ""),
         "buildEnv": str(payload.get("buildEnv") or ""),
         "pagesPackageManager": package_manager,
         "pagesDeployCommand": str(payload.get("pagesDeployCommand") or "").strip() or default_pages_deploy_command(package_manager),
@@ -3095,15 +3037,7 @@ def save_task_config(task_id, payload, actor):
         raise ValueError("任务名称不能为空")
     if not task_payload["repo"]:
         raise ValueError("仓库地址不能为空")
-    if task_payload["buildMode"] not in {"auto", "dockerfile"}:
-        raise ValueError("不支持的构建模式")
-    if task_payload["dockerPlatform"] not in {"", "linux/amd64", "linux/arm64"}:
-        raise ValueError("不支持的镜像架构")
-    if custom_docker_build(task_payload):
-        for key in ("dockerfilePath", "dockerContext"):
-            repository_build_path(Path("."), task_payload[key], key)
-        parse_key_value_env(task_payload["dockerBuildArgs"], "Docker 构建参数")
-    if task_payload["deployRule"] == "k8s" and not custom_docker_build(task_payload) and not task_payload["buildCommand"]:
+    if task_payload["deployRule"] == "k8s" and not task_payload["buildCommand"]:
         raise ValueError("编译命令不能为空")
     if task_payload["deployRule"] == "cf_pages" and not task_payload["pagesDeployCommand"]:
         raise ValueError("CF Pages 部署命令不能为空")

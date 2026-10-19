@@ -493,28 +493,3 @@ http://localhost:8080
 ```text
 任务配置 -> 拉取代码 -> SDK 容器编译 -> 构建镜像 -> 推送镜像仓库 -> Agent 多集群部署 -> 健康检查 -> 告警通知
 ```
-
-
-## 自定义 Dockerfile / Wine 项目部署
-
-在任务编辑中将「构建模式」选择为「自定义 Dockerfile」。平台跳过前置 SDK 编译，直接构建、推送项目镜像，再按原流程部署到 Kubernetes（包括 Serverless 容器集群）。原有任务默认仍使用 SDK 编译模式。
-
-- **Dockerfile 路径**：相对 Git 仓库根目录，例如 `deploy/Dockerfile`。
-- **构建上下文**：同样相对仓库根目录，例如 `.` 或 `services/mt5`；Dockerfile 中 COPY 的源路径相对此上下文。以上两项不相对「编译工作路径」，也不能通过 `..` 或符号链接越出仓库。
-- **镜像架构**：Wine 项目选择 `linux/amd64`，平台构建时传入 `--platform`，并为 Deployment 添加 Linux amd64 节点选择器。构建节点需原生支持该架构，或预先配置跨架构构建能力。
-- **构建参数**：每行 `KEY=VALUE`，以 Docker `--build-arg` 传入；不要用于密码或 Token。运行环境变量仍在发布配置中维护。
-
-「镜像管理 → Python」新增 `pywine:3.13`，默认编译/运行镜像地址为 `tobix/pywine:3.13`。可以编辑为自己的镜像仓库地址，并绑定镜像仓库拉取秘钥。升级会补充该条目，保留已有自定义地址。
-
-自定义 Dockerfile 模式选择此 SDK 时，平台将配置的**编译镜像地址**传为 `PYWINE_IMAGE`，项目 Dockerfile 应使用：
-
-```dockerfile
-ARG PYWINE_IMAGE=tobix/pywine:3.13
-FROM ${PYWINE_IMAGE}
-```
-
-构建参数中显式填写的 `PYWINE_IMAGE` 优先。其他自定义 Dockerfile 的基础镜像仍由其 FROM / ARG 决定，镜像管理不会替换写死的 FROM。任务中的其他 Dockerfile 配置按任务共用，各发布配置可继续使用不同仓库和运行环境变量。
-
-MT5 示例：语言 Python，SDK `pywine:3.13`，构建模式「自定义 Dockerfile」，Dockerfile 路径 `Dockerfile`，上下文 `.`，架构 `linux/amd64`，容器端口 `8080`，HTTP 就绪检查 `/health/ready`。单实例场景将副本数设为 1。
-
-此模式不添加 PVC。容器本地状态在重建后丢失；项目的命令去重日志等持久化状态需由业务另行处理。平台支持发布 Wine 镜像，不代表其中的 Windows DLL 已完成 Wine 兼容性验证。
