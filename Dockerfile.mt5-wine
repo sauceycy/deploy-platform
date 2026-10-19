@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1
+# Copy this file to the python-mt5-sidecar repository root as Dockerfile.
+# Build on Linux amd64: docker build --platform linux/amd64 -t python-mt5-sidecar:wine .
+ARG PYWINE_IMAGE=tobix/pywine:3.13
+FROM ${PYWINE_IMAGE}
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends xvfb xauth curl tini \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    WINEDEBUG=-all \
+    PYTHON_MT5_SIDECAR_DOTENV_ENABLED=false \
+    MT5_CONFIG_PATH=Z:/app/config/python-mt5-http.yaml
+
+# Windows Python evaluates the project's win32 dependency markers, installing
+# MT5Manager and pywin32. Do not install these using Linux Python.
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+COPY contracts/ ./contracts/
+RUN xvfb-run -a wine python -m pip install --no-cache-dir . \
+    && xvfb-run -a wine python -c "import sys, struct; assert sys.platform == 'win32' and sys.version_info[:2] == (3, 13) and struct.calcsize('P') == 8; import MT5Manager, win32api, confluent_kafka; from python_mt5_sidecar.http_server import create_app"
+
+# Copy only the bootstrap example, never a developer's .env or credentials.
+# Override Nacos settings with the platform's runtime environment variables.
+COPY config/python-mt5-http.yaml.example ./config/python-mt5-http.yaml
+
+# No additional shell script is required in the business repository.
+# Preserve the image's WINEPREFIX: Windows Python is installed in that prefix.
+RUN <<'SH'
+set -eu
+cat > /usr/local/bin/mt5-entrypoint <<'ENTRYPOINT'
+#!/bin/sh
+set -eu
+# Ephemeral directory only. Not a durable command journal.
+mkdir -p /app/tmp
+exec xvfb-run -a --server-args='-screen 0 1280x720x24 -nolisten tcp' "$@"
+ENTRYPOINT
+chmod +x /usr/local/bin/mt5-entrypoint
+SH
+
+EXPOSE 8080
+# Kubernetes/serverless probes must also be configured in the deployment platform.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+    CMD curl --fail --silent http://127.0.0.1:8080/health/live || exit 1
+
+# One worker per SDK instance. Explicit asyncio/h11 avoids Unix-only backends.
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/usr/local/bin/mt5-entrypoint"]
+CMD ["wine", "python", "-u", "-m", "uvicorn", "python_mt5_sidecar.http_server:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--loop", "asyncio", "--http", "h11"]

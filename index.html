@@ -554,6 +554,34 @@
               <span>SDK 版本</span>
               <select name="sdk" id="sdkSelect"></select>
             </label>
+            <label class="k8s-build-field">
+              <span>构建模式</span>
+              <select name="buildMode" id="buildModeSelect">
+                <option value="auto">SDK 编译 / 自动镜像</option>
+                <option value="dockerfile">自定义 Dockerfile（跳过 SDK 编译）</option>
+              </select>
+            </label>
+            <label class="docker-build-field" hidden>
+              <span>Dockerfile 路径（相对仓库根目录）</span>
+              <input name="dockerfilePath" value="Dockerfile" placeholder="deploy/Dockerfile" />
+            </label>
+            <label class="docker-build-field" hidden>
+              <span>构建上下文（相对仓库根目录）</span>
+              <input name="dockerContext" value="." placeholder="." />
+            </label>
+            <label class="docker-build-field" hidden>
+              <span>镜像架构 / 部署节点</span>
+              <select name="dockerPlatform">
+                <option value="">构建机默认架构</option>
+                <option value="linux/amd64">Linux amd64（Wine 推荐）</option>
+                <option value="linux/arm64">Linux arm64</option>
+              </select>
+            </label>
+            <label class="wide-field docker-build-field" hidden>
+              <span>Docker 构建参数（每行 KEY=VALUE，不用于秘钥）</span>
+              <textarea name="dockerBuildArgs" rows="3" placeholder="PYWINE_IMAGE=registry.example.com/pywine:3.13"></textarea>
+              <small>选择 pywine:3.13 时，自动传入镜像管理中的编译镜像地址为 PYWINE_IMAGE；此处可覆盖。Dockerfile 须声明 ARG PYWINE_IMAGE。</small>
+            </label>
             <label class="wide-field k8s-build-field">
               <span>编译命令</span>
               <input name="buildCommand" required placeholder="mvn clean package -DskipTests" />

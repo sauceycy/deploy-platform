@@ -2,7 +2,7 @@ const sdkOptions = {
   java: ["jdk8", "oraclejdk8u381", "jdk11", "jdk17", "jdk21", "jdk25"],
   node: ["node18", "node20", "node22", "node24"],
   golang: ["go1.21", "go1.22", "go1.23"],
-  python: ["python3.10", "python3.11", "python3.12"],
+  python: ["python3.10", "python3.11", "python3.12", "pywine:3.13"],
 };
 
 const languageLabels = {
@@ -1648,7 +1648,7 @@ function renderDetail() {
         <span>Git 凭据</span><strong>${secretName(task.gitCredentialId)}</strong>
         <span>语言</span><strong>${languageLabel(task.language)}</strong>
         <span>SDK</span><strong>${task.sdk}</strong>
-        <span>命令</span><strong>${normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : task.buildCommand}</strong>
+        <span>命令</span><strong>${normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : task.buildMode === "dockerfile" ? escapeHtml(`Dockerfile: ${task.dockerfilePath || "Dockerfile"} · 上下文: ${task.dockerContext || "."}`) : task.buildCommand}</strong>
         <span>构建环境变量</span><strong>${envKeys(task.buildEnv).join("、") || "未设置"}</strong>
         ${
           task.language === "java"
@@ -2010,7 +2010,7 @@ function renderTaskConfigTab(task, activeSchedule) {
           <span>Git 凭据</span><strong>${secretName(task.gitCredentialId)}</strong>
           <span>语言</span><strong>${languageLabel(task.language)}</strong>
           <span>SDK</span><strong>${task.sdk}</strong>
-          <span>命令</span><strong>${normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : task.buildCommand}</strong>
+          <span>命令</span><strong>${normalizeDeployRule(task.deployRule) === "cf_pages" ? task.pagesDeployCommand || "npm run deploy" : task.buildMode === "dockerfile" ? escapeHtml(`Dockerfile: ${task.dockerfilePath || "Dockerfile"} · 上下文: ${task.dockerContext || "."}`) : task.buildCommand}</strong>
           <span>构建环境变量</span><strong>${envKeys(task.buildEnv).join("、") || "未设置"}</strong>
           ${
             task.language === "java"
@@ -2647,6 +2647,7 @@ function renderImagePullSecretOptions() {
 }
 
 function sdkDefaultBuilderImage(language, sdk) {
+  if (language === "python" && sdk === "pywine:3.13") return "tobix/pywine:3.13";
   const version = String(sdk || "").replace(/^(jdk|node|go|python)/, "");
   if (language === "java" && sdk === "oraclejdk8u381") return "";
   if (language === "java") return `maven:3-eclipse-temurin-${version}`;
@@ -2657,6 +2658,7 @@ function sdkDefaultBuilderImage(language, sdk) {
 }
 
 function sdkDefaultRuntimeImage(language, sdk) {
+  if (language === "python" && sdk === "pywine:3.13") return "tobix/pywine:3.13";
   const version = String(sdk || "").replace(/^(jdk|node|go|python)/, "");
   if (language === "java" && sdk === "oraclejdk8u381") return "eclipse-temurin:8-jre";
   if (language === "java") return `eclipse-temurin:${version}-jre`;
@@ -2715,7 +2717,7 @@ function inferSdkLanguage(sdk) {
   if (value.startsWith("jdk") || value.startsWith("oraclejdk")) return "java";
   if (value.startsWith("node")) return "node";
   if (value.startsWith("go")) return "golang";
-  if (value.startsWith("python")) return "python";
+  if (value.startsWith("python") || value.startsWith("pywine:")) return "python";
   return "";
 }
 
@@ -3263,7 +3265,16 @@ function syncDeployRuleFields() {
     const field = taskForm.elements[name];
     if (field) field.disabled = isPages || isWindows;
   });
-  if (taskForm.elements.buildCommand) taskForm.elements.buildCommand.required = !isPages && !isWindows;
+  const isDockerfile = !isPages && !isWindows && taskForm.elements.buildMode?.value === "dockerfile";
+  document.querySelectorAll(".docker-build-field").forEach((field) => { field.hidden = !isDockerfile; });
+  ["dockerfilePath", "dockerContext", "dockerPlatform", "dockerBuildArgs"].forEach((name) => {
+    if (taskForm.elements[name]) taskForm.elements[name].disabled = !isDockerfile;
+  });
+  if (taskForm.elements.buildCommand) {
+    taskForm.elements.buildCommand.required = !isPages && !isWindows && !isDockerfile;
+    taskForm.elements.buildCommand.disabled = isPages || isWindows || isDockerfile;
+    taskForm.elements.buildCommand.closest("label").hidden = isPages || isWindows || isDockerfile;
+  }
   if (taskForm.elements.containerPort) taskForm.elements.containerPort.required = !isPages && !isWindows;
   if (taskForm.elements.servicePort) taskForm.elements.servicePort.required = !isPages && !isWindows;
   if (taskForm.elements.language) taskForm.elements.language.disabled = isPages || isFrontend || isWindows;
@@ -3289,8 +3300,8 @@ function syncDeployRuleFields() {
   const artifactField = document.querySelector(".artifact-path-field");
   const artifactLabel = document.getElementById("artifactPathLabel");
   const artifactInput = document.getElementById("artifactPathInput");
-  const showStaticArtifact = !isPages && isFrontend;
-  const showJavaArtifact = !isPages && !isWindows && !isFrontend && taskForm.elements.language.value === "java";
+  const showStaticArtifact = !isPages && !isDockerfile && isFrontend;
+  const showJavaArtifact = !isPages && !isWindows && !isDockerfile && !isFrontend && taskForm.elements.language.value === "java";
   if (artifactField) artifactField.hidden = !(showStaticArtifact || showJavaArtifact);
   if (artifactInput) {
     artifactInput.disabled = isPages || !(showStaticArtifact || showJavaArtifact);
@@ -3377,6 +3388,9 @@ function openTaskEditor(taskId) {
   taskForm.elements.language.value = normalizeDeployRule(task.deployRule) === "cf_pages" ? "node" : task.language || "java";
   updateSdkOptions(taskForm.elements.language.value || "java", true);
   taskForm.elements.sdk.value = task.sdk || sdkOptionsForLanguage(taskForm.elements.language.value || "java")[0] || "";
+  ["buildMode", "dockerfilePath", "dockerContext", "dockerPlatform", "dockerBuildArgs"].forEach((name) => {
+    taskForm.elements[name].value = task[name] || ({buildMode: "auto", dockerfilePath: "Dockerfile", dockerContext: "."}[name] || "");
+  });
   taskForm.elements.buildCommand.value = task.buildCommand || "";
   taskForm.elements.artifactPath.value = task.artifactPath || "";
   taskForm.elements.buildEnv.value = task.buildEnv || "";
@@ -3566,6 +3580,11 @@ function buildPreviewObject() {
     build: {
       language: formValue("language"),
       sdk: formValue("sdk"),
+      buildMode: formValue("buildMode") || "auto",
+      dockerfilePath: formValue("dockerfilePath") || "Dockerfile",
+      dockerContext: formValue("dockerContext") || ".",
+      dockerPlatform: formValue("dockerPlatform"),
+      dockerBuildArgs: formValue("dockerBuildArgs"),
       command: formValue("buildCommand"),
       env: formValue("buildEnv"),
       pagesPackageManager: formValue("pagesPackageManager") || "npm",
@@ -3618,6 +3637,11 @@ async function saveTask(event) {
     gitCredentialId: preview.repository.gitCredentialId,
     language: preview.build.language,
     sdk: preview.build.sdk,
+    buildMode: preview.build.buildMode,
+    dockerfilePath: preview.build.dockerfilePath,
+    dockerContext: preview.build.dockerContext,
+    dockerPlatform: preview.build.dockerPlatform,
+    dockerBuildArgs: preview.build.dockerBuildArgs,
     buildCommand: preview.build.command,
     buildEnv: preview.build.env,
     pagesPackageManager: preview.build.pagesPackageManager,
@@ -5294,6 +5318,7 @@ languageSelect.addEventListener("change", (event) => {
 
 deployRuleSelect.addEventListener("change", syncDeployRuleFields);
 appTypeSelect.addEventListener("change", syncDeployRuleFields);
+document.getElementById("buildModeSelect").addEventListener("change", syncDeployRuleFields);
 taskTemplateSelect.addEventListener("change", (event) => {
   applyTaskTemplate(event.target.value);
 });
