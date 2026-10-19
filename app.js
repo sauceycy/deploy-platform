@@ -4438,13 +4438,34 @@ async function savePlatformSettings(event) {
 
 async function saveSdkImageSettings() {
   if (!requirePermission("secret.manage")) return;
-  mergeVisibleSdkImageRows();
-  platformSettings.sdkImagesInitialized = true;
-  addAudit("保存镜像配置", `${platformSettings.sdkImages.length} 个 SDK 镜像`);
-  const saved = await persistState();
-  if (saved) {
-    sdkImagesDirty = false;
-    render();
+  const button = document.getElementById("saveSdkImages");
+  const status = document.getElementById("sdkImageSaveStatus");
+  if (button.disabled) return;
+  const label = button.querySelector("span");
+  button.disabled = true;
+  label.textContent = "保存中…";
+  status.hidden = false;
+  status.className = "";
+  status.textContent = "正在保存镜像配置…";
+  try {
+    mergeVisibleSdkImageRows();
+    platformSettings.sdkImagesInitialized = true;
+    addAudit("保存镜像配置", `${platformSettings.sdkImages.length} 个 SDK 镜像`);
+    const saved = await persistState();
+    if (saved) {
+      sdkImagesDirty = false;
+      render();
+      status.className = "status-chip success";
+      status.textContent = "镜像配置已保存";
+    } else {
+      status.textContent = "保存失败，请重试";
+    }
+  } catch (error) {
+    status.className = "";
+    status.textContent = `保存失败：${error.message}`;
+  } finally {
+    button.disabled = false;
+    label.textContent = "保存镜像";
   }
 }
 
@@ -5240,6 +5261,7 @@ document.getElementById("addSdkImageMapping")?.addEventListener("click", () => {
   platformSettings.sdkImagesInitialized = true;
   renderSdkImageMappings();
   sdkImagesDirty = true;
+    document.getElementById("sdkImageSaveStatus").hidden = true;
   lucide.createIcons();
 });
 document.getElementById("saveSdkImages")?.addEventListener("click", saveSdkImageSettings);
@@ -5384,6 +5406,7 @@ document.getElementById("clearAuditFilters").addEventListener("click", () => {
 document.addEventListener("input", (event) => {
   if (event.target.closest("[data-sdk-image-field]")) {
     sdkImagesDirty = true;
+    document.getElementById("sdkImageSaveStatus").hidden = true;
     return;
   }
 
@@ -5452,6 +5475,7 @@ document.querySelectorAll(".nav-item").forEach((button) => {
 document.addEventListener("change", async (event) => {
   if (event.target.closest("[data-sdk-image-field]")) {
     sdkImagesDirty = true;
+    document.getElementById("sdkImageSaveStatus").hidden = true;
     return;
   }
 
@@ -5770,6 +5794,7 @@ document.addEventListener("click", (event) => {
     sdkImagesDirty = false;
     renderSdkImageMappings();
     sdkImagesDirty = true;
+    document.getElementById("sdkImageSaveStatus").hidden = true;
     lucide.createIcons();
     return;
   }
