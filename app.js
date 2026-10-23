@@ -831,6 +831,7 @@ function normalizeHealthCheckConfig(config = {}, fallback = {}) {
   return {
     enabled,
     path: enabled ? path : "",
+    port: source.port === "" ? null : (source.port ?? base.port ?? null),
     initialDelaySeconds: numberOrDefault(source.initialDelaySeconds ?? base.initialDelaySeconds ?? 10, 10),
     periodSeconds: numberOrDefault(source.periodSeconds ?? base.periodSeconds ?? 10, 10),
     timeoutSeconds: numberOrDefault(source.timeoutSeconds ?? base.timeoutSeconds ?? 3, 3),
@@ -844,6 +845,7 @@ function readHealthCheckForm(form = taskForm) {
   return normalizeHealthCheckConfig({
     enabled: Boolean(form.elements.healthCheckEnabled?.checked),
     path: form.elements.healthCheckPath?.value,
+    port: form.elements.healthCheckPort?.value,
     initialDelaySeconds: form.elements.healthCheckInitialDelaySeconds?.value,
     periodSeconds: form.elements.healthCheckPeriodSeconds?.value,
     timeoutSeconds: form.elements.healthCheckTimeoutSeconds?.value,
@@ -857,6 +859,7 @@ function fillHealthCheckForm(form, config = {}) {
   const healthCheck = normalizeHealthCheckConfig(config);
   if (form.elements.healthCheckEnabled) form.elements.healthCheckEnabled.checked = healthCheck.enabled;
   if (form.elements.healthCheckPath) form.elements.healthCheckPath.value = healthCheck.path;
+  if (form.elements.healthCheckPort) form.elements.healthCheckPort.value = healthCheck.port ?? "";
   if (form.elements.healthCheckInitialDelaySeconds) form.elements.healthCheckInitialDelaySeconds.value = healthCheck.initialDelaySeconds;
   if (form.elements.healthCheckPeriodSeconds) form.elements.healthCheckPeriodSeconds.value = healthCheck.periodSeconds;
   if (form.elements.healthCheckTimeoutSeconds) form.elements.healthCheckTimeoutSeconds.value = healthCheck.timeoutSeconds;
@@ -870,6 +873,7 @@ function healthCheckSummary(config = {}) {
   if (!healthCheck.path) return "已启用但未配置路径";
   return [
     healthCheck.path,
+    ...(healthCheck.port ? [`端口 ${healthCheck.port}`] : []),
     `延迟 ${healthCheck.initialDelaySeconds}s`,
     `周期 ${healthCheck.periodSeconds}s`,
     `超时 ${healthCheck.timeoutSeconds}s`,
@@ -4295,6 +4299,7 @@ async function saveTemplate(event) {
     healthCheck: {
       enabled: Boolean(formData.get("healthCheckEnabled")),
       path: formData.get("healthCheckPath") || "",
+      port: formData.get("healthCheckPort") || null,
       initialDelaySeconds: formData.get("healthCheckInitialDelaySeconds") || 10,
       periodSeconds: formData.get("healthCheckPeriodSeconds") || 10,
       timeoutSeconds: formData.get("healthCheckTimeoutSeconds") || 3,

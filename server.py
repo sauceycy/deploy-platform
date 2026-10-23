@@ -2115,6 +2115,14 @@ def normalize_health_check(value, fallback=None):
     value = value if isinstance(value, dict) else {}
     fallback = fallback if isinstance(fallback, dict) else {}
     path = normalize_http_path(value.get("path") or value.get("healthPath") or fallback.get("path") or fallback.get("healthPath"))
+    port = value.get("port", fallback.get("healthCheckPort"))
+    if port is None or port == "":
+        port = None
+    else:
+        port_text = str(port).strip()
+        if not re.fullmatch(r"[0-9]+", port_text) or not 1 <= int(port_text) <= 65535:
+            raise ValueError("健康检查端口必须为 1–65535 的整数")
+        port = int(port_text)
     enabled_value = value.get("enabled")
     if enabled_value is None:
         enabled_value = bool(path)
@@ -2128,6 +2136,7 @@ def normalize_health_check(value, fallback=None):
     return {
         "enabled": bool(enabled_value),
         "path": path if bool(enabled_value) else "",
+        "port": port,
         "initialDelaySeconds": to_int("initialDelaySeconds", 10),
         "periodSeconds": to_int("periodSeconds", 10),
         "timeoutSeconds": to_int("timeoutSeconds", 3),
@@ -2216,7 +2225,7 @@ def create_manifest(task, target, image, pull_secret=None):
         readiness_probe_block = f"""          readinessProbe:
             httpGet:
               path: {json.dumps(health_check['path'], ensure_ascii=False)}
-              port: {container_port}
+              port: {health_check['port'] or container_port}
             initialDelaySeconds: {health_check['initialDelaySeconds']}
             periodSeconds: {health_check['periodSeconds']}
             timeoutSeconds: {health_check['timeoutSeconds']}

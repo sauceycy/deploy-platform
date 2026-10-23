@@ -635,6 +635,10 @@
                   <input name="healthCheckPath" placeholder="/actuator/health" />
                 </label>
                 <label>
+                  <span>自定义端口（选填）</span>
+                  <input name="healthCheckPort" type="number" min="1" max="65535" step="1" placeholder="留空使用容器端口" />
+                </label>
+                <label>
                   <span>初始延迟（秒）</span>
                   <input name="healthCheckInitialDelaySeconds" type="number" min="0" placeholder="10" />
                 </label>
@@ -889,6 +893,10 @@
               <label class="wide-field">
                 <span>健康检查路径</span>
                 <input name="healthCheckPath" placeholder="/actuator/health" />
+              </label>
+              <label>
+                <span>自定义端口（选填）</span>
+                <input name="healthCheckPort" type="number" min="1" max="65535" step="1" placeholder="留空使用容器端口" />
               </label>
               <label>
                 <span>初始延迟（秒）</span>
