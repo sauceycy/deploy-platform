@@ -2,6 +2,7 @@ import json
 import os
 import socket
 import subprocess
+import threading
 import time
 from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError
@@ -203,19 +204,25 @@ def execute_task(task):
 def heartbeat():
     try:
         api_post("/api/agent/heartbeat", {"cluster": CLUSTER_NAME, "instanceId": AGENT_INSTANCE_ID, "version": "0.1.0"})
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"agent heartbeat error: {exc}", flush=True)
+
+
+def heartbeat_loop(stop_event):
+    # Keep reporting liveness while kubectl or result reporting blocks the worker.
+    while not stop_event.is_set():
+        heartbeat()
+        if stop_event.wait(30):
+            break
 
 
 if __name__ == "__main__":
     print(f"Deploy Agent started cluster={CLUSTER_NAME} instance={AGENT_INSTANCE_ID} platform={PLATFORM_URL}", flush=True)
-    last_heartbeat = 0
+    heartbeat_stop = threading.Event()
+    threading.Thread(target=heartbeat_loop, args=(heartbeat_stop,), daemon=True, name="agent-heartbeat").start()
     pending_result = None
     while True:
         try:
-            if time.time() - last_heartbeat > 30:
-                heartbeat()
-                last_heartbeat = time.time()
             if pending_result:
                 api_post(
                     f"/api/agent/tasks/{pending_result['id']}/result",
