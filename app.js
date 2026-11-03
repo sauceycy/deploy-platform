@@ -101,6 +101,7 @@ const clusterNodeDrafts = [];
 const APP_STATE_KEY = "deploy-platform-state";
 const APP_USER_KEY = "deploy-platform-user";
 const APP_VIEW_KEY = "deploy-platform-view";
+const BRANCH_CACHE_KEY = "deploy-platform-branch-cache";
 const STATE_SAVE_TIMEOUT_MS = 20000;
 const MAX_BATCH_DEPLOY_TASKS = 5;
 const STATE_REFRESH_INTERVAL_MS = 10000;
@@ -234,6 +235,7 @@ const branchSearch = document.getElementById("branchSearch");
 const branchDeployConfigSelect = document.getElementById("branchDeployConfigSelect");
 const branchDeployConfigSearch = document.getElementById("branchDeployConfigSearch");
 const branchStatus = document.getElementById("branchStatus");
+const branchRefreshButton = document.getElementById("refreshBranches");
 const confirmBranchDeploy = document.getElementById("confirmBranchDeploy");
 const branchDeployText = document.getElementById("branchDeployText");
 const batchDialog = document.getElementById("batchDialog");
@@ -2457,6 +2459,10 @@ function renderClusterView() {
             <i data-lucide="square-pen"></i>
             <span>编辑</span>
           </button>
+          <button class="ghost-button danger-button" type="button" data-cluster-action="delete" data-cluster-id="${cluster.id}" ${canOperateAsset("cluster.manage", cluster) ? "" : "disabled"}>
+            <i data-lucide="trash-2"></i>
+            <span>删除</span>
+          </button>
         </div>
       </div>
     `;
@@ -2880,6 +2886,10 @@ function renderUserView() {
           <button class="ghost-button" type="button" data-user-action="password" data-username="${user.username}" ${hasPermission("user.manage") ? "" : "disabled"}>
             <i data-lucide="key-round"></i>
             <span>重置密码</span>
+          </button>
+          <button class="ghost-button danger-button" type="button" data-user-action="delete" data-username="${user.username}" ${hasPermission("user.manage") ? "" : "disabled"}>
+            <i data-lucide="trash-2"></i>
+            <span>删除</span>
           </button>
         </div>
       </div>
@@ -3702,6 +3712,42 @@ function branchRequestPayload(task, deployConfigId) {
   };
 }
 
+function branchCacheRepository(task, deployConfigId = "") {
+  const config = deployConfigsForTask(task).find((item) => String(item.id) === String(deployConfigId));
+  return config?.repo || task?.repo || "";
+}
+
+function branchCacheKey(task, deployConfigId = "") {
+  return JSON.stringify({
+    taskId: String(task?.id || ""),
+    deployConfigId: String(deployConfigId || ""),
+    repo: branchCacheRepository(task, deployConfigId),
+    gitCredentialId: String(task?.gitCredentialId || ""),
+  });
+}
+
+function normalizeBranchList(branches) {
+  return Array.from(new Set((Array.isArray(branches) ? branches : []).map((branch) => String(branch || "").trim()).filter((branch) => branch && !branch.includes("/")))).sort();
+}
+
+function readBranchCache(task, deployConfigId = "") {
+  try {
+    const cache = JSON.parse(window.localStorage.getItem(BRANCH_CACHE_KEY) || "{}");
+    const branches = normalizeBranchList(cache[branchCacheKey(task, deployConfigId)]);
+    return branches.length ? branches : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeBranchCache(task, deployConfigId, branches) {
+  try {
+    const cache = JSON.parse(window.localStorage.getItem(BRANCH_CACHE_KEY) || "{}");
+    cache[branchCacheKey(task, deployConfigId)] = normalizeBranchList(branches);
+    window.localStorage.setItem(BRANCH_CACHE_KEY, JSON.stringify(cache));
+  } catch {}
+}
+
 function branchOptionsHtml(branches) {
   return branches.map((branch) => `<option value="${escapeHtml(branch)}">${escapeHtml(branch)}</option>`).join("");
 }
@@ -3787,28 +3833,22 @@ async function openBranchDialog(taskId) {
   }
   clearSearchableSelect(branchSelect, branchSearch);
   confirmBranchDeploy.disabled = true;
-  branchStatus.textContent = "正在读取仓库分支...";
+  if (branchRefreshButton) branchRefreshButton.disabled = false;
   branchDialog.showModal();
 
-  try {
-    const response = await fetch("/api/repositories/branches", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(branchRequestPayload(task, branchDeployConfigSelect.value)),
-    });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "读取仓库分支失败");
-    if (!result.branches.length) throw new Error("仓库没有可发布分支");
-    setSearchableSelectOptions(branchSelect, branchSearch, result.branches.map((branch) => ({ value: branch, label: branch })), task.lastBranch || "");
-    selectPreferredBranch(task, branchSelect, result.branches);
-    confirmBranchDeploy.disabled = false;
-    branchStatus.textContent = `已读取 ${result.branches.length} 个分支`;
-  } catch (error) {
-    branchStatus.textContent = error.message;
-  }
+  const cachedBranches = readBranchCache(task, branchDeployConfigSelect.value);
+  branchStatus.textContent = cachedBranches ? `已使用缓存分支 ${cachedBranches.length} 个，可点击“刷新分支”获取最新列表` : "暂无缓存，正在首次读取仓库分支...";
+  await reloadBranchOptionsForConfig(task, branchSelect, branchDeployConfigSelect.value, branchStatus, branchSearch, { force: false, cachedBranches });
 }
 
-async function loadBranchesIntoSelect(task, selectElement, deployConfigId = "") {
+async function loadBranchesIntoSelect(task, selectElement, deployConfigId = "", options = {}) {
+  const cachedBranches = options.cachedBranches || (!options.force ? readBranchCache(task, deployConfigId) : null);
+  if (cachedBranches?.length) {
+    selectElement.innerHTML = branchOptionsHtml(cachedBranches);
+    selectPreferredBranch(task, selectElement, cachedBranches);
+    selectElement.disabled = false;
+    return cachedBranches;
+  }
   selectElement.innerHTML = "";
   selectElement.disabled = true;
   const response = await fetch("/api/repositories/branches", {
@@ -3818,11 +3858,13 @@ async function loadBranchesIntoSelect(task, selectElement, deployConfigId = "") 
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "读取仓库分支失败");
-  if (!result.branches.length) throw new Error("仓库没有可发布分支");
-  selectElement.innerHTML = branchOptionsHtml(result.branches);
-  selectPreferredBranch(task, selectElement, result.branches);
+  const branches = normalizeBranchList(result.branches);
+  if (!branches.length) throw new Error("仓库没有可发布的一级分支");
+  writeBranchCache(task, deployConfigId, branches);
+  selectElement.innerHTML = branchOptionsHtml(branches);
+  selectPreferredBranch(task, selectElement, branches);
   selectElement.disabled = false;
-  return result.branches;
+  return branches;
 }
 
 function closeBranchDialog(clearQueue = true) {
@@ -3842,15 +3884,16 @@ function closeScheduleDialog() {
   scheduleForm.reset();
 }
 
-async function reloadBranchOptionsForConfig(task, branchSelectElement, deployConfigId, statusElement = null, searchElement = null) {
-  if (statusElement) statusElement.textContent = "正在读取仓库分支...";
+async function reloadBranchOptionsForConfig(task, branchSelectElement, deployConfigId, statusElement = null, searchElement = null, options = {}) {
+  const cachedBranches = options.cachedBranches || (!options.force ? readBranchCache(task, deployConfigId) : null);
+  if (statusElement) statusElement.textContent = cachedBranches ? `正在使用缓存分支（${cachedBranches.length} 个）...` : "正在读取仓库分支...";
   try {
-    const branches = await loadBranchesIntoSelect(task, branchSelectElement, deployConfigId);
+    const branches = await loadBranchesIntoSelect(task, branchSelectElement, deployConfigId, options);
     if (searchElement) {
       setSearchableSelectOptions(branchSelectElement, searchElement, branches.map((branch) => ({ value: branch, label: branch })), branchSelectElement.value);
       selectPreferredBranch(task, branchSelectElement, branches);
     }
-    if (statusElement) statusElement.textContent = `已读取 ${branches.length} 个分支`;
+    if (statusElement) statusElement.textContent = options.force ? `已刷新 ${branches.length} 个一级分支` : `已使用缓存 ${branches.length} 个一级分支`;
     return true;
   } catch (error) {
     branchSelectElement.innerHTML = `<option>${escapeHtml(error.message)}</option>`;
@@ -4272,6 +4315,23 @@ async function updateClusterPullSecret(clusterId, secretId) {
   await saveStateAndRender();
 }
 
+async function deleteCluster(clusterId) {
+  if (!requirePermission("cluster.manage")) return;
+  const cluster = clusters.find((item) => String(item.id) === String(clusterId));
+  if (!cluster) return;
+  if (!canOperateAsset("cluster.manage", cluster)) {
+    window.alert("当前用户组无权删除该集群");
+    return;
+  }
+  if (!window.confirm(`确认删除集群 ${cluster.name}？`)) return;
+  try {
+    await mutateJson(`/api/clusters/${encodeURIComponent(clusterId)}`, undefined, "DELETE");
+    render();
+  } catch (error) {
+    window.alert(error.message || "删除集群失败");
+  }
+}
+
 async function saveTemplate(event) {
   event.preventDefault();
   if (!requirePermission("template.manage")) return;
@@ -4687,6 +4747,23 @@ async function saveUser(event) {
     render();
   }
   if (submitter) submitter.disabled = false;
+}
+
+async function deleteUser(username) {
+  if (!requirePermission("user.manage")) return;
+  const user = users.find((item) => item.username === username);
+  if (!user) return;
+  if (!canAccessUser(user)) {
+    window.alert("当前用户组无权删除该用户");
+    return;
+  }
+  if (!window.confirm(`确认删除用户 ${user.name || user.username}？`)) return;
+  try {
+    await mutateJson(`/api/users/${encodeURIComponent(username)}`, undefined, "DELETE");
+    render();
+  } catch (error) {
+    window.alert(error.message || "删除用户失败");
+  }
 }
 
 async function saveOrganization(event) {
@@ -5285,6 +5362,19 @@ branchForm.addEventListener("submit", (event) => {
 branchSearch.addEventListener("input", () => {
   renderSearchableSelectOptions(branchSelect, branchSearch);
 });
+branchRefreshButton?.addEventListener("click", async () => {
+  const task = tasks.find((item) => String(item.id) === String(branchForm.elements.taskId.value));
+  if (!task || !branchDialog.open) return;
+  branchRefreshButton.disabled = true;
+  confirmBranchDeploy.disabled = true;
+  clearSearchableSelect(branchSelect, branchSearch);
+  try {
+    await reloadBranchOptionsForConfig(task, branchSelect, branchDeployConfigSelect.value, branchStatus, branchSearch, { force: true });
+  } finally {
+    branchRefreshButton.disabled = false;
+    confirmBranchDeploy.disabled = branchSelect.disabled;
+  }
+});
 branchDeployConfigSearch.addEventListener("input", () => {
   renderSearchableSelectOptions(branchDeployConfigSelect, branchDeployConfigSearch);
 });
@@ -5616,7 +5706,11 @@ document.addEventListener("click", (event) => {
 
   const userButton = event.target.closest("[data-user-action]");
   if (userButton) {
-    openUserDialog(userButton.dataset.username, userButton.dataset.userAction);
+    if (userButton.dataset.userAction === "delete") {
+      deleteUser(userButton.dataset.username);
+    } else {
+      openUserDialog(userButton.dataset.username, userButton.dataset.userAction);
+    }
     return;
   }
 
@@ -5635,6 +5729,9 @@ document.addEventListener("click", (event) => {
   if (clusterButton) {
     if (clusterButton.dataset.clusterAction === "edit") {
       openClusterDialog(clusterButton.dataset.clusterId);
+    }
+    if (clusterButton.dataset.clusterAction === "delete") {
+      deleteCluster(clusterButton.dataset.clusterId);
     }
     return;
   }

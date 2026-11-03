@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>应用发布任务平台预览</title>
-    <link rel="stylesheet" href="./styles.css?v=20260903-2" />
+    <link rel="stylesheet" href="./styles.css?v=20261104-1" />
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
   </head>
   <body>
@@ -1364,7 +1364,7 @@
           <input name="taskName" disabled />
         </label>
         <label>
-          <span>分支</span>
+          <span class="field-label-with-action"><span>分支</span><button class="mini-button" type="button" id="refreshBranches"><i data-lucide="refresh-cw"></i><span>刷新分支</span></button></span>
           <div class="select-search-control">
             <input id="branchSearch" type="search" placeholder="搜索分支" autocomplete="off" disabled />
             <select name="branch" id="branchSelect" required></select>
@@ -1428,6 +1428,6 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=20260903-2"></script>
+    <script src="./app.js?v=20261104-1"></script>
   </body>
 </html>

@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 from xml.sax.saxutils import escape as xml_escape
 from windows_deploy import WindowsRoutes, package_and_dispatch, parse_windows_env
@@ -882,6 +882,21 @@ def append_log(execution_id, message):
                 "logCount": len(execution.get("logs") or []),
             }
         )
+
+
+def set_execution_commit_info(execution_id, commit_info):
+    if not commit_info:
+        return
+
+    def update(state):
+        execution = find_by_id(state.get("executions", []), execution_id)
+        if execution:
+            execution["commitHash"] = commit_info.get("hash") or ""
+            execution["commitAuthor"] = commit_info.get("author") or ""
+            execution["commitTime"] = commit_info.get("time") or ""
+            execution["commitMessage"] = commit_info.get("message") or ""
+
+    mutate_state(update, detect_changes=True)
 
 
 def set_execution_status(execution_id, status, message=None, image=None, stage=None, progress=None):
@@ -1778,6 +1793,50 @@ def run_command(args, cwd=None, input_text=None, env=None):
     return process.returncode, process.stdout
 
 
+def read_git_commit_info(src_dir, env=None):
+    """Return metadata for the exact commit checked out for this execution."""
+    code, output = run_command(
+        ["git", "show", "-s", "--format=%H%x00%an%x00%aI%x00%s", "HEAD"],
+        cwd=src_dir,
+        env=env,
+    )
+    if code != 0:
+        return {}
+    fields = output.strip().split("\x00", 3)
+    if len(fields) != 4 or not fields[0].strip():
+        return {}
+    return {
+        "hash": fields[0].strip(),
+        "author": fields[1].strip(),
+        "time": fields[2].strip(),
+        "message": fields[3].strip().replace("\r", " ").replace("\n", " "),
+    }
+
+
+def execution_commit_text(execution):
+    commit_hash = str((execution or {}).get("commitHash") or "").strip()
+    if not commit_hash:
+        return ""
+    parts = [commit_hash]
+    message = str((execution or {}).get("commitMessage") or "").strip()
+    author = str((execution or {}).get("commitAuthor") or "").strip()
+    commit_time = str((execution or {}).get("commitTime") or "").strip()
+    if message:
+        parts.append(message)
+    if author:
+        parts.append(f"作者 {author}")
+    if commit_time:
+        parts.append(commit_time)
+    return " · ".join(parts)
+
+
+def append_publish_commit_log(execution_id):
+    execution = find_by_id(read_state().get("executions", []), execution_id)
+    commit_text = execution_commit_text(execution)
+    if commit_text:
+        append_log(execution_id, f"发布成功分支 commit: {commit_text}")
+
+
 def run_command_stream(args, execution_id, cwd=None, env=None, redact=None, on_cancel=None):
     started_at = time.monotonic()
     process = subprocess.Popen(
@@ -1985,7 +2044,9 @@ def list_repository_branches(repo, secret_id=None):
         if "refs/heads/" not in line:
             continue
         branches.append(line.split("refs/heads/", 1)[1].strip())
-    return sorted(set(branches))
+    # The release UI only supports top-level branches. Nested paths such as
+    # feature/foo are intentionally omitted from the result.
+    return sorted({branch for branch in branches if "/" not in branch})
 
 
 def is_relative_child(path, parent):
@@ -2668,6 +2729,18 @@ def build_and_dispatch(execution_id):
         if code != 0:
             raise RuntimeError("代码拉取失败")
         append_log(execution_id, f"代码拉取耗时: {format_duration(elapsed)}")
+        commit_info = read_git_commit_info(src_dir, clone_env)
+        if commit_info:
+            set_execution_commit_info(execution_id, commit_info)
+            commit_text = execution_commit_text({
+                "commitHash": commit_info.get("hash"),
+                "commitAuthor": commit_info.get("author"),
+                "commitTime": commit_info.get("time"),
+                "commitMessage": commit_info.get("message"),
+            })
+            append_log(execution_id, f"已拉取分支 {branch} 的 commit: {redact_secret_text(commit_text, git_secret)}")
+        else:
+            append_log(execution_id, f"已拉取分支 {branch}，但未能读取 commit 信息")
         ensure_execution_active(execution_id)
         set_execution_status(execution_id, "building", "代码拉取完成", stage="准备编译", progress=25)
 
@@ -2699,6 +2772,7 @@ def build_and_dispatch(execution_id):
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "success", "CF Pages 部署完成", stage="发布完成", progress=100)
             send_notification(task, "BUILD_SUCCESS", "CF Pages 部署完成", execution_id)
+            append_publish_commit_log(execution_id)
             return
 
         command = task.get("buildCommand") or ""
@@ -2943,6 +3017,59 @@ def delete_task(task_id, actor):
 
     task, state = mutate_state(update)
     return task, state
+
+
+def delete_user_config(username, actor):
+    def update(state):
+        user = find_user(state, username)
+        if not user:
+            raise ValueError("用户不存在或已被删除")
+        if str(user.get("username")) == str(actor):
+            raise ValueError("不能删除当前登录用户")
+        require_actor_user = find_user(state, actor)
+        if not require_actor_user or not user_has_permission(state, require_actor_user, "user.manage"):
+            raise ValueError("当前用户没有删除用户权限")
+        if not user_can_access_user(state, require_actor_user, user):
+            raise ValueError("当前用户组无权删除该用户")
+        if user.get("role") == "platform_admin" and sum(1 for item in state.get("users", []) if item.get("role") == "platform_admin") <= 1:
+            raise ValueError("至少需要保留一个平台管理员")
+        state["users"] = [item for item in state.get("users", []) if str(item.get("username")) != str(username)]
+        state["auditLogs"].insert(0, audit_entry(actor, "删除用户", user.get("username"), "成功"))
+        return user
+
+    user, state = mutate_state(update)
+    return user, state
+
+
+def delete_cluster_config(cluster_id, actor):
+    def update(state):
+        cluster = find_by_id(state.get("clusters", []), cluster_id)
+        if not cluster:
+            raise ValueError("集群不存在或已被删除")
+        require_actor_asset_access(state, actor, "cluster.manage", cluster, "删除")
+        cluster_name = normalize_cluster_key(cluster.get("name"))
+        bound_task = next(
+            (
+                task
+                for task in state.get("tasks", [])
+                if any(normalize_cluster_key(target.get("name") if isinstance(target, dict) else target) == cluster_name for target in (task.get("clusters") or []))
+                or any(
+                    normalize_cluster_key(target.get("name") if isinstance(target, dict) else target) == cluster_name
+                    for config in normalize_deploy_configs(task.get("deployConfigs"), task)
+                    for target in config.get("clusters", [])
+                )
+            ),
+            None,
+        )
+        if bound_task:
+            raise ValueError(f"集群 {cluster.get('name')} 正在被任务 {bound_task.get('name')} 使用，请先解除绑定")
+        state["clusters"] = [item for item in state.get("clusters", []) if str(item.get("id")) != str(cluster_id)]
+        state["agentHeartbeats"] = [item for item in state.get("agentHeartbeats", []) if normalize_cluster_key(item.get("cluster")) != cluster_name]
+        state["auditLogs"].insert(0, audit_entry(actor, "删除集群", cluster.get("name"), "成功"))
+        return cluster
+
+    cluster, state = mutate_state(update)
+    return cluster, state
 
 
 def normalize_task_payload(payload):
@@ -3690,6 +3817,8 @@ def update_agent_result(agent_task_id, status, logs, agent_instance=None):
     item, state = mutate_state(update)
     if notification:
         send_notification(*notification)
+        if notification[1] == "BUILD_SUCCESS":
+            append_publish_commit_log(notification[3])
     return item, state
 
 
@@ -4085,6 +4214,30 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, status=400)
                 return
             self.send_json({"secret": public_secret_config(secret), "state": client_state(state, compact=True)})
+            return
+        match = re.match(r"^/api/users/([^/]+)$", parsed.path)
+        if match:
+            actor = self.require_session_actor()
+            if not actor:
+                return
+            try:
+                user, state = delete_user_config(unquote(match.group(1)), actor)
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"user": public_user(user), "state": client_state(state, compact=True)})
+            return
+        match = re.match(r"^/api/clusters/([^/]+)$", parsed.path)
+        if match:
+            actor = self.require_session_actor()
+            if not actor:
+                return
+            try:
+                cluster, state = delete_cluster_config(match.group(1), actor)
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"cluster": cluster, "state": client_state(state, compact=True)})
             return
         self.send_error(404)
 

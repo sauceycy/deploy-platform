@@ -848,6 +848,21 @@ svg {
   gap: 7px;
 }
 
+.field-label-with-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.field-label-with-action .mini-button {
+  margin-left: auto;
+}
+
+.danger-button {
+  color: #b42318;
+}
+
 .danger-action {
   color: var(--red);
 }
