@@ -1904,6 +1904,9 @@ def run_command_stream(args, execution_id, cwd=None, env=None, redact=None, on_c
     output_queue = queue.Queue()
     output_finished = object()
     last_cancel_check = 0
+    last_flush = started_at
+    last_output = started_at
+    last_wait_notice = started_at
 
     def flush():
         nonlocal batch, dropped_lines
@@ -1950,12 +1953,19 @@ def run_command_stream(args, execution_id, cwd=None, env=None, redact=None, on_c
             if raw_line is output_finished:
                 reader_finished = True
             elif raw_line is not None:
+                last_output = time.monotonic()
                 output.append(raw_line)
                 if len(batch) == batch.maxlen:
                     dropped_lines += 1
                 batch.append(raw_line.rstrip("\n"))
 
             current_time = time.monotonic()
+            if batch and current_time - last_flush >= 1:
+                flush()
+                last_flush = current_time
+            if current_time - last_output >= 30 and current_time - last_wait_notice >= 30:
+                append_log(execution_id, f"命令仍在执行，已耗时 {format_duration(current_time - started_at)}，连续 {int(current_time - last_output)} 秒没有新输出；可检查当前阶段或取消发布")
+                last_wait_notice = current_time
             if current_time - last_cancel_check >= 0.5:
                 last_cancel_check = current_time
                 if is_execution_cancelled(execution_id):
@@ -2755,6 +2765,9 @@ def build_and_dispatch(execution_id):
     failure_event = "BUILD_FAILED"
     try:
         deploy_rule = task_deploy_rule(task)
+        queued_at = parse_time_text(execution.get("createdAt"))
+        if queued_at:
+            append_log(execution_id, f"等待构建槽耗时: {format_duration(max(0, (datetime.now() - queued_at).total_seconds()))}")
         append_log(execution_id, f"已获得执行槽，当前平台最多同时发布 {MAX_CONCURRENT_EXECUTIONS} 个任务")
         set_execution_status(execution_id, "building", "开始拉取代码", stage="拉取代码", progress=10)
         if work_dir.exists():
@@ -2849,9 +2862,9 @@ def build_and_dispatch(execution_id):
             if build_env:
                 append_log(execution_id, f"已注入构建环境变量: {', '.join(sorted(build_env.keys()))}")
             code, output, elapsed = run_sdk_command(execution_id, task, command, src_dir, build_env)
+            append_log(execution_id, f"编译命令耗时: {format_duration(elapsed)}，退出码: {code}")
             if code != 0:
                 raise RuntimeError("编译命令执行失败")
-            append_log(execution_id, f"编译命令耗时: {format_duration(elapsed)}")
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "building", "编译命令执行完成", stage="生成镜像", progress=55)
 
