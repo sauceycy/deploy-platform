@@ -504,9 +504,16 @@ def connect_sqlite():
 
 
 def connect_postgres():
-    conn = psycopg.connect(DATABASE_URL)
-    conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-    conn.commit()
+    conn = psycopg.connect(
+        DATABASE_URL, connect_timeout=5,
+        options="-c statement_timeout=10000 -c lock_timeout=3000",
+    )
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.commit()
+    except Exception:
+        conn.close()
+        raise
     return conn
 
 
@@ -828,15 +835,57 @@ def read_exact(conn, length):
     return bytes(data)
 
 
+class WebSocketClient:
+    """Keep slow browser sockets off request threads and the shared state lock."""
+
+    def __init__(self, connection):
+        self.connection = connection
+        self.frames = queue.Queue(maxsize=64)
+        self.stopped = threading.Event()
+
+    def enqueue(self, frame):
+        if self.stopped.is_set():
+            return False
+        try:
+            self.frames.put_nowait(frame)
+            return True
+        except queue.Full:
+            # Reconnect for a fresh snapshot instead of silently losing updates.
+            self.stopped.set()
+            return False
+
+    def close(self):
+        self.stopped.set()
+        with WS_LOCK:
+            WS_CLIENTS.discard(self)
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def send_loop(self):
+        try:
+            while not self.stopped.is_set():
+                try:
+                    frame = self.frames.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                self.connection.sendall(frame)
+        except OSError:
+            pass
+        finally:
+            self.close()
+
+
 def broadcast_ws(payload):
-    frame = websocket_frame(payload)
     with WS_LOCK:
         clients = list(WS_CLIENTS)
+    if not clients:
+        return
+    frame = websocket_frame(payload)
     stale = []
     for client in clients:
-        try:
-            client.connection.sendall(frame)
-        except Exception:
+        if not client.enqueue(frame):
             stale.append(client)
     if stale:
         with WS_LOCK:
@@ -3910,19 +3959,17 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
         self.end_headers()
         return True
 
-    def websocket_send(self, payload):
-        frame = websocket_frame(payload)
-        self.connection.sendall(frame)
-
     def websocket_serve(self, initial_state):
         if not self.websocket_handshake():
             return
+        self.connection.settimeout(1.0)
+        client = WebSocketClient(self.connection)
+        client.enqueue(websocket_frame({"type": "state", "state": client_state(initial_state, compact=True)}))
         with WS_LOCK:
-            WS_CLIENTS.add(self)
+            WS_CLIENTS.add(client)
+        threading.Thread(target=client.send_loop, daemon=True).start()
         try:
-            self.websocket_send({"type": "state", "state": client_state(initial_state, compact=True)})
-            self.connection.settimeout(1.0)
-            while True:
+            while not client.stopped.is_set():
                 try:
                     chunk = read_exact(self.connection, 2)
                     if not chunk:
@@ -3943,9 +3990,10 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
                         break
                 except socket.timeout:
                     continue
+        except (OSError, ConnectionError):
+            pass
         finally:
-            with WS_LOCK:
-                WS_CLIENTS.discard(self)
+            client.close()
             try:
                 self.connection.close()
             except Exception:

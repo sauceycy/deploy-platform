@@ -723,7 +723,7 @@ async function postJson(url, payload, method = "POST") {
     if (!response.ok) throw new Error(result.error || "请求失败");
     return result;
   } catch (error) {
-    throw new Error(error.name === "AbortError" ? "请求超时，请检查后端服务或数据库连接是否正常" : error.message);
+    throw new Error(error.name === "AbortError" ? "服务器响应超时，操作可能已受理。请先刷新页面确认结果，避免重复发布或保存。" : error.message);
   } finally {
     window.clearTimeout(timeoutId);
   }
@@ -3815,6 +3815,74 @@ function renderDeployConfigSelect(task, selectElement, searchElement = null) {
   return configs;
 }
 
+let branchDialogRequest = 0;
+let branchDialogLoading = false;
+let branchDialogSubmitting = false;
+let loadedBranchContext = "";
+
+function canSubmitBranchDialog() {
+  const task = tasks.find((item) => String(item.id) === String(branchForm.elements.taskId.value));
+  return Boolean(branchDialog.open && task && !branchDialogLoading && !branchDialogSubmitting &&
+    !branchDeployConfigSelect.disabled && branchDeployConfigSelect.value &&
+    loadedBranchContext === branchCacheKey(task, branchDeployConfigSelect.value) &&
+    !branchSelect.disabled && branchSelect.value &&
+    (branchSelect._searchableOptions || []).some((item) => item.value === branchSelect.value));
+}
+
+function syncBranchDialogActions() {
+  confirmBranchDeploy.disabled = !canSubmitBranchDialog();
+  if (branchRefreshButton) branchRefreshButton.disabled = branchDialogLoading || branchDialogSubmitting ||
+    branchDeployConfigSelect.disabled || !branchDeployConfigSelect.value;
+}
+
+async function updateBranchDialogOptions(force = false) {
+  const request = ++branchDialogRequest;
+  const task = tasks.find((item) => String(item.id) === String(branchForm.elements.taskId.value));
+  const configId = branchDeployConfigSelect.value;
+  const context = task ? branchCacheKey(task, configId) : "";
+  const selectedBranch = context === loadedBranchContext ? branchSelect.value : task?.lastBranch || "";
+  loadedBranchContext = "";
+  clearSearchableSelect(branchSelect, branchSearch);
+  branchDialogLoading = false;
+  if (!task || branchDeployConfigSelect.disabled || !configId) {
+    branchStatus.textContent = "请选择发布配置";
+    syncBranchDialogActions();
+    return;
+  }
+  const cachedBranches = readBranchCache(task, configId);
+  branchDialogLoading = true;
+  branchStatus.textContent = force ? "正在刷新仓库分支..." : cachedBranches ? "正在读取缓存分支..." : "暂无缓存，正在首次读取仓库分支...";
+  syncBranchDialogActions();
+  const isCurrent = () => request === branchDialogRequest && branchDialog.open &&
+    String(branchForm.elements.taskId.value) === String(task.id) && branchDeployConfigSelect.value === configId;
+  const applyBranches = (branches) => {
+    setSearchableSelectOptions(branchSelect, branchSearch, branches.map((branch) => ({ value: branch, label: branch })), selectedBranch);
+    loadedBranchContext = context;
+  };
+  try {
+    // Load into a detached select so a stale response cannot overwrite a newer configuration.
+    const branches = await loadBranchesIntoSelect(task, document.createElement("select"), configId, { force });
+    if (!isCurrent()) return;
+    applyBranches(branches);
+    branchStatus.textContent = !force && cachedBranches
+      ? `已使用缓存 ${branches.length} 个一级分支，可直接发布；需要最新列表时点击“刷新分支”`
+      : `已${force ? "刷新" : "读取"} ${branches.length} 个一级分支，可直接发布`;
+  } catch (error) {
+    if (!isCurrent()) return;
+    if (cachedBranches) {
+      applyBranches(cachedBranches);
+      branchStatus.textContent = `刷新失败：${error.message}；已保留上次缓存，可继续发布`;
+    } else {
+      branchStatus.textContent = error.message;
+    }
+  } finally {
+    if (isCurrent()) {
+      branchDialogLoading = false;
+      syncBranchDialogActions();
+    }
+  }
+}
+
 async function openBranchDialog(taskId) {
   if (!requirePermission("task.deploy")) return;
   const task = tasks.find((item) => String(item.id) === String(taskId));
@@ -3831,14 +3899,9 @@ async function openBranchDialog(taskId) {
     window.alert("当前用户组没有可发布的配置");
     return;
   }
-  clearSearchableSelect(branchSelect, branchSearch);
-  confirmBranchDeploy.disabled = true;
-  if (branchRefreshButton) branchRefreshButton.disabled = false;
+  loadedBranchContext = "";
   branchDialog.showModal();
-
-  const cachedBranches = readBranchCache(task, branchDeployConfigSelect.value);
-  branchStatus.textContent = cachedBranches ? `已使用缓存分支 ${cachedBranches.length} 个，可点击“刷新分支”获取最新列表` : "暂无缓存，正在首次读取仓库分支...";
-  await reloadBranchOptionsForConfig(task, branchSelect, branchDeployConfigSelect.value, branchStatus, branchSearch, { force: false, cachedBranches });
+  await updateBranchDialogOptions();
 }
 
 async function loadBranchesIntoSelect(task, selectElement, deployConfigId = "", options = {}) {
@@ -3868,6 +3931,9 @@ async function loadBranchesIntoSelect(task, selectElement, deployConfigId = "", 
 }
 
 function closeBranchDialog(clearQueue = true) {
+  branchDialogRequest += 1;
+  branchDialogLoading = false;
+  loadedBranchContext = "";
   if (clearQueue) state.batchQueue = [];
   if (branchDialog.open) branchDialog.close();
   branchForm.reset();
@@ -3904,12 +3970,14 @@ async function reloadBranchOptionsForConfig(task, branchSelectElement, deployCon
 
 async function runTask(taskId, branch) {
   if (!requirePermission("task.deploy")) return;
+  if (!canSubmitBranchDialog()) return;
   const task = tasks.find((item) => String(item.id) === String(taskId));
   if (!task || !canOperateAsset("task.deploy", task)) {
     window.alert("当前用户组无权发布该任务");
     return;
   }
-  confirmBranchDeploy.disabled = true;
+  branchDialogSubmitting = true;
+  syncBranchDialogActions();
   if (branchDeployText) branchDeployText.textContent = "发布中...";
   try {
     await nextPaint();
@@ -3929,8 +3997,9 @@ async function runTask(taskId, branch) {
     state.batchQueue = [];
     window.alert(error.message || "发布请求失败");
   } finally {
+    branchDialogSubmitting = false;
     if (branchDeployText) branchDeployText.textContent = "发布";
-    if (branchDialog.open) confirmBranchDeploy.disabled = false;
+    syncBranchDialogActions();
   }
 }
 
@@ -5361,31 +5430,20 @@ branchForm.addEventListener("submit", (event) => {
 });
 branchSearch.addEventListener("input", () => {
   renderSearchableSelectOptions(branchSelect, branchSearch);
+  syncBranchDialogActions();
 });
-branchRefreshButton?.addEventListener("click", async () => {
-  const task = tasks.find((item) => String(item.id) === String(branchForm.elements.taskId.value));
-  if (!task || !branchDialog.open) return;
-  branchRefreshButton.disabled = true;
-  confirmBranchDeploy.disabled = true;
-  clearSearchableSelect(branchSelect, branchSearch);
-  try {
-    await reloadBranchOptionsForConfig(task, branchSelect, branchDeployConfigSelect.value, branchStatus, branchSearch, { force: true });
-  } finally {
-    branchRefreshButton.disabled = false;
-    confirmBranchDeploy.disabled = branchSelect.disabled;
+branchSelect.addEventListener("change", syncBranchDialogActions);
+branchRefreshButton?.addEventListener("click", () => updateBranchDialogOptions(true));
+branchDeployConfigSearch.addEventListener("input", () => {
+  const previousConfigId = branchDeployConfigSelect.value;
+  renderSearchableSelectOptions(branchDeployConfigSelect, branchDeployConfigSearch);
+  if (branchDeployConfigSelect.value !== previousConfigId) {
+    updateBranchDialogOptions();
+  } else {
+    syncBranchDialogActions();
   }
 });
-branchDeployConfigSearch.addEventListener("input", () => {
-  renderSearchableSelectOptions(branchDeployConfigSelect, branchDeployConfigSearch);
-});
-branchDeployConfigSelect.addEventListener("change", async () => {
-  const task = tasks.find((item) => String(item.id) === String(branchForm.elements.taskId.value));
-  if (!task) return;
-  confirmBranchDeploy.disabled = true;
-  clearSearchableSelect(branchSelect, branchSearch);
-  const ok = await reloadBranchOptionsForConfig(task, branchSelect, branchDeployConfigSelect.value, branchStatus, branchSearch);
-  confirmBranchDeploy.disabled = !ok;
-});
+branchDeployConfigSelect.addEventListener("change", () => updateBranchDialogOptions());
 scheduleDeployConfigSelect.addEventListener("change", async () => {
   const task = tasks.find((item) => String(item.id) === String(scheduleForm.elements.taskId.value));
   if (!task) return;
