@@ -1952,7 +1952,7 @@ function renderTaskOverviewTab(task, latestExecution, activeSchedule) {
 
 function renderTaskLogsTab(latestExecution) {
   const runningHint = latestExecution && isTaskActive(latestExecution)
-    ? `<p class="form-hint">任务执行中只展示阶段状态和摘要，详细命令输出会在当前命令结束后刷新。</p>`
+    ? `<p class="form-hint">日志随执行过程更新；暂时无输出时，请查看当前阶段和等待提示。</p>`
     : "";
   return `
     <section class="detail-section detail-card log-detail-card">

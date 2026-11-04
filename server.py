@@ -16,6 +16,7 @@ import threading
 import time
 import socket
 import uuid
+from contextlib import closing
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -184,6 +185,8 @@ STATE_WRITE_STOP = threading.Event()
 PENDING_STATE_PAYLOAD = None
 PENDING_STATE_REVISION = 0
 STATE_WRITE_ERROR = ""
+STATE_PERSIST_LOCK = threading.RLock()
+LAST_PERSISTED_REVISION = -1
 REQUEST_CONTEXT = threading.local()
 
 
@@ -522,7 +525,7 @@ def read_raw_state():
         with connect_postgres() as conn:
             row = conn.execute("SELECT value FROM app_state WHERE key = 'state'").fetchone()
     else:
-        with connect_sqlite() as conn:
+        with closing(connect_sqlite()) as conn, conn:
             row = conn.execute("SELECT value FROM app_state WHERE key = 'state'").fetchone()
     if not row:
         return None
@@ -538,7 +541,7 @@ def persist_state_payload(payload):
             )
             conn.commit()
     else:
-        with connect_sqlite() as conn:
+        with closing(connect_sqlite()) as conn, conn:
             conn.execute(
                 "INSERT INTO app_state (key, value) VALUES ('state', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (payload,),
@@ -552,50 +555,62 @@ def state_payload(state):
 def enqueue_state_write(payload, revision):
     global PENDING_STATE_PAYLOAD, PENDING_STATE_REVISION
     with STATE_WRITE_LOCK:
+        if PENDING_STATE_PAYLOAD is not None and int(revision or 0) < PENDING_STATE_REVISION:
+            return
         PENDING_STATE_PAYLOAD = payload
         PENDING_STATE_REVISION = int(revision or 0)
         STATE_WRITE_EVENT.set()
 
 
+def persist_queued_state(snapshot, revision):
+    """Serialize off the request/build thread; flush and writer cannot reorder saves."""
+    global LAST_PERSISTED_REVISION
+    with STATE_PERSIST_LOCK:
+        if revision <= LAST_PERSISTED_REVISION:
+            return
+        started = time.monotonic()
+        payload = state_payload(snapshot) if isinstance(snapshot, dict) else snapshot
+        persist_state_payload(payload)
+        LAST_PERSISTED_REVISION = revision
+        elapsed = time.monotonic() - started
+        if elapsed >= 2:
+            print(f"Slow state persistence: revision={revision} duration={elapsed:.3f}s bytes={len(payload.encode('utf-8'))}", flush=True)
+
+
 def state_writer_loop():
-    global PENDING_STATE_PAYLOAD, PENDING_STATE_REVISION, STATE_WRITE_ERROR
+    global STATE_WRITE_ERROR
     while not STATE_WRITE_STOP.is_set():
         STATE_WRITE_EVENT.wait(1)
-        while True:
-            with STATE_WRITE_LOCK:
-                payload = PENDING_STATE_PAYLOAD
-                revision = PENDING_STATE_REVISION
-                PENDING_STATE_PAYLOAD = None
-                PENDING_STATE_REVISION = 0
-                STATE_WRITE_EVENT.clear()
-            if not payload:
-                break
-            try:
-                persist_state_payload(payload)
-                STATE_WRITE_ERROR = ""
-            except Exception as exc:
-                STATE_WRITE_ERROR = str(exc)
-                with STATE_WRITE_LOCK:
-                    if not PENDING_STATE_PAYLOAD or revision >= PENDING_STATE_REVISION:
-                        PENDING_STATE_PAYLOAD = payload
-                        PENDING_STATE_REVISION = revision
-                        STATE_WRITE_EVENT.set()
-                print(f"Async state write failed: {exc}", flush=True)
-                time.sleep(2)
-                break
+        # Coalesce bursts of streaming logs without making producers wait.
+        if STATE_WRITE_STOP.wait(1):
+            break
+        try:
+            flush_pending_state_write()
+            STATE_WRITE_ERROR = ""
+        except Exception as exc:
+            STATE_WRITE_ERROR = str(exc)
+            print(f"Async state write failed: {exc}", flush=True)
+            STATE_WRITE_STOP.wait(2)
 
 
 def flush_pending_state_write(timeout=5):
     del timeout
     global PENDING_STATE_PAYLOAD, PENDING_STATE_REVISION
-    with STATE_WRITE_LOCK:
-        payload = PENDING_STATE_PAYLOAD
-        PENDING_STATE_PAYLOAD = None
-        PENDING_STATE_REVISION = 0
-        STATE_WRITE_EVENT.clear()
-    if not payload:
-        return True
-    persist_state_payload(payload)
+    # Claim and persist under one lock so shutdown flush waits for in-flight IO.
+    with STATE_PERSIST_LOCK:
+        with STATE_WRITE_LOCK:
+            payload = PENDING_STATE_PAYLOAD
+            revision = PENDING_STATE_REVISION
+            PENDING_STATE_PAYLOAD = None
+            PENDING_STATE_REVISION = 0
+            STATE_WRITE_EVENT.clear()
+        if payload is None:
+            return True
+        try:
+            persist_queued_state(payload, revision)
+        except Exception:
+            enqueue_state_write(payload, revision)
+            raise
     return True
 
 
@@ -655,6 +670,8 @@ def preserve_sensitive_values(next_state, current_state=None):
 
 
 def preserve_runtime_fields(next_state, current_state=None):
+    if next_state is current_state:
+        return next_state
     current_state = current_state if current_state is not None else read_raw_state()
     if not current_state:
         return next_state
@@ -765,7 +782,11 @@ def client_state(state, compact=False):
     return data
 
 
-def read_state():
+def state_snapshot():
+    """Internal read-only generation. Never mutate it or any nested object.
+
+    Writers replace generations, so readers can process them outside STATE_LOCK.
+    """
     global STATE_CACHE
     with STATE_LOCK:
         if STATE_CACHE is None:
@@ -774,7 +795,14 @@ def read_state():
                 state = default_state_copy()
                 persist_state_payload(state_payload(state))
             STATE_CACHE = merge_defaults(state)
-        return copy.deepcopy(STATE_CACHE)
+        return STATE_CACHE
+
+
+def read_state(keys=None):
+    snapshot = state_snapshot()
+    if keys is not None:
+        return {key: copy.deepcopy(snapshot.get(key, [])) for key in keys}
+    return copy.deepcopy(snapshot)
 
 
 def write_state(state, current_state=None, broadcast=True):
@@ -787,10 +815,10 @@ def write_state(state, current_state=None, broadcast=True):
     current_revision = int((current_state or {}).get("revision") or 0)
     incoming_revision = int(state.get("revision") or 0)
     state["revision"] = max(current_revision, incoming_revision) + 1
-    payload = state_payload(state)
+    snapshot = copy.deepcopy(state)
     with STATE_LOCK:
-        STATE_CACHE = copy.deepcopy(state)
-    enqueue_state_write(payload, state.get("revision"))
+        STATE_CACHE = snapshot
+        enqueue_state_write(snapshot, state.get("revision"))
     if broadcast:
         broadcast_state(state)
 
@@ -900,37 +928,43 @@ def broadcast_state(state):
 
 
 def mutate_state(fn, detect_changes=False, broadcast=True):
-    with STATE_LOCK:
-        state = read_state()
-        previous = canonical_json(state) if detect_changes else None
-        result = fn(state)
-        if detect_changes and canonical_json(state) == previous:
+    started = time.monotonic()
+    acquired = started
+    try:
+        with STATE_LOCK:
+            acquired = time.monotonic()
+            previous = state_snapshot()
+            state = copy.deepcopy(previous)
+            result = fn(state)
+            if detect_changes and state == previous:
+                return result, state
+            write_state(state, current_state=state, broadcast=broadcast)
             return result, state
-        write_state(state, current_state=state, broadcast=broadcast)
-        return result, state
+    finally:
+        elapsed = time.monotonic() - started
+        if elapsed >= 1:
+            print(f"Slow state mutation: lock_wait={acquired - started:.3f}s total={elapsed:.3f}s", flush=True)
 
 
 def append_log(execution_id, message):
-    def update(state):
-        execution = find_by_id(state["executions"], execution_id)
-        if execution:
-            log_entry = {"time": now_text(), "message": message}
-            execution.setdefault("logs", []).append(log_entry)
-            return execution, log_entry
-        return None, None
-
-    result, _ = mutate_state(update, broadcast=False)
-    execution, log_entry = result or (None, None)
-    if execution and log_entry:
-        broadcast_ws(
-            {
-                "type": "execution_log",
-                "executionId": execution.get("id"),
-                "taskId": execution.get("taskId"),
-                "log": log_entry,
-                "logCount": len(execution.get("logs") or []),
-            }
-        )
+    global STATE_CACHE
+    # Copy only the changed execution and its list; prior generations stay immutable
+    # for the async writer and HTTP readers. Log entries are never edited in place.
+    with STATE_LOCK:
+        current = state_snapshot()
+        execution = find_by_id(current["executions"], execution_id)
+        if execution is None:
+            return
+        log_entry = {"time": now_text(), "message": message}
+        updated = {**execution, "logs": [*(execution.get("logs") or []), log_entry]}
+        snapshot = {**current, "revision": int(current.get("revision") or 0) + 1,
+                    "executions": [updated if item is execution else item for item in current["executions"]]}
+        STATE_CACHE = snapshot
+        enqueue_state_write(snapshot, snapshot["revision"])
+        # Keep concurrent log frames in the same order as persisted logCount.
+        broadcast_ws({"type": "execution_log", "executionId": execution.get("id"),
+                      "taskId": execution.get("taskId"), "log": log_entry,
+                      "logCount": len(updated["logs"])})
 
 
 def set_execution_commit_info(execution_id, commit_info):
@@ -1058,7 +1092,7 @@ def authenticate_user(username, password):
     password = str(password or "")
     if not username or not password:
         raise ValueError("请输入账号和密码")
-    state = read_state()
+    state = read_state(keys=("users", "organizations"))
     user = find_user(state, username)
     if not user:
         raise ValueError("账号不存在")
@@ -1075,7 +1109,7 @@ def session_user(token=None):
     username, auth_version = verify_session_token(token)
     if not username:
         raise ValueError("登录状态已失效")
-    state = read_state()
+    state = read_state(keys=("users", "organizations"))
     user = find_user(state, username)
     if not user:
         raise ValueError("用户不存在，请重新登录")
@@ -1299,7 +1333,7 @@ def is_active_status(status):
 
 
 def is_execution_cancelled(execution_id):
-    state = read_state()
+    state = state_snapshot()
     execution = find_by_id(state["executions"], execution_id)
     return bool(execution and execution.get("status") == "cancelled")
 
@@ -2882,9 +2916,9 @@ def build_and_dispatch(execution_id):
             runtime_image = runtime_base(task)
             build_env = docker_login_env_for_secret(execution_id, sdk_pull_secret(task, runtime_image), runtime_image, work_dir / ".docker-build", "运行基础镜像")
         code, output, elapsed = run_command_stream(["docker", "build", "-t", image, "-f", str(dockerfile), "."], execution_id, cwd=docker_context, env=build_env)
+        append_log(execution_id, f"Docker 镜像构建耗时: {format_duration(elapsed)}，退出码: {code}")
         if code != 0:
             raise RuntimeError("Docker 镜像构建失败")
-        append_log(execution_id, f"Docker 镜像构建耗时: {format_duration(elapsed)}")
         image_built = True
         ensure_execution_active(execution_id)
         set_execution_status(execution_id, "building", "Docker 镜像构建完成", image=image, stage="准备推送", progress=72)
@@ -2896,20 +2930,22 @@ def build_and_dispatch(execution_id):
                 docker_config_dir = work_dir / ".docker"
                 docker_config_dir.mkdir(parents=True, exist_ok=True)
                 registry_env = {**os.environ, "DOCKER_CONFIG": str(docker_config_dir)}
+                login_started = time.monotonic()
                 code, output = run_command(
                     ["docker", "login", registry["url"], "-u", registry["username"], "--password-stdin"],
                     input_text=registry["password"],
                     env=registry_env,
                 )
                 append_log(execution_id, output)
+                append_log(execution_id, f"镜像仓库登录耗时: {format_duration(time.monotonic() - login_started)}，退出码: {code}")
                 if code != 0:
                     raise RuntimeError("镜像仓库登录失败")
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "building", f"推送镜像 {image}", stage="推送镜像", progress=78)
             code, output, elapsed = run_command_stream(["docker", "push", image], execution_id, env=registry_env)
+            append_log(execution_id, f"镜像推送耗时: {format_duration(elapsed)}，退出码: {code}")
             if code != 0:
                 raise RuntimeError("镜像推送失败")
-            append_log(execution_id, f"镜像推送耗时: {format_duration(elapsed)}")
             image_pushed = True
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "building", "镜像推送完成", image=image, stage="等待部署", progress=84)
@@ -4013,6 +4049,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
                 pass
 
     def do_GET(self):
+        self.request_started = time.monotonic()
         parsed = urlparse(self.path)
         if self.windows_get(parsed):
             return
@@ -4023,13 +4060,13 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
             user = self.require_session_user()
             if not user:
                 return
-            state = read_state()
+            state = state_snapshot()
             self.websocket_serve(state)
             return
         if parsed.path == "/api/state":
             if not self.require_session_user():
                 return
-            state = read_state()
+            state = state_snapshot()
             query = parse_qs(parsed.query)
             compact = query.get("compact", [""])[0] in {"1", "true", "yes"}
             requested_revision = query.get("revision", [""])[0]
@@ -4042,7 +4079,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
         if match:
             if not self.require_session_user():
                 return
-            state = read_state()
+            state = state_snapshot()
             execution = find_by_id(state.get("executions", []), match.group(1))
             if not execution:
                 self.send_json({"error": "执行记录不存在"}, status=404)
@@ -4069,6 +4106,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):
+        self.request_started = time.monotonic()
         parsed = urlparse(self.path)
         if self.windows_post(parsed):
             return
@@ -4251,6 +4289,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
         self.send_error(404)
 
     def do_DELETE(self):
+        self.request_started = time.monotonic()
         parsed = urlparse(self.path)
         match = re.match(r"^/api/tasks/([^/]+)$", parsed.path)
         if match:
@@ -4303,6 +4342,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
         self.send_error(404)
 
     def do_PUT(self):
+        self.request_started = time.monotonic()
         parsed = urlparse(self.path)
         match = re.match(r"^/api/tasks/([^/]+)$", parsed.path)
         if match:
@@ -4363,6 +4403,12 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        started = getattr(self, "request_started", None)
+        if started is not None:
+            elapsed = time.monotonic() - started
+            self.send_header("Server-Timing", f"app;dur={elapsed * 1000:.1f}")
+            if elapsed >= 2:
+                print(f"Slow API: method={self.command} path={urlparse(self.path).path} duration={elapsed:.3f}s", flush=True)
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()

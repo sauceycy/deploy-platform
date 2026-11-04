@@ -32,7 +32,10 @@ class WindowsDeploymentTests(unittest.TestCase):
         })
         self.task.update(id=1, status="pending")
         self.state["tasks"] = [self.task]
-        self.patches = [patch.object(s, "read_state", side_effect=lambda: copy.deepcopy(self.state)),
+        self.patches = [patch.object(s, "STATE_CACHE", None),
+                        patch.object(s, "state_snapshot", side_effect=lambda: self.state),
+                        patch.object(s, "enqueue_state_write", side_effect=lambda snapshot, revision: setattr(self, "state", snapshot)),
+                        patch.object(s, "read_state", side_effect=lambda: copy.deepcopy(self.state)),
                         patch.object(s, "mutate_state", side_effect=self.mutate),
                         patch.object(s, "DATA_DIR", self.root), patch.object(s, "send_notification")]
         for item in self.patches:
