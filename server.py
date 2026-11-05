@@ -2637,6 +2637,7 @@ def lark_notification_card(task, event, event_label, message, event_time, deploy
     app_type_label = "前端静态站点" if task_app_type(task) == "frontend" else "后端服务"
     actor = task.get("lastActor") or task.get("actor") or "system"
     display_name = task_display_name(task, deploy_config)
+    environment = deploy_config.get("env") if isinstance(deploy_config, dict) else None
     return {
         "msg_type": "interactive",
         "card": {
@@ -2654,7 +2655,7 @@ def lark_notification_card(task, event, event_label, message, event_time, deploy
                         lark_field("部署规则", rule_label),
                         lark_field("应用类型", app_type_label),
                         lark_field("发布人", actor),
-                        lark_field("环境", task.get("env") or "-"),
+                        lark_field("环境", environment or task.get("env") or "-"),
                         lark_field("负责人", task.get("owner") or "-"),
                         lark_field("语言 / SDK", f"{task.get('language') or '-'} / {task.get('sdk') or '-'}"),
                         lark_field("通知时间", event_time),
@@ -3899,7 +3900,10 @@ def update_agent_result(agent_task_id, status, logs, agent_instance=None):
                     task["status"] = "success"
                     task["stage"] = "发布完成"
                     task["progress"] = 100
-                    notification = (copy.deepcopy(task), "BUILD_SUCCESS", f"集群 {item['clusterName']} 部署完成", execution.get("id"))
+                    # Agent callbacks happen after enqueue; keep the card tied to
+                    # the exact configuration frozen for this execution.
+                    deploy_config = execution.get("deployConfigSnapshot") or deploy_config_by_id(task, execution.get("deployConfigId"))
+                    notification = (effective_task_for_deploy_config(task, deploy_config), "BUILD_SUCCESS", f"集群 {item['clusterName']} 部署完成", execution.get("id"))
             elif any(value == "failed" for value in statuses):
                 execution["status"] = "partial" if any(value == "success" for value in statuses) else "failed"
                 execution["stage"] = "部署异常"
@@ -3909,7 +3913,9 @@ def update_agent_result(agent_task_id, status, logs, agent_instance=None):
                     task["status"] = execution["status"]
                     task["stage"] = execution["stage"]
                     task["progress"] = execution["progress"]
-                    notification = (copy.deepcopy(task), "DEPLOY_FAILED", logs or f"集群 {item['clusterName']} 部署失败", execution.get("id"))
+                    # Keep failure cards consistent with the successful path.
+                    deploy_config = execution.get("deployConfigSnapshot") or deploy_config_by_id(task, execution.get("deployConfigId"))
+                    notification = (effective_task_for_deploy_config(task, deploy_config), "DEPLOY_FAILED", logs or f"集群 {item['clusterName']} 部署失败", execution.get("id"))
         return item
 
     item, state = mutate_state(update)
