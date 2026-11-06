@@ -132,6 +132,12 @@ export HOST_DATA_DIR=/absolute/path/to/deploy-platform/data
 docker compose up -d --build
 ```
 
+## Git 拉取失败排查
+
+发布时使用所选分支的浅克隆（`--depth 1`）。遇到 `curl 18`、`early EOF`、连接重置、超时或临时 HTTP 服务错误时，平台最多尝试 3 次，重试前分别等待 2 秒和 4 秒，并清理未完成的代码目录。HTTP/HTTPS 仓库重试时使用 HTTP/1.1，配置仅作用于本次命令。重试等待期间仍可取消发布；认证失败、分支不存在、证书校验失败等错误直接结束并显示原因。
+
+`RPC failed; curl 18 transfer closed with outstanding read data remaining`、`early EOF` 表示 Git 数据尚未接收完整时连接已关闭，后续 `invalid index-pack output` 通常是连带错误。多次重试仍失败时，请检查平台容器到 Git 服务的网络、Git 服务前置代理的超时设置和 Git 服务端日志。日志中的 `warning: redirecting to ...` 本身不代表拉取失败，可将仓库地址改为 Git 服务返回的最终克隆地址以减少重定向。
+
 ## 接口性能
 
 平台默认接口会返回轻量状态：执行日志只带最近 30 条，Agent 发布任务不会把完整 manifest payload 下发到浏览器。登录后浏览器会优先连接 `/api/ws`，由后端通过 WebSocket 推送状态变化和执行日志增量；如果 WebSocket 连接失败，前端会自动回退为低频 HTTP 轮询。打开任务详情的「构建日志」标签时，前端会单独请求该执行记录的完整日志。SDK 编译、Docker build、镜像推送等命令运行期间，每秒合并推送一次新增输出；连续 30 秒没有输出时提示命令仍在执行及等待时长。执行日志同时记录等待构建槽耗时和编译退出码，便于区分排队、依赖下载和编译失败。

@@ -2085,7 +2085,7 @@ def redact_secret_text(text, secret=None):
         for value in [secret.get("secret"), quote(secret.get("secret") or "", safe=""), secret.get("username"), quote(secret.get("username") or "", safe="")]:
             if value:
                 redacted = redacted.replace(value, "***")
-    return re.sub(r"https://[^\s/:]+:[^\s@]+@", "https://***:***@", redacted)
+    return re.sub(r"(https?://)[^\s/@]+@", r"\1***:***@", redacted, flags=re.IGNORECASE)
 
 
 def git_error_message(output, secret=None):
@@ -2097,6 +2097,67 @@ def git_error_message(output, secret=None):
     if "terminal prompts disabled" in message:
         return "Git 需要交互式输入账号密码，但平台不支持交互输入。请绑定 Git HTTPS Token、GitLab 账号密码或改用 Git SSH 私钥。"
     return message
+
+
+def is_retryable_git_transfer_error(output):
+    message = (output or "").lower()
+    # Authentication/configuration errors need user action, even if Git also
+    # reports that the connection closed afterwards.
+    if any(text in message for text in (
+        "authentication failed", "access denied", "permission denied",
+        "could not read username", "terminal prompts disabled",
+        "repository not found", "does not appear to be a git repository",
+        "remote branch", "couldn't find remote ref", "ssl certificate problem",
+        "no space left on device",
+    )):
+        return False
+    return bool(
+        re.search(r"\bcurl (?:5|6|7|16|18|28|52|55|56|92)\b", message)
+        or re.search(r"requested url returned error: (?:408|429|500|502|503|504)\b", message)
+        or any(text in message for text in (
+            "early eof", "unexpected disconnect", "connection reset",
+            "connection timed out", "connection refused", "remote end hung up unexpectedly",
+            "could not resolve host", "could not resolve hostname",
+        ))
+    )
+
+
+def clone_repository(execution_id, repo, branch, src_dir, env=None, secret=None):
+    started_at = time.monotonic()
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        ensure_execution_active(execution_id)
+        command = ["git"]
+        # Scope the fallback to this invocation; keep the first attempt and
+        # other Git operations on their configured transport settings.
+        if attempt > 1 and re.match(r"^https?://", repo, flags=re.IGNORECASE):
+            command += ["-c", "http.version=HTTP/1.1"]
+        command += ["clone", "--depth", "1", "--branch", branch, repo, str(src_dir)]
+        code, output, elapsed = run_command_stream(
+            command, execution_id, env=env,
+            redact=lambda text: redact_secret_text(text, secret),
+        )
+        ensure_execution_active(execution_id)
+        if code == 0:
+            return time.monotonic() - started_at
+
+        retryable = is_retryable_git_transfer_error(output)
+        append_log(execution_id, f"代码拉取第 {attempt}/{max_attempts} 次尝试失败，耗时 {format_duration(elapsed)}，退出码: {code}")
+        if not retryable:
+            raise RuntimeError(f"代码拉取失败: {git_error_message(output, secret) or '请查看 Git 输出'}")
+        if attempt == max_attempts:
+            raise RuntimeError(f"代码拉取失败: Git 传输中断或服务暂不可用，已尝试 {max_attempts} 次；请检查平台到 Git 服务的网络、反向代理超时及 Git 服务端日志")
+
+        delay = attempt * 2
+        fallback = "，本次重试使用 HTTP/1.1" if re.match(r"^https?://", repo, flags=re.IGNORECASE) else ""
+        append_log(execution_id, f"检测到 Git 传输异常，{delay} 秒后进行第 {attempt + 1}/{max_attempts} 次尝试{fallback}")
+        # A failed clone may leave a partial pack or destination directory.
+        # Only remove the checkout; SSH credentials live beside it.
+        if src_dir.exists():
+            shutil.rmtree(src_dir)
+        for _ in range(delay * 2):
+            ensure_execution_active(execution_id)
+            time.sleep(0.5)
 
 
 def clone_environment(work_dir, secret):
@@ -2816,15 +2877,10 @@ def build_and_dispatch(execution_id):
         git_secret = git_secret_by_id(state, task.get("gitCredentialId")) if task.get("gitCredentialId") else None
         clone_repo = authenticated_repo_url(task["repo"], git_secret)
         clone_env = clone_environment(work_dir, git_secret)
-        clone_cmd = ["git", "clone", "--depth", "1", "--branch", branch, clone_repo, str(src_dir)]
-        code, output, elapsed = run_command_stream(
-            clone_cmd,
-            execution_id,
-            env=clone_env,
-            redact=lambda text: redact_secret_text(text, git_secret),
+        elapsed = clone_repository(
+            execution_id, clone_repo, branch, src_dir,
+            env=clone_env, secret=git_secret,
         )
-        if code != 0:
-            raise RuntimeError("代码拉取失败")
         append_log(execution_id, f"代码拉取耗时: {format_duration(elapsed)}")
         commit_info = read_git_commit_info(src_dir, clone_env)
         if commit_info:
