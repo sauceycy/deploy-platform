@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import threading
 import tempfile
 from pathlib import Path
@@ -58,6 +59,32 @@ class StatePerformanceTests(unittest.TestCase):
         self.assertTrue(s.is_execution_cancelled('build'))
         self.assertEqual(queued['executions'][0]['status'], 'building')
         self.assertEqual(len(s.STATE_CACHE['executions'][0]['logs']), 2)
+
+    def test_metadata_updates_do_not_copy_or_read_the_execution_log_list(self):
+        class UnreadableLogs(list):
+            def __iter__(self):
+                raise AssertionError('metadata update iterated historical logs')
+            def __getitem__(self, key):
+                raise AssertionError('metadata update read historical logs')
+            def __deepcopy__(self, memo):
+                raise AssertionError('metadata update copied historical logs')
+        original = s.STATE_CACHE
+        logs = UnreadableLogs([{'message': 'historical'}])
+        original['executions'][0]['logs'] = logs
+        s.set_execution_commit_info('build', {'hash': 'abc'})
+        s.set_execution_status('build', 'building', stage='compile', progress=35)
+        self.assertIs(s.STATE_CACHE['executions'][0]['logs'], logs)
+        self.assertEqual(s.STATE_CACHE['executions'][0]['commitHash'], 'abc')
+        self.assertNotIn('commitHash', original['executions'][0])
+        self.assertNotIn('progress', original['executions'][0])
+
+    def test_status_message_still_gets_its_own_log_list(self):
+        original = s.STATE_CACHE
+        s.set_execution_status('build', 'building', 'stage changed', stage='compile', progress=35)
+        current = s.STATE_CACHE
+        self.assertIsNot(current['executions'][0]['logs'], original['executions'][0]['logs'])
+        self.assertEqual(len(original['executions'][0]['logs']), 1)
+        self.assertEqual(current['executions'][0]['logs'][-1]['message'], 'stage changed')
 
     def test_slow_persistence_does_not_block_logs_or_session(self):
         entered, release = threading.Event(), threading.Event()
@@ -186,6 +213,30 @@ class StatePerformanceTests(unittest.TestCase):
             restored = s.read_raw_state()
         self.assertEqual(restored['executions'][0]['logs'][-1]['message'], 'persist me')
         self.assertEqual(restored['platformSettings']['imageNamespace'], 'saved')
+
+    def test_committed_runtime_save_only_executes_changed_data_statements(self):
+        statements = []
+        real_connect = sqlite3.connect
+        def traced_connect(*args, **kwargs):
+            connection = real_connect(*args, **kwargs)
+            connection.set_trace_callback(statements.append)
+            return connection
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(s, 'DB_PATH', Path(folder) / 'state.db'), \
+                patch.object(s, 'use_postgres', return_value=False), \
+                patch.object(s.sqlite3, 'connect', side_effect=traced_connect):
+            old = s.STATE_CACHE
+            s.persist_state_snapshot(old)
+            statements.clear()
+            new = {**old, 'revision': 1, 'platformSettings': {**old['platformSettings'], 'imageNamespace': 'warm'}}
+            stats = s.persist_state_snapshot(new)
+            self.assertEqual(stats['rows'], 2)
+            commands = [sql for sql in statements if not sql.startswith(('BEGIN', 'COMMIT'))]
+            self.assertEqual(len(commands), 2)
+            self.assertTrue(all(sql.startswith('INSERT INTO state_sections ') for sql in commands))
+            restored = s.read_raw_state()
+        self.assertEqual(restored['platformSettings']['imageNamespace'], 'warm')
+        self.assertEqual(restored['executions'][0]['logs'], old['executions'][0]['logs'])
 
     def test_unchanged_mutation_does_not_save_and_session_revocation_still_works(self):
         token = s.issue_session_token(s.STATE_CACHE['users'][0])

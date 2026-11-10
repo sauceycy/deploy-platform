@@ -123,6 +123,17 @@ class StateDeliveryTests(unittest.TestCase):
                 s.connect_postgres()
         driver.connect.return_value.close.assert_called_once()
 
+    def test_warm_postgres_connection_skips_setup_without_removing_timeouts(self):
+        driver = Mock()
+        with patch.object(s, 'psycopg', driver):
+            connection = s.connect_postgres(initialize=False)
+        connection.execute.assert_not_called()
+        connection.commit.assert_not_called()
+        kwargs = driver.connect.call_args.kwargs
+        self.assertEqual(kwargs['connect_timeout'], 5)
+        self.assertIn('statement_timeout=10000', kwargs['options'])
+        self.assertIn('lock_timeout=3000', kwargs['options'])
+
 
 if __name__ == '__main__':
     unittest.main()

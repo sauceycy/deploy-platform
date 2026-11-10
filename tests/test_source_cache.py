@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -76,14 +78,94 @@ class SourceCacheTests(unittest.TestCase):
         self.assertFalse((self.root / "second").exists())
 
     def test_branch_and_credential_scopes_and_disabled_cache(self):
-        key = source_cache_key(self.task, "main")
-        for task, branch in (({**self.task, "gitCredentialId": "b"}, "main"),
-                             ({**self.task, "organizationId": "b"}, "main"), (self.task, "other")):
-            self.assertNotEqual(key, source_cache_key(task, branch))
+        key = source_cache_key(self.task)
+        for task in ({**self.task, "gitCredentialId": "b"}, {**self.task, "organizationId": "b"},
+                     {**self.task, "repo": "https://example.invalid/other.git"}):
+            self.assertNotEqual(key, source_cache_key(task))
         with self.assertRaises(ValueError):
             self.checkout("invalid", "--upload-pack=bad")
         self.s.GIT_SOURCE_CACHE = False
         self.assertEqual((self.checkout("plain") / "app.txt").read_text(), "one")
+
+    def test_branches_share_objects_but_always_resolve_their_own_remote_ref(self):
+        self.git('branch', 'release')
+        self.checkout('main-first')
+        cached = next((self.s.DATA_DIR / 'cache/git').glob('*.git'))
+        def object_count():
+            output = subprocess.check_output(['git', '-C', str(cached), 'count-objects', '-v'], text=True)
+            counts = dict(line.split(': ', 1) for line in output.splitlines())
+            return int(counts['count']) + int(counts['in-pack'])
+        before = object_count()
+        second = self.checkout('release-first', 'release')
+        self.assertEqual(object_count(), before)
+        self.assertEqual((second / 'app.txt').read_text(), 'one')
+        self.git('checkout', 'release')
+        self.commit('release-only')
+        self.assertEqual((self.checkout('release-new', 'release') / 'app.txt').read_text(), 'release-only')
+        self.assertEqual((self.checkout('main-again') / 'app.txt').read_text(), 'one')
+        self.git('checkout', 'main')
+        self.git('branch', '-D', 'release')
+        with self.assertRaisesRegex(RuntimeError, '代码拉取失败'):
+            self.checkout('deleted-branch', 'release')
+        self.assertFalse((self.root / 'deleted-branch').exists())
+        self.assertEqual(len(list((self.s.DATA_DIR / 'cache/git').glob('*.git'))), 1)
+        self.assertEqual(sum('fetch' in command for command in self.commands), 5)
+
+    def test_five_branches_share_one_cache_and_have_independent_workspaces(self):
+        for i in range(5):
+            self.git('branch', f'release-{i}')
+        results, errors = [], []
+        barrier = threading.Barrier(6)
+        def checkout(i):
+            try:
+                barrier.wait(5)
+                workspace = self.checkout(f'workspace-{i}', f'release-{i}')
+                branch = subprocess.check_output(['git', 'branch', '--show-current'], cwd=workspace, text=True).strip()
+                results.append((branch, (workspace / 'app.txt').read_text()))
+            except Exception as exc:
+                errors.append(exc)
+        threads = [threading.Thread(target=checkout, args=(i,)) for i in range(5)]
+        for thread in threads:
+            thread.start()
+        barrier.wait(5)
+        for thread in threads:
+            thread.join(10)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(set(results), {(f'release-{i}', 'one') for i in range(5)})
+        self.assertEqual(len(list((self.s.DATA_DIR / 'cache/git').glob('*.git'))), 1)
+        clones = [command for command in self.commands if command[:2] == ['git', 'clone']]
+        self.assertEqual(len({command[-2] for command in clones}), 1)
+        self.assertEqual(sum('fetch' in command for command in self.commands), 5)
+
+    def legacy_cache(self):
+        identity = [self.task.get('repo'), self.task.get('gitCredentialId'), self.task.get('organizationIds'),
+                    self.task.get('organizationId'), 'main']
+        key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        cached = self.s.DATA_DIR / 'cache/git' / f'{key}.git'
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        for args in (['git', 'init', '--bare', str(cached)],
+                     ['git', '-C', str(cached), 'fetch', '--depth', '1', '--no-write-fetch-head', '--',
+                      str(self.repo), '+refs/heads/main:refs/heads/main']):
+            subprocess.run(args, check=True, capture_output=True)
+        return cached
+
+    def test_old_branch_cache_seeds_new_cache_locally_before_remote_validation(self):
+        legacy = self.legacy_cache()
+        self.assertEqual((self.checkout('upgrade') / 'app.txt').read_text(), 'one')
+        fetches = [command for command in self.commands if 'fetch' in command]
+        self.assertEqual(len(fetches), 2)
+        self.assertIn(legacy.resolve().as_uri(), fetches[0])
+        self.assertIn(str(self.repo), fetches[1])
+        self.assertNotEqual(fetches[0][2], str(legacy))
+        self.assertTrue(legacy.exists())
+
+    def test_seeded_old_cache_never_authorizes_an_offline_release(self):
+        self.legacy_cache()
+        self.repo.rename(self.root / 'unavailable')
+        with self.assertRaisesRegex(RuntimeError, '代码拉取失败'):
+            self.checkout('upgrade-offline')
+        self.assertFalse((self.root / 'upgrade-offline').exists())
 
     def test_cache_lock_wait_is_cancellable(self):
         path = self.root / "cache.lock"

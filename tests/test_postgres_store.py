@@ -116,6 +116,22 @@ class PostgresStoreTests(unittest.TestCase):
             self.assertEqual(self.connection.execute("SELECT count(*) FROM state_log_chunks").fetchone()[0], 0)
             self.assertEqual(self.connection.execute("SELECT count(*) FROM state_records").fetchone()[0], 0)
 
+    def test_warm_baseline_avoids_schema_marker_and_unchanged_history_queries(self):
+        self.save(self.state)
+        new = {**self.state, 'revision': 2}
+        statements = []
+        real = self.connection
+        class ObservedConnection:
+            def execute(self, sql, args=()):
+                statements.append(sql)
+                return real.execute(sql, args)
+        with real.transaction():
+            stats = store.save(ObservedConnection(), new, self.state, postgres=True)
+        self.assertEqual(len(statements), 1)
+        self.assertTrue(statements[0].startswith('INSERT INTO state_sections '))
+        self.assertEqual(stats['rows'], 1)
+        self.assertEqual(self.reloaded(), new)
+
 
 if __name__ == "__main__":
     unittest.main()

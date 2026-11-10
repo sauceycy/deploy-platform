@@ -15,8 +15,10 @@ class RecordingConnection:
     def __init__(self, connection):
         self.connection = connection
         self.writes = []
+        self.statements = []
 
     def execute(self, sql, args=()):
+        self.statements.append(sql)
         if sql.startswith(("INSERT INTO state_", "DELETE FROM state_", "UPDATE state_")):
             self.writes.append((sql, args))
         return self.connection.execute(sql, args)
@@ -101,6 +103,26 @@ class PerformanceContracts(unittest.TestCase):
             if sql.startswith(("INSERT INTO state_records ", "INSERT INTO state_log_chunks ")):
                 self.assertEqual(args[:2], ("executions", "new"))
         self.assertEqual(store.load(connection), new)
+
+    def test_unchanged_collections_are_not_scanned_for_configuration_writes(self):
+        connection = self.database()
+        initial = self.history(64)
+        with connection:
+            store.save(connection, initial)
+        class UnreadableHistory(list):
+            def __iter__(self):
+                raise AssertionError('scanned an unchanged history collection')
+        old = {**initial, 'executions': UnreadableHistory(initial['executions']),
+               'agentTasks': UnreadableHistory(initial['agentTasks'])}
+        new = {**old, 'revision': 2, 'tasks': [{'id': 'task', 'name': 'renamed'}]}
+        observed = RecordingConnection(connection)
+        with connection:
+            stats = store.save(observed, new, old)
+        self.assertEqual(len(observed.writes), 2)
+        self.assertEqual(len(observed.statements), 2)
+        self.assertLessEqual(stats['bytes'], 100)
+        expected = {**initial, 'revision': 2, 'tasks': new['tasks']}
+        self.assertEqual(store.load(connection), expected)
 
     def test_snapshot_and_broadcast_are_bounded_as_history_grows(self):
         small = self.history(50)

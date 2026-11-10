@@ -44,11 +44,17 @@ def load(conn):
 
 
 def save(conn, state, previous=None, postgres=False):
-    ensure_schema(conn)
     # On startup (including retries of the initial migration), reconcile against
     # committed data, never against an uncommitted in-memory baseline.
+    needs_marker = False
     if previous is None:
-        previous = load(conn) or {}
+        ensure_schema(conn)
+        committed = load(conn)
+        needs_marker = committed is None
+        previous = committed or {}
+    # A supplied baseline belongs to a successful commit on this same database
+    # target. Its schema and format marker already exist; avoid repeated DDL and
+    # marker writes on every log flush/configuration change.
     placeholder = "%s" if postgres else "?"
     stats = {"bytes": 0, "rows": 0}
 
@@ -70,6 +76,8 @@ def save(conn, state, previous=None, postgres=False):
         execute("INSERT INTO state_sections (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value", (key, serialize(value)))
 
     for collection in COLLECTIONS:
+        if collection in previous and state.get(collection) is previous[collection]:
+            continue  # Immutable generations share untouched collections.
         old = {str(item["id"]): item for item in previous.get(collection, [])}
         seen = set()
         order = [str(item["id"]) for item in state.get(collection, [])]
@@ -102,5 +110,6 @@ def save(conn, state, previous=None, postgres=False):
         for record_id in old.keys() - seen:
             execute("DELETE FROM state_log_chunks WHERE collection = ? AND id = ?", (collection, record_id))
             execute("DELETE FROM state_records WHERE collection = ? AND id = ?", (collection, record_id))
-    conn.execute("INSERT INTO app_state (key, value) VALUES ('incremental_format', '1') ON CONFLICT(key) DO NOTHING")
+    if needs_marker:
+        conn.execute("INSERT INTO app_state (key, value) VALUES ('incremental_format', '1') ON CONFLICT(key) DO NOTHING")
     return stats

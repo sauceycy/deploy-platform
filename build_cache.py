@@ -24,11 +24,16 @@ def cache_lock(path, check_active=lambda: None):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def source_cache_key(task, branch):
+def source_cache_identity(task):
+    return [task.get("repo"), task.get("gitCredentialId"),
+            task.get("organizationIds"), task.get("organizationId")]
+
+
+def source_cache_key(task):
     # Credentials and organization scopes must not share a source cache.
-    identity = [task.get("repo"), task.get("gitCredentialId"),
-                task.get("organizationIds"), task.get("organizationId"), branch]
-    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    # Branches in the same access scope share objects; each fetch still validates
+    # its remote ref and the isolated clone explicitly selects that branch.
+    return hashlib.sha256(json.dumps(source_cache_identity(task), sort_keys=True).encode()).hexdigest()
 
 
 def checkout_source(s, execution_id, task, branch, src_dir, repo, env, secret):
@@ -48,7 +53,7 @@ def checkout_source(s, execution_id, task, branch, src_dir, repo, env, secret):
         run(["git", "clone", "--depth", "1", "--single-branch", "--branch", branch, "--", repo, str(src_dir)])
         return time.monotonic() - started
 
-    key = source_cache_key(task, branch)
+    key = source_cache_key(task)
     root = s.DATA_DIR / "cache" / "git"
     cached = root / f"{key}.git"
     s.append_log(execution_id, "准备 Git 对象缓存，校验远端分支后复用本地对象")
@@ -57,6 +62,18 @@ def checkout_source(s, execution_id, task, branch, src_dir, repo, env, secret):
         s.append_log(execution_id, f"等待 Git 缓存锁耗时: {s.format_duration(time.monotonic() - lock_started)}")
         if not (cached / "HEAD").exists():
             run(["git", "init", "--bare", str(cached)])
+            # Upgrade the former per-branch cache using local objects. This is
+            # only a cold-cache seed: a successful remote fetch is still required.
+            legacy_key = hashlib.sha256(json.dumps([*source_cache_identity(task), branch], sort_keys=True).encode()).hexdigest()
+            legacy = root / f"{legacy_key}.git"
+            if (legacy / "HEAD").exists():
+                with cache_lock(root / f"{legacy_key}.lock", lambda: s.ensure_execution_active(execution_id)):
+                    code, _output, _elapsed = s.run_command_stream(
+                        ["git", "-C", str(cached), "fetch", "--depth", "1", "--no-tags", "--no-write-fetch-head",
+                         "--", legacy.resolve().as_uri(), f"+refs/heads/{branch}:refs/heads/{branch}"],
+                        execution_id, env=env, redact=redact)
+                    if code:
+                        s.append_log(execution_id, "旧 Git 缓存预热未完成，继续校验远端分支")
         # Do not configure an authenticated remote URL in the persistent cache.
         # Fetch must succeed every time, including after credential revocation.
         run(["git", "-C", str(cached), "fetch", "--depth", "1", "--no-tags", "--no-write-fetch-head", "--", repo,

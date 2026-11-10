@@ -66,7 +66,7 @@ MAX_DOCKER_BUILDS = max(1, int(os.environ.get("MAX_DOCKER_BUILDS", "2")))
 MAX_IMAGE_PUSHES = max(1, int(os.environ.get("MAX_IMAGE_PUSHES", "2")))
 MAX_AGENT_DEPLOYS_PER_CLUSTER = max(1, int(os.environ.get("MAX_AGENT_DEPLOYS_PER_CLUSTER", "5")))
 SDK_BUILD_CPUS = os.environ.get("SDK_BUILD_CPUS", "2").strip()
-SDK_BUILD_MEMORY = os.environ.get("SDK_BUILD_MEMORY", "4g").strip()
+SDK_BUILD_MEMORY = os.environ.get("SDK_BUILD_MEMORY", "8g").strip()
 MAVEN_DOWNLOAD_THREADS = max(1, int(os.environ.get("MAVEN_DOWNLOAD_THREADS", "8")))
 GIT_SOURCE_CACHE = os.environ.get("GIT_SOURCE_CACHE", "true").lower() != "false"
 BUILD_EXECUTOR = ExecutionPool(MAX_CONCURRENT_EXECUTIONS, MAX_QUEUED_EXECUTIONS)
@@ -511,21 +511,23 @@ def use_postgres():
     return bool(DATABASE_URL and psycopg)
 
 
-def connect_sqlite():
+def connect_sqlite(initialize=True):
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    if initialize:
+        conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     return conn
 
 
-def connect_postgres():
+def connect_postgres(initialize=True):
     conn = psycopg.connect(
         DATABASE_URL, connect_timeout=5,
         options="-c statement_timeout=10000 -c lock_timeout=3000",
     )
     try:
-        conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        conn.commit()
+        if initialize:
+            conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            conn.commit()
     except Exception:
         conn.close()
         raise
@@ -576,10 +578,10 @@ def persist_state_snapshot(snapshot):
     target = (postgres, DATABASE_URL if postgres else str(DB_PATH))
     previous = LAST_PERSISTED_STATE if target == LAST_PERSISTED_TARGET else None
     if postgres:
-        with connect_postgres() as conn:
+        with connect_postgres(initialize=previous is None) as conn:
             stats = state_store.save(conn, snapshot, previous, postgres=True)
     else:
-        with closing(connect_sqlite()) as conn, conn:
+        with closing(connect_sqlite(initialize=previous is None)) as conn, conn:
             stats = state_store.save(conn, snapshot, previous)
     # Context managers above have committed successfully. Never cache a failed write.
     LAST_PERSISTED_STATE, LAST_PERSISTED_TARGET = snapshot, target
@@ -988,11 +990,13 @@ def broadcast_state(state, previous=None):
                   "revision": state.get("revision") or 0, "patch": patch}, clients=incremental)
 
 
-def mutate_execution(execution_id, fn, agent_tasks=False, audit=False):
+def mutate_execution(execution_id, fn, agent_tasks=False, audit=False, read_only_logs=False):
     """Internal runtime mutation: callbacks only edit this execution/its task.
 
     Log entries are append-only here. Unrelated records and configuration remain
     shared read-only; public read_state() still returns a fully detached copy.
+    Metadata-only callbacks may opt into read_only_logs, sharing the immutable
+    log list as well. Such callbacks must not modify the list or its entries.
     """
     global STATE_CACHE
     with STATE_LOCK:
@@ -1001,7 +1005,8 @@ def mutate_execution(execution_id, fn, agent_tasks=False, audit=False):
         if original is None:
             return None, previous
         execution = {key: copy.deepcopy(value) for key, value in original.items() if key != "logs"}
-        execution["logs"] = list(original.get("logs") or [])
+        logs = original.get("logs")
+        execution["logs"] = (logs if logs is not None else []) if read_only_logs else list(logs or [])
         state = {**previous,
                  "executions": [execution if item is original else item for item in previous["executions"]],
                  "tasks": [copy.deepcopy(item) if str(item["id"]) == str(original["taskId"]) else item for item in previous["tasks"]]}
@@ -1080,7 +1085,7 @@ def set_execution_commit_info(execution_id, commit_info):
             execution["commitTime"] = commit_info.get("time") or ""
             execution["commitMessage"] = commit_info.get("message") or ""
 
-    mutate_execution(execution_id, update)
+    mutate_execution(execution_id, update, read_only_logs=True)
 
 
 def set_execution_status(execution_id, status, message=None, image=None, stage=None, progress=None):
@@ -1104,7 +1109,7 @@ def set_execution_status(execution_id, status, message=None, image=None, stage=N
         if message:
             execution.setdefault("logs", []).append({"time": now_text(), "message": message})
 
-    mutate_execution(execution_id, update)
+    mutate_execution(execution_id, update, read_only_logs=not bool(message))
 
 
 def find_by_id(items, item_id):
