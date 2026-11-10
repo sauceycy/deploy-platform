@@ -94,6 +94,8 @@ const agentTasks = [];
 const agentHeartbeats = [];
 const schedules = [];
 const platformSettings = { registrySecretId: "", imageNamespace: "deploy-platform", sdkImages: [], sdkImagesInitialized: false };
+const buildResourceDefaults = { sdkBuildMemory: "8g", builds: 5 };
+let buildMemoryDirty = false;
 const clusterDrafts = [];
 const deployConfigDrafts = [];
 let activeDeployConfigIndex = 0;
@@ -217,6 +219,7 @@ const editSecretForm = document.getElementById("editSecretForm");
 const platformSettingsForm = document.getElementById("platformSettingsForm");
 const platformRegistrySecret = document.getElementById("platformRegistrySecret");
 const platformImageNamespace = document.getElementById("platformImageNamespace");
+const buildMemoryForm = document.getElementById("buildMemoryForm");
 const sdkImageMappings = document.getElementById("sdkImageMappings");
 const clusterCreateDialog = document.getElementById("clusterCreateDialog");
 const templateCreateDialog = document.getElementById("templateCreateDialog");
@@ -545,6 +548,7 @@ function normalizeDeployConfig(config = {}, task = {}) {
     deploymentName: String(config.deploymentName || task.name || "").trim(),
     buildCommand: String(config.buildCommand ?? "").trim(),
     artifactPath: String(config.artifactPath ?? "").trim(),
+    sdkBuildMemory: String(config.sdkBuildMemory ?? "").trim(),
     pagesPackageManager,
     pagesDeployCommand: String(config.pagesDeployCommand ?? "").trim(),
     cloudflareAccountIdSecretId: String(config.cloudflareAccountIdSecretId || "").trim(),
@@ -618,6 +622,8 @@ function hydrateState(nextState, options = {}) {
     MAX_BATCH_DEPLOY_TASKS = nextState.executionLimits.batchSize;
   }
   if (!options.force && incomingRevision < currentStateRevision) return false;
+  if (typeof nextState.executionLimits?.sdkBuildMemory === "string") buildResourceDefaults.sdkBuildMemory = nextState.executionLimits.sdkBuildMemory;
+  if (Number.isInteger(nextState.executionLimits?.builds) && nextState.executionLimits.builds > 0) buildResourceDefaults.builds = nextState.executionLimits.builds;
   const compact = Boolean(nextState.compact);
   const previousSelectedId = state.selectedId;
   replaceRoles(nextState.roles);
@@ -633,7 +639,7 @@ function hydrateState(nextState, options = {}) {
   mergeAgentTaskSnapshots(nextState.agentTasks, compact);
   replaceArray(agentHeartbeats, nextState.agentHeartbeats);
   replaceArray(schedules, nextState.schedules);
-  Object.assign(platformSettings, { registrySecretId: "", imageNamespace: "deploy-platform", sdkImages: [], sdkImagesInitialized: false }, nextState.platformSettings || {});
+  Object.assign(platformSettings, { registrySecretId: "", imageNamespace: "deploy-platform", sdkImages: [], sdkImagesInitialized: false, sdkBuildMemory: "" }, nextState.platformSettings || {});
   platformSettings.sdkImages = normalizeSdkImages(platformSettings.sdkImages);
   if (!platformSettings.sdkImagesInitialized && platformSettings.sdkImages.length === 0) {
     platformSettings.sdkImages = defaultSdkImages();
@@ -2874,7 +2880,62 @@ function renderPlatformSettings() {
   platformImageNamespace.value = platformSettings.imageNamespace || "deploy-platform";
 }
 
+function buildMemoryBytes(value) {
+  const match = String(value || "").trim().toLowerCase().match(/^([0-9]+(?:\.[0-9]+)?)([bkmgt]?)(?:i?b)?$/);
+  if (!match) return NaN;
+  const size = Number(match[1]) * 1024 ** ({ "": 0, b: 0, k: 1, m: 2, g: 3, t: 4 }[match[2]]);
+  return Number.isInteger(size) && size >= 6 * 1024 ** 2 && size < 2 ** 63 ? size : NaN;
+}
+
+function updateBuildMemorySummary() {
+  if (!buildMemoryForm) return;
+  const input = buildMemoryForm.elements.sdkBuildMemory;
+  const value = input.value.trim() || buildResourceDefaults.sdkBuildMemory;
+  const summary = document.getElementById("buildMemorySummary");
+  if (!value) {
+    summary.textContent = `环境变量未设置内存上限；构建并发上限 ${buildResourceDefaults.builds}。`;
+    return;
+  }
+  const bytes = buildMemoryBytes(value);
+  summary.textContent = Number.isFinite(bytes)
+    ? `按此默认值：单容器 ${value}，${buildResourceDefaults.builds} 并发上限合计 ${Number((bytes * buildResourceDefaults.builds / 1024 ** 3).toFixed(3))} GiB${input.value.trim() ? "" : "（继承环境变量）"}。`
+    : "请输入有效容量，例如 8g、1.5g 或 512m，至少 6m。";
+}
+
+function renderBuildMemorySettings() {
+  if (!buildMemoryForm) return;
+  const editable = hasPermission("secret.manage") && hasGlobalAccess();
+  buildMemoryForm.elements.sdkBuildMemory.disabled = !editable;
+  buildMemoryForm.querySelector('button[type="submit"]').disabled = !editable;
+  if (!buildMemoryDirty) buildMemoryForm.elements.sdkBuildMemory.value = platformSettings.sdkBuildMemory || "";
+  updateBuildMemorySummary();
+}
+
+async function saveBuildMemory(event) {
+  event.preventDefault();
+  if (!requirePermission("secret.manage") || !hasGlobalAccess()) return;
+  const input = buildMemoryForm.elements.sdkBuildMemory;
+  const value = input.value.trim();
+  input.setCustomValidity(value && !Number.isFinite(buildMemoryBytes(value)) ? "请输入至少 6m 的容量，例如 8g 或 512m" : "");
+  if (!input.reportValidity()) return;
+  const button = buildMemoryForm.querySelector('button[type="submit"]');
+  const status = document.getElementById("buildMemorySaveStatus");
+  button.disabled = true;
+  status.textContent = "保存中…";
+  try {
+    await mutateJson("/api/settings/build-memory", { sdkBuildMemory: value }, "PUT");
+    buildMemoryDirty = false;
+    render();
+    status.textContent = "已保存，对新提交的发布生效";
+  } catch (error) {
+    status.textContent = `保存失败：${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function renderImageView() {
+  renderBuildMemorySettings();
   if (sdkImagesDirty) return;
   renderSdkImageMappings();
 }
@@ -3155,6 +3216,12 @@ function deployConfigCardHtml(config, index) {
             <span>Git 仓库</span>
             <input data-deploy-config-field="repo" value="${escapeHtml(config.repo || "")}" placeholder="可选；不填使用任务仓库" />
           </label>
+          ${!isWindows ? `
+          <label>
+            <span>SDK 构建内存上限</span>
+            <input data-deploy-config-field="sdkBuildMemory" value="${escapeHtml(config.sdkBuildMemory || "")}" placeholder="留空继承平台默认值" maxlength="32" />
+            <small>例如 8g 或 512m；保存后用于新发布，已提交执行保持原值。</small>
+          </label>` : ""}
           ${
             isPages
               ? ""
@@ -3584,6 +3651,7 @@ function currentDeployConfigSnapshot() {
       deploymentName: name,
       buildCommand: baseConfig.buildCommand || formValue("buildCommand"),
       artifactPath: baseConfig.artifactPath || formValue("artifactPath"),
+      sdkBuildMemory: baseConfig.sdkBuildMemory || "",
       pagesPackageManager: baseConfig.pagesPackageManager || formValue("pagesPackageManager") || "npm",
       pagesDeployCommand: baseConfig.pagesDeployCommand || formValue("pagesDeployCommand"),
       cloudflareAccountIdSecretId: baseConfig.cloudflareAccountIdSecretId || "",
@@ -5492,6 +5560,13 @@ document.getElementById("templateForm").addEventListener("change", (event) => {
   }
 });
 platformSettingsForm.addEventListener("submit", savePlatformSettings);
+buildMemoryForm.addEventListener("submit", saveBuildMemory);
+buildMemoryForm.addEventListener("input", () => {
+  buildMemoryDirty = true;
+  buildMemoryForm.elements.sdkBuildMemory.setCustomValidity("");
+  document.getElementById("buildMemorySaveStatus").textContent = "";
+  updateBuildMemorySummary();
+});
 platformSettingsForm.addEventListener("input", () => {
   platformSettingsDirty = true;
 });

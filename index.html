@@ -382,6 +382,24 @@
                 </button>
               </div>
             </div>
+            <form class="settings-card build-memory-settings" id="buildMemoryForm">
+              <div>
+                <strong>SDK 构建内存</strong>
+                <span>保存后用于新提交的发布。每个发布配置也可单独设置；已排队和运行中的任务保持原值。</span>
+              </div>
+              <label>
+                <span>单个编译容器内存上限</span>
+                <input name="sdkBuildMemory" id="sdkBuildMemory" placeholder="继承环境变量，例如 8g" maxlength="32" aria-describedby="buildMemorySummary" />
+              </label>
+              <div>
+                <span id="buildMemorySummary" role="status" aria-live="polite"></span>
+                <span id="buildMemorySaveStatus" role="status" aria-live="polite"></span>
+              </div>
+              <button class="primary-button" type="submit" data-permission-required="secret.manage">
+                <i data-lucide="save"></i><span>保存内存配置</span>
+              </button>
+              <p class="build-memory-note">容量示例：8g、1.5g、512m；留空继承环境变量。各发布配置单独覆盖时，合计需按实际配置重新计算。内存上限不等于预留，不包含镜像构建、数据库和系统用量。平台默认值仅允许具有管理秘钥权限的全局组用户修改。</p>
+            </form>
             <div class="management-toolbar">
               <label class="search-box">
                 <i data-lucide="search"></i>

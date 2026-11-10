@@ -20,6 +20,7 @@ import state_store
 from contextlib import closing
 from collections import deque
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -182,6 +183,7 @@ DEFAULT_STATE = {
         "imageNamespace": IMAGE_NAMESPACE,
         "sdkImages": [],
         "sdkImagesInitialized": False,
+        "sdkBuildMemory": "",
     },
 }
 
@@ -261,6 +263,57 @@ def deploy_config_repository_override(value, task):
     return repo
 
 
+def normalize_sdk_memory(value):
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str) or len(value) > 32:
+        raise ValueError("SDK 构建内存须填写容量，例如 8g、1.5g 或 512m；留空继承默认值")
+    value = value.strip().lower()
+    if not value:
+        return ""
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([bkmgt]?)(?:i?b)?", value)
+    if not match:
+        raise ValueError("SDK 构建内存格式错误，例如 8g、1.5g 或 512m")
+    try:
+        size = Decimal(match[1]) * (1024 ** {"": 0, "b": 0, "k": 1, "m": 2, "g": 3, "t": 4}[match[2]])
+    except InvalidOperation:
+        raise ValueError("SDK 构建内存格式错误") from None
+    if size != size.to_integral_value() or not 6 * 1024 ** 2 <= size < 2 ** 63:
+        raise ValueError("SDK 构建内存至少为 6m，且须为有效的整数内存字节数")
+    size = int(size)
+    for suffix, unit in (("g", 1024 ** 3), ("m", 1024 ** 2)):
+        if size % unit == 0:
+            return f"{size // unit}{suffix}"
+    return str(size)
+
+
+def environment_sdk_memory():
+    # Docker accepts an explicit zero as no limit; retain existing env behavior.
+    return "" if SDK_BUILD_MEMORY == "0" else normalize_sdk_memory(SDK_BUILD_MEMORY)
+
+
+def sdk_memory_for_execution(state, config=None):
+    settings = state.get("platformSettings") or {}
+    return normalize_sdk_memory((config or {}).get("sdkBuildMemory") or settings.get("sdkBuildMemory") or environment_sdk_memory())
+
+
+def save_build_memory(payload, actor):
+    if not isinstance(payload, dict) or "sdkBuildMemory" not in payload:
+        raise ValueError("请提供 sdkBuildMemory")
+    memory = normalize_sdk_memory(payload["sdkBuildMemory"])
+
+    def update(state):
+        user = find_user(state, actor)
+        if not user or not user_has_permission(state, user, "secret.manage") or not user_has_global_access(state, user):
+            raise ValueError("只有具有管理秘钥权限的全局组用户可以修改平台构建内存")
+        state["platformSettings"]["sdkBuildMemory"] = memory
+        state["auditLogs"].insert(0, audit_entry(actor, "保存构建内存", memory or "继承环境变量", "成功"))
+
+    _, committed = mutate_state(update, read_only_history=True)
+    persist_queued_state(committed, committed["revision"])
+    return committed
+
+
 def normalize_deploy_config(config, task=None, index=0):
     config = config if isinstance(config, dict) else {}
     task = task if isinstance(task, dict) else {}
@@ -301,6 +354,7 @@ def normalize_deploy_config(config, task=None, index=0):
         "deploymentName": str(config.get("deploymentName") or config.get("appName") or task.get("name") or "").strip(),
         "buildCommand": str(config.get("buildCommand") or "").strip(),
         "artifactPath": str(config.get("artifactPath") or "").strip(),
+        "sdkBuildMemory": normalize_sdk_memory(config.get("sdkBuildMemory")),
         "pagesPackageManager": pages_package_manager,
         "pagesDeployCommand": str(config.get("pagesDeployCommand") or "").strip(),
         "cloudflareAccountIdSecretId": str(config.get("cloudflareAccountIdSecretId") or "").strip(),
@@ -414,6 +468,7 @@ def normalize_platform_settings(state):
         "imageNamespace": str(settings.get("imageNamespace") or IMAGE_NAMESPACE or "deploy-platform").strip().strip("/") or "deploy-platform",
         "sdkImages": sdk_images,
         "sdkImagesInitialized": initialized,
+        "sdkBuildMemory": normalize_sdk_memory(settings.get("sdkBuildMemory")),
     }
 
 
@@ -820,7 +875,8 @@ def client_state(state, compact=False):
     data["compact"] = bool(compact)
     data["executionLimits"] = {"batchSize": MAX_BATCH_DEPLOY_TASKS, "builds": MAX_CONCURRENT_EXECUTIONS,
                                "queued": MAX_QUEUED_EXECUTIONS, "dockerBuilds": MAX_DOCKER_BUILDS,
-                               "imagePushes": MAX_IMAGE_PUSHES, "clusterDeploys": MAX_AGENT_DEPLOYS_PER_CLUSTER}
+                               "imagePushes": MAX_IMAGE_PUSHES, "clusterDeploys": MAX_AGENT_DEPLOYS_PER_CLUSTER,
+                               "sdkBuildMemory": environment_sdk_memory()}
     return data
 
 
@@ -1887,6 +1943,9 @@ def run_sdk_command(execution_id, task, command, src_dir, build_env):
     container_name = f"deploy-build-{safe_name(execution_id)}"
     build_image = builder_image(task)
     append_log(execution_id, f"SDK 编译镜像: {build_image}")
+    memory = task["_sdkBuildMemory"] if "_sdkBuildMemory" in task else sdk_memory_for_execution(task.get("_state") or state_snapshot(), task)
+    memory = normalize_sdk_memory(memory)
+    append_log(execution_id, f"SDK 编译容器内存上限: {memory or '未设置'}")
     docker_env = docker_login_env_for_secret(execution_id, sdk_pull_secret(task, build_image), build_image, src_dir.parent / ".docker-sdk", "SDK 编译镜像")
     docker_cmd = [
         "docker",
@@ -1895,7 +1954,7 @@ def run_sdk_command(execution_id, task, command, src_dir, build_env):
         "--name",
         container_name,
         *(["--cpus", SDK_BUILD_CPUS] if SDK_BUILD_CPUS else []),
-        *(["--memory", SDK_BUILD_MEMORY] if SDK_BUILD_MEMORY else []),
+        *(["--memory", memory] if memory else []),
         "-v",
         f"{docker_src_dir}:/workspace",
         *cache_mounts,
@@ -2664,6 +2723,7 @@ def effective_task_for_deploy_config(task, deploy_config):
     effective["env"] = deploy_config.get("env") or task.get("env")
     effective["buildCommand"] = deploy_config.get("buildCommand") or task.get("buildCommand") or ""
     effective["artifactPath"] = deploy_config.get("artifactPath") or task.get("artifactPath") or ""
+    effective["sdkBuildMemory"] = deploy_config.get("sdkBuildMemory") or ""
     effective["pagesPackageManager"] = deploy_config.get("pagesPackageManager") or task.get("pagesPackageManager") or "npm"
     effective["pagesDeployCommand"] = deploy_config.get("pagesDeployCommand") or task.get("pagesDeployCommand") or ""
     effective["cloudflareAccountIdSecretId"] = deploy_config.get("cloudflareAccountIdSecretId") or task.get("cloudflareAccountIdSecretId") or ""
@@ -2680,6 +2740,8 @@ def task_for_execution(task, execution):
     effective = effective_task_for_deploy_config(task, config)
     effective["lastActor"] = execution.get("actor") or "system"
     effective["lastBranch"] = execution.get("branch") or ""
+    if "sdkBuildMemory" in execution:
+        effective["_sdkBuildMemory"] = execution["sdkBuildMemory"]
     return effective
 
 
@@ -3144,6 +3206,7 @@ def create_execution_record(state, task, actor, branch, action="触发发布", d
         "deployConfigId": deploy_config.get("id") or "",
         "deployConfigName": deploy_config.get("name") or "默认配置",
         "deployConfigSnapshot": copy.deepcopy(deploy_config),
+        "sdkBuildMemory": sdk_memory_for_execution(state, deploy_config),
         "deployRule": task_deploy_rule(task),
         "branch": branch,
         "actor": execution_actor,
@@ -3420,6 +3483,8 @@ def normalize_task_payload(payload):
 
 def save_task_config(task_id, payload, actor):
     task_payload = normalize_task_payload(payload)
+    memory_omitted = {str(config.get("id")) for config in (payload.get("deployConfigs") or [])
+                      if isinstance(config, dict) and "sdkBuildMemory" not in config}
     if not task_payload["name"]:
         raise ValueError("任务名称不能为空")
     if not task_payload["repo"]:
@@ -3500,6 +3565,10 @@ def save_task_config(task_id, payload, actor):
             if not task:
                 raise ValueError("任务不存在")
             require_actor_asset_access(state, actor, "task.create", task, "编辑")
+            previous_configs = {str(config.get("id")): config for config in task.get("deployConfigs", [])}
+            for config in task_payload["deployConfigs"]:
+                if config["id"] in memory_omitted and config["id"] in previous_configs:
+                    config["sdkBuildMemory"] = previous_configs[config["id"]].get("sdkBuildMemory", "")
             task.update(task_payload)
             state["auditLogs"].insert(0, audit_entry(actor, "编辑任务", task.get("name"), "成功"))
             return task
@@ -4729,6 +4798,20 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
     def do_PUT(self):
         self.request_started = time.monotonic()
         parsed = urlparse(self.path)
+        if parsed.path == "/api/settings/build-memory":
+            actor = self.require_session_actor()
+            if not actor:
+                return
+            try:
+                committed = save_build_memory(self.read_json_body(), actor)
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            except Exception:
+                self.send_json({"error": "构建内存配置尚未确认落盘，请稍后重试"}, status=503)
+                return
+            self.send_json({"ok": True, "state": client_state(committed, compact=True)})
+            return
         match = re.match(r"^/api/tasks/([^/]+)$", parsed.path)
         if match:
             body = self.read_json_body()
@@ -4772,6 +4855,17 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
                 state = body
             with STATE_LOCK:
                 current_state = state_snapshot()
+                # This setting is edited only by the narrow build-memory API.
+                # Unrelated/stale full configuration saves must not erase it.
+                incoming_settings = state.get("platformSettings")
+                if isinstance(incoming_settings, dict):
+                    incoming_settings["sdkBuildMemory"] = (current_state.get("platformSettings") or {}).get("sdkBuildMemory", "")
+                current_tasks = {str(task["id"]): task for task in current_state["tasks"]}
+                for task in state.get("tasks", []):
+                    previous_configs = {str(config.get("id")): config for config in current_tasks.get(str(task.get("id")), {}).get("deployConfigs", [])}
+                    for config in task.get("deployConfigs", []):
+                        if "sdkBuildMemory" not in config and str(config.get("id")) in previous_configs:
+                            config["sdkBuildMemory"] = previous_configs[str(config["id"])].get("sdkBuildMemory", "")
                 state = merge_defaults(state)
                 state = preserve_existing_user_passwords(state, current_state)
                 state = preserve_sensitive_values(state, current_state)
