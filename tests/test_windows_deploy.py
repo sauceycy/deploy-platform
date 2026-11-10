@@ -180,6 +180,20 @@ class WindowsDeploymentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "等待"):
             windows.rollback(s, 1, "admin", None)
 
+    def test_other_config_rollback_is_allowed_but_same_server_claim_stays_serial(self):
+        self.task['deployConfigs'] = [s.normalize_deploy_config({'id': key, 'name': key}, self.task) for key in ('a', 'b')]
+        first = s.create_execution_record(self.state, self.task, 'admin', 'main', deploy_config=self.task['deployConfigs'][0])
+        windows.dispatch(s, self.state, first, s.task_for_execution(self.task, first), 'deploy', {'sha256': 'a' * 64, 'size': 5})
+        rollback, _ = windows.rollback(s, 1, 'admin', 'b')
+        self.assertEqual(rollback['deployConfigId'], 'b')
+        held = self.get('/api/windows-agent/tasks').send_json.call_args.args[0]['task']
+        self.assertEqual(held['executionId'], first['id'])
+        self.assertIsNone(self.get('/api/windows-agent/tasks', 'win-02').send_json.call_args.args[0]['task'])
+        self.post(f'/api/windows-agent/tasks/{held["id"]}/result', status='success', logs='finished first')
+        next_task = self.get('/api/windows-agent/tasks').send_json.call_args.args[0]['task']
+        self.assertEqual(next_task['executionId'], rollback['id'])
+        self.assertEqual(next_task['payload']['action'], 'rollback')
+
     def test_failed_cutover_records_failure(self):
         item = self.enqueue()
         self.get("/api/windows-agent/tasks")

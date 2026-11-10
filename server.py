@@ -712,7 +712,8 @@ def preserve_runtime_fields(next_state, current_state=None):
     if not current_state:
         return next_state
     current_tasks = {str(item.get("id")): item for item in current_state.get("tasks", [])}
-    runtime_task_fields = ("status", "stage", "progress", "lastRun", "lastBranch", "lastActor", "alerts", "schedule")
+    runtime_task_fields = ("status", "stage", "progress", "lastRun", "lastBranch", "lastActor", "alerts", "schedule",
+                           "lastDeployConfigId", "lastDeployConfigName", "configExecutions")
     for task in next_state.get("tasks", []):
         current = current_tasks.get(str(task.get("id")))
         if not current:
@@ -1009,6 +1010,8 @@ def mutate_execution(execution_id, fn, agent_tasks=False, audit=False):
         if agent_tasks:
             state["agentTasks"] = [copy.deepcopy(item) if str(item.get("executionId")) == str(execution_id) else item for item in previous["agentTasks"]]
         result = fn(state)
+        if any(execution.get(key) != original.get(key) for key in ("status", "stage", "progress")):
+            refresh_task_execution_summary(state, original["taskId"])
         if state == previous:
             return result, previous
         state["revision"] = int(previous.get("revision") or 0) + 1
@@ -1100,14 +1103,6 @@ def set_execution_status(execution_id, status, message=None, image=None, stage=N
             execution["image"] = image
         if message:
             execution.setdefault("logs", []).append({"time": now_text(), "message": message})
-        task = find_by_id(state["tasks"], execution["taskId"])
-        if task and execution_is_latest_for_task(state, execution):
-            task["status"] = status
-            task["lastRun"] = now_text()
-            if stage:
-                task["stage"] = stage
-            if progress is not None:
-                task["progress"] = max(0, min(100, int(progress)))
 
     mutate_execution(execution_id, update)
 
@@ -1117,20 +1112,48 @@ def find_by_id(items, item_id):
     return next((item for item in items if str(item.get("id")) == item_id), None)
 
 
-def latest_execution_for_task(state, task_id):
-    return next((item for item in state.get("executions", []) if str(item.get("taskId")) == str(task_id)), None)
+def active_execution_for_task(state, task_id, deploy_config_id=None):
+    # Scan active executions, not just the newest execution of the whole task.
+    # Pre-configuration records lack an ID: conservatively reserve every config.
+    return next((item for item in state.get("executions", [])
+                 if str(item.get("taskId")) == str(task_id) and is_active_status(item.get("status"))
+                 and (deploy_config_id is None or not item.get("deployConfigId")
+                      or str(item["deployConfigId"]) == str(deploy_config_id))), None)
 
 
-def execution_is_latest_for_task(state, execution):
-    latest = latest_execution_for_task(state, execution.get("taskId"))
-    return bool(latest and str(latest.get("id")) == str(execution.get("id")))
+def refresh_task_execution_summary(state, task_id):
+    """Small runtime summaries per current config; never copy log contents.
 
-
-def active_execution_for_task(state, task_id):
-    latest = latest_execution_for_task(state, task_id)
-    if latest and is_active_status(latest.get("status")):
-        return latest
-    return None
+    The task card represents the newest active execution, or the newest submitted
+    execution when idle. Finished callbacks cannot hide another running config.
+    Current config summaries also survive the 50-record browser history window.
+    """
+    task = find_by_id(state.get("tasks", []), task_id)
+    if not task:
+        return
+    config_ids = {str(item.get("id") or "default") for item in task.get("deployConfigs", [])} or {"default"}
+    summaries = {}
+    latest = representative = None
+    fields = ("id", "taskId", "deployConfigId", "deployConfigName", "status", "stage", "progress",
+              "actor", "branch", "createdAt", "updatedAt")
+    for execution in state.get("executions", []):
+        if str(execution.get("taskId")) != str(task_id):
+            continue
+        latest = latest or execution
+        active = is_active_status(execution.get("status"))
+        if active and representative is None:
+            representative = execution
+        config_id = str(execution.get("deployConfigId") or "")
+        if config_id not in summaries and (config_id in config_ids or active):
+            summaries[config_id] = {key: execution[key] for key in fields if key in execution}
+    task["configExecutions"] = summaries
+    representative = representative or latest
+    if representative:
+        for target, source in (("status", "status"), ("stage", "stage"), ("progress", "progress"),
+                               ("lastBranch", "branch"), ("lastActor", "actor"),
+                               ("lastDeployConfigId", "deployConfigId"), ("lastDeployConfigName", "deployConfigName")):
+            task[target] = representative.get(source, "")
+        task["lastRun"] = representative.get("updatedAt") or representative.get("createdAt") or now_text()
 
 
 def find_user(state, username):
@@ -2647,6 +2670,14 @@ def effective_task_for_deploy_config(task, deploy_config):
     return effective
 
 
+def task_for_execution(task, execution):
+    config = execution.get("deployConfigSnapshot") or deploy_config_by_id(task, execution.get("deployConfigId"))
+    effective = effective_task_for_deploy_config(task, config)
+    effective["lastActor"] = execution.get("actor") or "system"
+    effective["lastBranch"] = execution.get("branch") or ""
+    return effective
+
+
 def dispatch_agent_tasks(execution_id, task, image):
     def update(state):
         execution = find_by_id(state["executions"], execution_id)
@@ -2702,12 +2733,6 @@ def dispatch_agent_tasks(execution_id, task, image):
         execution["stage"] = "Agent 部署"
         execution["progress"] = 88
         execution.setdefault("logs", []).append({"time": now_text(), "message": f"已创建 Agent 发布任务: {', '.join(dispatched_clusters)}"})
-        task_ref = find_by_id(state["tasks"], task["id"])
-        if task_ref and execution_is_latest_for_task(state, execution):
-            task_ref["status"] = "deploying"
-            task_ref["lastRun"] = now_text()
-            task_ref["stage"] = "Agent 部署"
-            task_ref["progress"] = 88
 
     _result, committed = mutate_execution(execution_id, update, agent_tasks=True)
     persist_queued_state(committed, int(committed.get("revision") or 0))
@@ -2837,6 +2862,10 @@ def resolve_notify_channel(task, channels):
 
 
 def send_notification(task, event, message, execution_id=None):
+    if execution_id:
+        execution = find_by_id(state_snapshot().get("executions", []), execution_id)
+        if execution:
+            task = {**task, "lastActor": execution.get("actor") or "system", "lastBranch": execution.get("branch") or ""}
     event_labels = {
         "BUILD_SUCCESS": "发布成功",
         "BUILD_FAILED": "构建失败",
@@ -2902,8 +2931,7 @@ def build_and_dispatch(execution_id):
         return
     # Freeze the selected configuration at enqueue time so later edits cannot
     # change this execution's source repository or deployment parameters.
-    deploy_config = execution.get("deployConfigSnapshot") or deploy_config_by_id(task, execution.get("deployConfigId"))
-    task = effective_task_for_deploy_config(task, deploy_config)
+    task = task_for_execution(task, execution)
     platform_settings = state.get("platformSettings") if isinstance(state.get("platformSettings"), dict) else {}
     task["sdkImages"] = normalize_sdk_images(platform_settings.get("sdkImages"))
     task["_state"] = state
@@ -3122,14 +3150,7 @@ def create_execution_record(state, task, actor, branch, action="触发发布", d
         "updatedAt": now_text(),
     }
     state["executions"].insert(0, execution)
-    task["status"] = "queued"
-    task["stage"] = "等待执行"
-    task["progress"] = 5
-    task["lastRun"] = now_text()
-    task["lastBranch"] = branch
-    task["lastActor"] = execution_actor
-    task["lastDeployConfigId"] = deploy_config.get("id") or ""
-    task["lastDeployConfigName"] = deploy_config.get("name") or "默认配置"
+    refresh_task_execution_summary(state, task["id"])
     state["auditLogs"].insert(
         0,
         audit_entry(execution_actor, action, f"{task_display_name(task, deploy_config)} / {deploy_config.get('name') or '默认配置'} / {branch}", "已入队"),
@@ -3156,11 +3177,6 @@ def cancel_execution(execution_id, actor):
         task = find_by_id(state["tasks"], execution["taskId"])
         if task:
             require_actor_asset_access(state, actor, "task.deploy", task, "取消发布")
-        if task and execution_is_latest_for_task(state, execution):
-            task["status"] = "cancelled"
-            task["stage"] = "已取消"
-            task["progress"] = execution["progress"]
-            task["lastRun"] = now_text()
         state["auditLogs"].insert(0, audit_entry(actor, "取消发布", execution.get("taskName"), "成功"))
         return execution
 
@@ -3194,12 +3210,8 @@ def recover_interrupted_executions():
                 }
             )
             recovered.append(execution.get("id"))
-            task = find_by_id(state.get("tasks", []), execution.get("taskId"))
-            if task and execution_is_latest_for_task(state, execution):
-                task["status"] = "failed"
-                task["stage"] = "执行中断"
-                task["progress"] = execution["progress"]
-                task["lastRun"] = now_text()
+        for task in state.get("tasks", []):
+            refresh_task_execution_summary(state, task["id"])
         for item in state.get("agentTasks", []):
             if item.get("status") in {"pending", "running"}:
                 execution = find_by_id(state["executions"], item.get("executionId"))
@@ -3683,9 +3695,9 @@ def create_execution(task_id, actor, branch, deploy_config_id=None, request_id=N
         existing = execution_for_request(state, task_id, actor, branch, deploy_config.get("id"), request_id)
         if existing:
             return existing
-        active = active_execution_for_task(state, task["id"])
+        active = active_execution_for_task(state, task["id"], deploy_config["id"])
         if active:
-            raise ValueError(f"任务正在执行中: {active.get('id')} / {active.get('stage') or active.get('status')}")
+            raise ValueError(f"发布配置 {deploy_config['name']} 正在执行中: {active.get('id')} / {active.get('stage') or active.get('status')}")
         ensure_build_capacity(1)
         execution = create_execution_record(state, task, actor, branch, deploy_config=deploy_config)
         if request_id:
@@ -3727,9 +3739,9 @@ def create_batch_executions(items, actor):
                 executions.append(existing)
                 continue
             ensure_build_capacity(new_count + 1)
-            active = active_execution_for_task(state, task["id"])
+            active = active_execution_for_task(state, task["id"], deploy_config["id"])
             if active:
-                raise ValueError(f"任务 {task['name']} 正在执行中: {active.get('id')}")
+                raise ValueError(f"任务 {task['name']} 的配置 {deploy_config['name']} 正在执行中: {active.get('id')}")
             execution = create_execution_record(state, task, actor, branch, "批量发布", deploy_config=deploy_config)
             if item.get("requestId"):
                 execution["requestId"] = item["requestId"]
@@ -3799,7 +3811,8 @@ def schedule_execution(task_id, actor, branch, scheduled_at, deploy_config_id=No
         if not branch:
             raise ValueError("请选择发布分支")
         for item in state.setdefault("schedules", []):
-            if str(item.get("taskId")) == str(task["id"]) and item.get("status") == "pending":
+            if (str(item.get("taskId")) == str(task["id"]) and item.get("status") == "pending"
+                    and str(item.get("deployConfigId") or "default") == str(deploy_config["id"])):
                 item["status"] = "cancelled"
                 item["enabled"] = False
                 item["updatedAt"] = now_text()
@@ -3887,10 +3900,10 @@ def trigger_due_schedules():
                     schedule["error"] = "任务不存在"
                     schedule["updatedAt"] = now_text()
                     continue
-                active = active_execution_for_task(state, task["id"])
-                if active:
-                    raise RuntimeError(f"任务已有执行中的发布: {active.get('id')}")
                 deploy_config = deploy_config_by_id(task, schedule.get("deployConfigId"))
+                active = active_execution_for_task(state, task["id"], deploy_config["id"])
+                if active:
+                    continue  # This config waits; other configs can still run.
                 execution = create_execution_record(state, task, schedule.get("actor") or "scheduler", schedule.get("branch"), "定时发布", deploy_config=deploy_config)
                 schedule["status"] = "triggered"
                 schedule["executionId"] = execution["id"]
@@ -3935,7 +3948,7 @@ def recover_waiting_deployments():
                 continue
             task = find_by_id(state.get("tasks", []), execution.get("taskId"))
             if task:
-                recovery_items.append((execution.get("id"), copy.deepcopy(task), execution.get("image")))
+                recovery_items.append((execution.get("id"), task_for_execution(task, execution), execution.get("image")))
 
     for execution_id, task, image in recovery_items:
         try:
@@ -3994,12 +4007,6 @@ def recover_stuck_agent_deployments():
                         item["status"] = "failed"
                         item["updatedAt"] = now_text()
                         item.setdefault("logs", []).append({"time": now_text(), "message": message})
-                task_ref = find_by_id(state.get("tasks", []), execution.get("taskId"))
-                if task_ref and execution_is_latest_for_task(state, execution):
-                    task_ref["status"] = "failed"
-                    task_ref["stage"] = "部署异常"
-                    task_ref["progress"] = 100
-                    task_ref["lastRun"] = now_text()
             mutate_execution(execution_id, update, agent_tasks=True)
         except Exception as exc:
             print(f"stuck deployment recovery failed: {execution_id} / {exc}", flush=True)
@@ -4165,26 +4172,18 @@ def update_agent_result(agent_task_id, status, logs, agent_instance=None):
                 execution["stage"] = "发布完成"
                 execution["progress"] = 100
                 task = find_by_id(state["tasks"], execution["taskId"])
-                if task and execution_is_latest_for_task(state, execution):
-                    task["status"] = "success"
-                    task["stage"] = "发布完成"
-                    task["progress"] = 100
+                if task:
                     # Agent callbacks happen after enqueue; keep the card tied to
                     # the exact configuration frozen for this execution.
-                    deploy_config = execution.get("deployConfigSnapshot") or deploy_config_by_id(task, execution.get("deployConfigId"))
-                    notification = (effective_task_for_deploy_config(task, deploy_config), "BUILD_SUCCESS", f"集群 {item['clusterName']} 部署完成", execution.get("id"))
+                    notification = (task_for_execution(task, execution), "BUILD_SUCCESS", f"集群 {item['clusterName']} 部署完成", execution.get("id"))
             elif any(value == "failed" for value in statuses):
                 execution["status"] = "partial" if any(value == "success" for value in statuses) else "failed"
                 execution["stage"] = "部署异常"
                 execution["progress"] = 100 if execution["status"] == "partial" else max(90, int(execution.get("progress") or 90))
                 task = find_by_id(state["tasks"], execution["taskId"])
-                if task and execution_is_latest_for_task(state, execution):
-                    task["status"] = execution["status"]
-                    task["stage"] = execution["stage"]
-                    task["progress"] = execution["progress"]
+                if task:
                     # Keep failure cards consistent with the successful path.
-                    deploy_config = execution.get("deployConfigSnapshot") or deploy_config_by_id(task, execution.get("deployConfigId"))
-                    notification = (effective_task_for_deploy_config(task, deploy_config), "DEPLOY_FAILED", logs or f"集群 {item['clusterName']} 部署失败", execution.get("id"))
+                    notification = (task_for_execution(task, execution), "DEPLOY_FAILED", logs or f"集群 {item['clusterName']} 部署失败", execution.get("id"))
         return item
 
     with STATE_LOCK:

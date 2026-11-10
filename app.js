@@ -778,6 +778,42 @@ function isTaskActive(task) {
   return ["queued", "building", "deploying", "running"].includes(task?.status);
 }
 
+function activeExecutionsForTask(task) {
+  const byId = new Map(Object.values(task?.configExecutions || {}).map((execution) => [String(execution.id), execution]));
+  executions.filter((execution) => String(execution.taskId) === String(task?.id))
+    .forEach((execution) => byId.set(String(execution.id), execution));
+  return Array.from(byId.values()).filter(isTaskActive);
+}
+
+function isDeployConfigActive(task, configId) {
+  return activeExecutionsForTask(task).some((execution) => !execution.deployConfigId || String(execution.deployConfigId) === String(configId));
+}
+
+function availableDeployConfigsForTask(task) {
+  return deployConfigsForTask(task).filter((config) => !isDeployConfigActive(task, config.id));
+}
+
+function hasAvailableDeployConfig(task) {
+  return availableDeployConfigsForTask(task).length > 0;
+}
+
+function renderActiveConfigExecutions(task) {
+  const active = activeExecutionsForTask(task);
+  const pending = schedules.filter((schedule) => String(schedule.taskId) === String(task.id) && schedule.status === "pending");
+  if (!active.length && !pending.length) return "";
+  return `<section class="detail-section detail-card"><h3>各配置发布进度</h3>
+    ${active.map((execution) => `<div class="history-item"><div>
+      <strong>${escapeHtml(execution.deployConfigName || "默认配置")}</strong>
+      <span>${escapeHtml(execution.branch || "")} · ${escapeHtml(execution.actor || "system")} · ${escapeHtml(execution.stage || statusLabel(execution.status))}</span>
+      ${renderProgress(execution, true)}</div>
+      <button class="ghost-button danger-action" type="button" data-execution-cancel="${escapeHtml(execution.id)}" ${canOperateAsset("task.deploy", task) ? "" : "disabled"}>取消此配置</button></div>`).join("")}
+    ${pending.map((schedule) => `<div class="history-item"><div>
+      <strong>${escapeHtml(schedule.deployConfigName || "默认配置")} · 待定时发布</strong>
+      <span>${escapeHtml(schedule.scheduledAt)} · ${escapeHtml(schedule.branch)}</span></div>
+      <button class="ghost-button danger-action" type="button" data-schedule-cancel="${escapeHtml(schedule.id)}" ${canOperateAsset("task.deploy", task) ? "" : "disabled"}>取消此计划</button></div>`).join("")}
+    </section>`;
+}
+
 function progressValue(source) {
   if (!source) return 0;
   if (source.progress !== undefined && source.progress !== null) return Math.max(0, Math.min(100, Number(source.progress) || 0));
@@ -1485,7 +1521,7 @@ function renderRows() {
       (task) => `
       <div class="task-row ${String(task.id) === String(state.selectedId) ? "selected" : ""}" role="row" data-task-id="${task.id}">
         <div>
-          <input type="checkbox" data-task-select="${task.id}" ${state.selectedTaskIds.has(String(task.id)) ? "checked" : ""} ${canOperateAsset("task.deploy", task) && !isTaskActive(task) ? "" : "disabled"} aria-label="选择 ${task.name}" />
+          <input type="checkbox" data-task-select="${task.id}" ${state.selectedTaskIds.has(String(task.id)) ? "checked" : ""} ${canOperateAsset("task.deploy", task) && hasAvailableDeployConfig(task) ? "" : "disabled"} aria-label="选择 ${task.name}" />
         </div>
         <div class="task-main">
           <strong>${task.name}</strong>
@@ -1528,12 +1564,12 @@ function renderRows() {
             <i data-lucide="clock"></i>
             <span>定时</span>
           </button>
-          ${normalizeDeployRule(task.deployRule) === "windows" ? `<button class="ghost-button" type="button" data-action="windows-rollback" data-task-id="${task.id}" ${canOperateAsset("task.deploy", task) && !isTaskActive(task) ? "" : "disabled"}><i data-lucide="undo-2"></i><span>回滚</span></button>` : ""}
+          ${normalizeDeployRule(task.deployRule) === "windows" ? `<button class="ghost-button" type="button" data-action="windows-rollback" data-task-id="${task.id}" ${canOperateAsset("task.deploy", task) && hasAvailableDeployConfig(task) ? "" : "disabled"}><i data-lucide="undo-2"></i><span>回滚</span></button>` : ""}
           ${
             isTaskActive(task)
               ? `<button class="ghost-button danger-action" type="button" data-action="cancel" data-task-id="${task.id}" ${canOperateAsset("task.deploy", task) ? "" : "disabled"}>
                   <i data-lucide="circle-stop"></i>
-                  <span>取消</span>
+                  <span>${activeExecutionsForTask(task).length > 1 ? "管理发布" : "取消"}</span>
                 </button>`
               : `<button class="ghost-button danger-action" type="button" data-action="delete" data-task-id="${task.id}" ${canOperateAsset("task.create", task) ? "" : "disabled"}>
                   <i data-lucide="trash-2"></i>
@@ -1546,7 +1582,7 @@ function renderRows() {
     )
     .join("");
   const visibleIds = pageData.rows
-    .filter((task) => canOperateAsset("task.deploy", task) && !isTaskActive(task))
+    .filter((task) => canOperateAsset("task.deploy", task) && hasAvailableDeployConfig(task))
     .map((task) => String(task.id));
   const checkedVisibleIds = visibleIds.filter((id) => state.selectedTaskIds.has(id));
   selectAllTasks.checked = visibleIds.length > 0 && checkedVisibleIds.length === visibleIds.length;
@@ -1733,14 +1769,12 @@ function renderDetail() {
 
 function taskExecutionHistory(taskId) {
   return executions
-    .filter((execution) => String(execution.taskId) === String(taskId))
-    .sort((a, b) => String(b.id).localeCompare(String(a.id)));
+    .filter((execution) => String(execution.taskId) === String(taskId));
 }
 
 function taskActionButtons(task) {
-  const latestExecution = executions.find(
-    (execution) => String(execution.taskId) === String(task.id) && ["queued", "building", "deploying", "running"].includes(execution.status),
-  );
+  const activeExecutions = activeExecutionsForTask(task);
+  const latestExecution = activeExecutions[0];
   return `
     <div class="detail-action-bar">
       <button class="ghost-button" type="button" data-action="edit" data-task-id="${task.id}" ${hasPermission("task.create") ? "" : "disabled"}>
@@ -1756,11 +1790,12 @@ function taskActionButtons(task) {
         <span>定时</span>
       </button>
       ${
-        latestExecution
+        activeExecutions.length === 1
           ? `<button class="ghost-button danger-action" type="button" data-execution-cancel="${latestExecution.id}" ${hasPermission("task.deploy") ? "" : "disabled"}>
               <i data-lucide="circle-stop"></i>
               <span>取消发布</span>
             </button>`
+          : activeExecutions.length > 1 ? `<span class="muted">${activeExecutions.length} 个配置发布中，请在下方分别取消</span>`
           : `<button class="ghost-button danger-action" type="button" data-action="delete" data-task-id="${task.id}" ${hasPermission("task.create") ? "" : "disabled"}>
               <i data-lucide="trash-2"></i>
               <span>删除</span>
@@ -1885,6 +1920,7 @@ function renderTaskDetailPage() {
       </div>
 
       ${renderDetailMeta(task, latestExecution, activeSchedule)}
+      ${renderActiveConfigExecutions(task)}
 
       <div class="detail-workspace">
         ${renderDetailTabs()}
@@ -2101,7 +2137,7 @@ function renderTaskHistoryTab(history) {
                   (execution) => `
                     <button class="history-item ${String(state.detailExecutionId) === String(execution.id) ? "active" : ""}" type="button" data-history-execution="${execution.id}">
                       <div>
-                        <strong>${execution.branch || "未记录分支"}</strong>
+                        <strong>${escapeHtml(execution.deployConfigName || "默认配置")} · ${escapeHtml(execution.branch || "未记录分支")}</strong>
                         <span>${execution.id} · 发布人 ${execution.actor || "system"} · ${execution.stage || statusLabel(execution.status)} · ${clusterResultSummary(execution)}</span>
                       </div>
                       <span class="status-chip ${execution.status}">${statusLabel(execution.status)}</span>
@@ -2358,6 +2394,9 @@ function renderDeployConfigView() {
       const configRepo = config.repo || task.repo || "";
       const clustersText = isPages ? "Cloudflare Pages / 本机部署" : (config.clusters || []).map((cluster) => `${cluster.name}/${cluster.namespace || "default"}`).join("、") || "未绑定集群";
       const buildText = isPages ? config.pagesDeployCommand || task.pagesDeployCommand || defaultPagesDeployCommand(config.pagesPackageManager || task.pagesPackageManager || "npm") : normalizeAppType(task.appType) === "frontend" ? config.buildCommand || task.buildCommand || "未设置编译命令" : "";
+      const execution = Object.values(task.configExecutions || {}).find((item) => String(item.deployConfigId) === String(config.id)) ||
+        executions.find((item) => String(item.taskId) === String(task.id) && String(item.deployConfigId) === String(config.id));
+      const busy = isDeployConfigActive(task, config.id);
       return `
         <div class="cluster-row">
           <div class="cluster-row-main">
@@ -2371,9 +2410,12 @@ function renderDeployConfigView() {
             <span>集群：${escapeHtml(clustersText)}</span>
             ${configRepo ? `<span>Git：${escapeHtml(configRepo)}</span>` : ""}
             ${buildText ? `<span>${isPages ? "部署" : "编译"}：${escapeHtml(buildText)}</span>` : ""}
-            <span>最近发布：${escapeHtml(task.lastDeployConfigId === config.id ? task.lastRun || "未发布" : "未发布")}</span>
+            <span>最近发布：${escapeHtml(execution?.updatedAt || execution?.createdAt || "未发布")} · ${escapeHtml(execution ? statusLabel(execution.status) : "暂无执行")}</span>
+            ${busy && execution ? renderProgress(execution, true) : ""}
           </div>
           <div class="cluster-actions">
+            <button class="ghost-button" type="button" data-action="run" data-task-id="${task.id}" data-deploy-config-id="${escapeHtml(config.id)}" ${canOperateAsset("task.deploy", task) && !busy ? "" : "disabled"}>发布此配置</button>
+            ${normalizeDeployRule(task.deployRule) === "windows" ? `<button class="ghost-button" type="button" data-action="windows-rollback" data-task-id="${task.id}" data-deploy-config-id="${escapeHtml(config.id)}" ${canOperateAsset("task.deploy", task) && !busy ? "" : "disabled"}>回滚此配置</button>` : ""}
             <button class="ghost-button" type="button" data-action="edit" data-task-id="${task.id}" ${hasPermission("task.create") ? "" : "disabled"}>
               <i data-lucide="square-pen"></i>
               <span>编辑任务配置</span>
@@ -3799,8 +3841,8 @@ function selectPreferredBranch(task, branchSelectElement, branches = null) {
   }
 }
 
-function renderDeployConfigSelect(task, selectElement, searchElement = null) {
-  const configs = deployConfigsForTask(task);
+function renderDeployConfigSelect(task, selectElement, searchElement = null, availableOnly = false) {
+  const configs = availableOnly ? availableDeployConfigsForTask(task) : deployConfigsForTask(task);
   // Starting from the base configuration prevents a previous special release
   // from silently switching the task to a repository-specific configuration.
   if (searchElement) {
@@ -3827,6 +3869,7 @@ function canSubmitBranchDialog() {
   const task = tasks.find((item) => String(item.id) === String(branchForm.elements.taskId.value));
   return Boolean(branchDialog.open && task && !branchDialogLoading && !branchDialogSubmitting &&
     !branchDeployConfigSelect.disabled && branchDeployConfigSelect.value &&
+    !isDeployConfigActive(task, branchDeployConfigSelect.value) &&
     loadedBranchContext === branchCacheKey(task, branchDeployConfigSelect.value) &&
     !branchSelect.disabled && branchSelect.value &&
     (branchSelect._searchableOptions || []).some((item) => item.value === branchSelect.value));
@@ -3834,6 +3877,10 @@ function canSubmitBranchDialog() {
 
 function syncBranchDialogActions() {
   confirmBranchDeploy.disabled = !canSubmitBranchDialog();
+  const task = tasks.find((item) => String(item.id) === String(branchForm.elements.taskId.value));
+  if (branchDialog.open && task && branchDeployConfigSelect.value && isDeployConfigActive(task, branchDeployConfigSelect.value)) {
+    branchStatus.textContent = "此配置正在发布，请选择其他配置或等待当前执行结束";
+  }
   if (branchRefreshButton) branchRefreshButton.disabled = branchDialogLoading || branchDialogSubmitting ||
     branchDeployConfigSelect.disabled || !branchDeployConfigSelect.value;
 }
@@ -3886,7 +3933,7 @@ async function updateBranchDialogOptions(force = false) {
   }
 }
 
-async function openBranchDialog(taskId) {
+async function openBranchDialog(taskId, deployConfigId = "") {
   if (!requirePermission("task.deploy")) return;
   const task = tasks.find((item) => String(item.id) === String(taskId));
   if (!task) return;
@@ -3898,11 +3945,16 @@ async function openBranchDialog(taskId) {
   branchForm.releaseRequest = null;
   branchForm.elements.taskId.value = task.id;
   branchForm.elements.taskName.value = task.name;
-  const deployConfigs = renderDeployConfigSelect(task, branchDeployConfigSelect, branchDeployConfigSearch);
+  const deployConfigs = renderDeployConfigSelect(task, branchDeployConfigSelect, branchDeployConfigSearch, true);
   if (!deployConfigs.length) {
-    window.alert("当前用户组没有可发布的配置");
+    window.alert("没有空闲且有权限的发布配置，请等待当前配置发布结束");
     return;
   }
+  if (deployConfigId && !deployConfigs.some((config) => String(config.id) === String(deployConfigId))) {
+    window.alert("所选配置正在发布或无权操作，请刷新后重试");
+    return;
+  }
+  if (deployConfigs.some((config) => String(config.id) === String(deployConfigId))) branchDeployConfigSelect.value = String(deployConfigId);
   loadedBranchContext = "";
   branchDialog.showModal();
   await updateBranchDialogOptions();
@@ -4012,11 +4064,13 @@ async function runTask(taskId, branch) {
   }
 }
 
-async function rollbackWindowsTask(taskId) {
+async function rollbackWindowsTask(taskId, deployConfigId = "") {
   const task = tasks.find((item) => String(item.id) === String(taskId));
-  if (!task || !canOperateAsset("task.deploy", task) || isTaskActive(task)) return;
-  const configs = normalizeDeployConfigs(task.deployConfigs, task);
-  const config = configs.find((item) => item.id === task.lastDeployConfigId) || configs[0];
+  if (!task || !canOperateAsset("task.deploy", task)) return;
+  const configs = availableDeployConfigsForTask(task);
+  const config = deployConfigId ? configs.find((item) => String(item.id) === String(deployConfigId)) :
+    configs.find((item) => String(item.id) === String(task.lastDeployConfigId)) || configs[0];
+  if (!config) return window.alert("没有空闲且有权限的回滚配置");
   if (!window.confirm(`将「${task.name} / ${config.name}」回滚到目标服务器的上一成功版本？当前配置和持久化数据会保留。`)) return;
   try {
     await mutateJson(`/api/tasks/${taskId}/windows-rollback`, { deployConfigId: config.id });
@@ -4029,7 +4083,7 @@ async function rollbackWindowsTask(taskId) {
 function startBatchDeploy() {
   if (!requirePermission("task.deploy")) return;
   const taskIds = Array.from(state.selectedTaskIds).filter((id) =>
-    tasks.some((task) => String(task.id) === id && canOperateAsset("task.deploy", task) && !isTaskActive(task)),
+    tasks.some((task) => String(task.id) === id && canOperateAsset("task.deploy", task) && hasAvailableDeployConfig(task)),
   );
   if (taskIds.length === 0) {
     window.alert("请先选择要发布的任务");
@@ -4057,7 +4111,7 @@ async function openBatchDialog(taskIds) {
             <option>读取分支中...</option>
           </select>
           <select data-batch-config="${task.id}">
-            ${deployConfigsForTask(task).map((config) => `<option value="${escapeHtml(config.id)}">${escapeHtml(config.name || "默认配置")}</option>`).join("")}
+            ${availableDeployConfigsForTask(task).map((config) => `<option value="${escapeHtml(config.id)}">${escapeHtml(config.name || "默认配置")}</option>`).join("")}
           </select>
         </div>
       `,
@@ -5168,6 +5222,7 @@ function render() {
   syncSecretNamePlaceholder();
   lucide.createIcons();
   syncAutoRefresh();
+  if (branchDialog.open) syncBranchDialogActions();
 }
 
 function syncAutoRefresh() {
@@ -5631,7 +5686,7 @@ document.addEventListener(
 
 selectAllTasks.addEventListener("change", (event) => {
   const visibleIds = filteredTasks()
-    .filter((task) => canOperateAsset("task.deploy", task) && !isTaskActive(task))
+    .filter((task) => canOperateAsset("task.deploy", task) && hasAvailableDeployConfig(task))
     .map((task) => String(task.id));
   visibleIds.forEach((id) => {
     if (event.target.checked) {
@@ -5898,11 +5953,11 @@ document.addEventListener("click", (event) => {
       return;
     }
     if (action === "run") {
-      openBranchDialog(taskId);
+      openBranchDialog(taskId, actionButton.dataset.deployConfigId || "");
       return;
     }
     if (action === "windows-rollback") {
-      rollbackWindowsTask(taskId);
+      rollbackWindowsTask(taskId, actionButton.dataset.deployConfigId || "");
       return;
     }
     if (action === "schedule") {
@@ -5910,8 +5965,9 @@ document.addEventListener("click", (event) => {
       return;
     }
     if (action === "cancel") {
-      const latestExecution = executions.find((execution) => String(execution.taskId) === String(taskId) && ["queued", "building", "deploying", "running"].includes(execution.status));
-      if (latestExecution) cancelExecution(latestExecution.id);
+      const active = activeExecutionsForTask(task);
+      if (active.length === 1) cancelExecution(active[0].id);
+      else if (active.length > 1) openTaskDetail(taskId);
       return;
     }
     if (action === "delete") {

@@ -29,7 +29,7 @@ function setup() {
     { id: 'a', name: 'Alpha', repo: 'repo-a' }, { id: 'b', name: 'Beta', repo: 'repo-b' },
   ] };
   const context = {
-    tasks: [task], state: { batchQueue: [] }, BRANCH_CACHE_KEY: 'branches',
+    tasks: [task], executions: [], schedules: [], state: { batchQueue: [] }, BRANCH_CACHE_KEY: 'branches',
     branchForm: { elements: { taskId: { value: '' }, taskName: { value: '' } }, reset() {} },
     branchDialog: { open: false, showModal() { this.open = true; }, close() { this.open = false; } },
     branchSelect: element(true), branchSearch: element(),
@@ -44,6 +44,7 @@ function setup() {
     fetch: async () => { throw new Error('Unexpected network request'); },
   };
   vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function isTaskActive('), source.indexOf('function progressValue(')), context);
   vm.runInContext(source.slice(source.indexOf('function branchCacheRepository('), source.indexOf('function closeBatchDialog(')), context);
   vm.runInContext(source.slice(source.indexOf('branchSearch.addEventListener('), source.indexOf('scheduleDeployConfigSelect.addEventListener(')), context);
   return { context, task };
@@ -170,4 +171,58 @@ test('retrying a release in the same dialog reuses its request ID', async () => 
   assert.equal(bodies.length, 2);
   assert.equal(bodies[0].requestId, bodies[1].requestId);
   assert.equal(ids, 1);
+});
+
+test('a running configuration leaves the other configuration independently publishable', async () => {
+  const { context: c, task } = setup();
+  task.status = 'building';
+  task.configExecutions = { a: { id: 'run-a', taskId: 1, deployConfigId: 'a', status: 'building' } };
+  c.writeBranchCache(task, 'b', ['production']);
+  await c.openBranchDialog(1);
+  assert.equal(c.branchDeployConfigSelect.options.length, 1);
+  assert.equal(c.branchDeployConfigSelect.value, 'b');
+  assert.equal(c.confirmBranchDeploy.disabled, false);
+  assert.equal(c.hasAvailableDeployConfig(task), true);
+  c.executions.push({ id: 'run-b', taskId: 1, deployConfigId: 'b', status: 'queued' });
+  c.syncBranchDialogActions();
+  assert.equal(c.confirmBranchDeploy.disabled, true);
+  assert.match(c.branchStatus.textContent, /此配置正在发布/);
+  assert.equal(c.hasAvailableDeployConfig(task), false);
+});
+
+test('a requested busy config never silently switches to another config', async () => {
+  const { context: c, task } = setup();
+  const alerts = [];
+  c.window.alert = (message) => alerts.push(message);
+  task.configExecutions = { a: { id: 'run-a', deployConfigId: 'a', status: 'queued' } };
+  await c.openBranchDialog(1, 'a');
+  assert.equal(c.branchDialog.open, false);
+  assert.equal(alerts.length, 1);
+  c.writeBranchCache(task, 'b', ['production']);
+  await c.openBranchDialog(1, 'b');
+  assert.equal(c.branchDeployConfigSelect.value, 'b');
+  assert.equal(c.confirmBranchDeploy.disabled, false);
+});
+
+test('a completed visible execution overrides its old active summary', () => {
+  const { context: c, task } = setup();
+  task.configExecutions = { a: { id: 'run-a', taskId: 1, deployConfigId: 'a', status: 'building' } };
+  c.executions.push({ id: 'run-a', taskId: 1, deployConfigId: 'a', status: 'success' });
+  assert.equal(c.isDeployConfigActive(task, 'a'), false);
+  assert.equal(c.availableDeployConfigsForTask(task).length, 2);
+});
+
+test('parallel configuration progress exposes explicit independent cancel targets', () => {
+  const { context: c, task } = setup();
+  c.renderProgress = () => '';
+  c.statusLabel = (status) => status;
+  c.executions = [
+    { id: 'a-1', taskId: 1, deployConfigId: 'a', deployConfigName: 'Alpha', status: 'building' },
+    { id: 'b-1', taskId: 1, deployConfigId: 'b', deployConfigName: 'Beta', status: 'queued' },
+  ];
+  const html = c.renderActiveConfigExecutions(task);
+  assert.match(html, /Alpha/);
+  assert.match(html, /Beta/);
+  assert.match(html, /data-execution-cancel="a-1"/);
+  assert.match(html, /data-execution-cancel="b-1"/);
 });

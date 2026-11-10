@@ -86,9 +86,7 @@ def dispatch(s, state, execution, task, action, artifact=None):
         execution.setdefault("clusterResults", {})[name] = "pending"
     execution.update(status="deploying", stage="Agent 部署", progress=86, updatedAt=s.now_text())
     execution["logs"].append({"time": s.now_text(), "message": f"Windows {action}: {', '.join(names)}"})
-    original = s.find_by_id(state["tasks"], task["id"])
-    if original and s.execution_is_latest_for_task(state, execution):
-        original.update(status="deploying", stage="Agent 部署", progress=86)
+    s.refresh_task_execution_summary(state, task["id"])
 
 
 def package_and_dispatch(s, execution_id, task, app_dir):
@@ -131,8 +129,8 @@ def rollback(s, task_id, actor, config_id):
         config = s.deploy_config_by_id(task, config_id)
         if not s.user_can_access_deploy_config(state, s.find_user(state, actor), config):
             raise ValueError("当前用户组无权回滚该发布配置")
-        if s.active_execution_for_task(state, task["id"]):
-            raise ValueError("请等待当前发布结束后回滚")
+        if s.active_execution_for_task(state, task["id"], config["id"]):
+            raise ValueError("请等待该配置当前发布结束后回滚")
         execution = s.create_execution_record(state, task, actor, "rollback", "Windows 版本回滚", config)
         dispatch(s, state, execution, s.effective_task_for_deploy_config(task, config), "rollback")
         return execution
