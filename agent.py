@@ -1,12 +1,15 @@
 import json
 import os
+import queue
 import socket
 import subprocess
 import threading
 import time
+import uuid
 from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from agent_store import AgentStore
 
 
 PLATFORM_URL = os.environ.get("PLATFORM_URL", "http://deploy-platform-web").rstrip("/")
@@ -14,6 +17,9 @@ CLUSTER_NAME = os.environ.get("CLUSTER_NAME", "dev-01")
 AGENT_TOKEN = os.environ.get("AGENT_TOKEN", "dev-agent-token")
 AGENT_INSTANCE_ID = os.environ.get("AGENT_INSTANCE_ID") or socket.gethostname()
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
+AGENT_MAX_CONCURRENT_TASKS = max(1, int(os.environ.get("AGENT_MAX_CONCURRENT_TASKS", "5")))
+KUBECTL_TIMEOUT_SECONDS = max(180, int(os.environ.get("KUBECTL_TIMEOUT_SECONDS", "300")))
+AGENT_STATE_DIR = os.environ.get("AGENT_STATE_DIR", "/data/agent")
 CF_ACCESS_CLIENT_ID = os.environ.get("CF_ACCESS_CLIENT_ID", "").strip()
 CF_ACCESS_CLIENT_SECRET = os.environ.get("CF_ACCESS_CLIENT_SECRET", "").strip()
 AGENT_HEADERS = {
@@ -77,6 +83,7 @@ def run_kubectl(args, manifest=None):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         check=False,
+        timeout=KUBECTL_TIMEOUT_SECONDS,
     )
     return process.returncode, process.stdout
 
@@ -216,39 +223,86 @@ def heartbeat_loop(stop_event):
             break
 
 
+class AgentWorker:
+    """Each slot claims once, executes once, and retries reporting independently.
+
+    Retain the request ID across a lost claim response and retain the result
+    across reporting failures, so either failure cannot re-run kubectl.
+    """
+    def __init__(self, store, recovered=None):
+        self.store = store
+        self.recovered = recovered if recovered is not None else queue.Queue()
+        self.request_id = None
+        self.pending_result = None
+
+    def tick(self):
+        if self.request_id is None:
+            try:
+                record = self.recovered.get_nowait()
+                self.request_id = record["requestId"]
+                self.pending_result = record["result"]
+            except queue.Empty:
+                request_id = uuid.uuid4().hex
+                self.store.begin(request_id)
+                self.request_id = request_id
+        if self.pending_result is None:
+            result = api_get("/api/agent/tasks", {"cluster": CLUSTER_NAME, "instanceId": AGENT_INSTANCE_ID,
+                                                   "requestId": self.request_id})
+            task = result.get("task")
+            if not task:
+                return False
+            self.store.received(self.request_id, task)
+            # Only the command owner runs this claimed task. A cancelled task
+            # returned by an idempotent claim retry is acknowledged without apply.
+            if task.get("status", "running") == "running":
+                try:
+                    status, logs = execute_task(task)
+                except Exception as exc:
+                    status, logs = "failed", f"Agent execution failed: {exc}"
+            else:
+                status, logs = "failed", "Task ended before Agent began deployment"
+            self.pending_result = {"id": task["id"], "status": status, "logs": logs}
+        result = self.pending_result
+        self.store.result(self.request_id, result)
+        api_post(f"/api/agent/tasks/{result['id']}/result",
+                 {"status": result["status"], "logs": result["logs"],
+                  "instanceId": AGENT_INSTANCE_ID, "cluster": CLUSTER_NAME})
+        print(f"reported task result id={result['id']} status={result['status']}", flush=True)
+        self.store.complete(self.request_id)
+        self.pending_result = None
+        self.request_id = None
+        return True
+
+
+def deployment_worker_loop(stop_event, store, recovered):
+    worker = AgentWorker(store, recovered)
+    while not stop_event.is_set():
+        try:
+            if worker.tick():
+                continue
+        except Exception as exc:
+            print(f"agent worker error: {exc}", flush=True)
+        if stop_event.wait(POLL_SECONDS):
+            return
+
+
 if __name__ == "__main__":
-    print(f"Deploy Agent started cluster={CLUSTER_NAME} instance={AGENT_INSTANCE_ID} platform={PLATFORM_URL}", flush=True)
+    store = AgentStore(os.path.join(AGENT_STATE_DIR, "jobs.sqlite3"))
+    # Persist identity with the ledger, including when a Pod is replaced using
+    # the same persistent volume. Different Agent replicas need different volumes.
+    AGENT_INSTANCE_ID = store.identity(AGENT_INSTANCE_ID)
+    recovered = queue.Queue()
+    for record in store.recover():
+        recovered.put(record)
+    print(f"Deploy Agent started cluster={CLUSTER_NAME} instance={AGENT_INSTANCE_ID} platform={PLATFORM_URL} concurrency={AGENT_MAX_CONCURRENT_TASKS}", flush=True)
     heartbeat_stop = threading.Event()
     threading.Thread(target=heartbeat_loop, args=(heartbeat_stop,), daemon=True, name="agent-heartbeat").start()
-    pending_result = None
-    while True:
-        try:
-            if pending_result:
-                api_post(
-                    f"/api/agent/tasks/{pending_result['id']}/result",
-                    {
-                        "status": pending_result["status"],
-                        "logs": pending_result["logs"],
-                        "instanceId": AGENT_INSTANCE_ID,
-                        "cluster": CLUSTER_NAME,
-                    },
-                )
-                print(f"reported task result id={pending_result['id']} status={pending_result['status']}", flush=True)
-                pending_result = None
-                continue
-            result = api_get("/api/agent/tasks", {"cluster": CLUSTER_NAME, "instanceId": AGENT_INSTANCE_ID})
-            task = result.get("task")
-            if task:
-                status, logs = execute_task(task)
-                pending_result = {"id": task["id"], "status": status, "logs": logs}
-                api_post(
-                    f"/api/agent/tasks/{task['id']}/result",
-                    {"status": status, "logs": logs, "instanceId": AGENT_INSTANCE_ID, "cluster": CLUSTER_NAME},
-                )
-                print(f"reported task result id={task['id']} status={status}", flush=True)
-                pending_result = None
-            else:
-                time.sleep(POLL_SECONDS)
-        except Exception as exc:
-            print(f"agent error: {exc}", flush=True)
-            time.sleep(POLL_SECONDS)
+    workers = [threading.Thread(target=deployment_worker_loop, args=(heartbeat_stop, store, recovered),
+                                name=f"agent-deploy-{index + 1}") for index in range(AGENT_MAX_CONCURRENT_TASKS)]
+    for worker in workers:
+        worker.start()
+    try:
+        for worker in workers:
+            worker.join()
+    finally:
+        heartbeat_stop.set()

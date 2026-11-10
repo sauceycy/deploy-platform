@@ -147,3 +147,27 @@ test('failed first load and in-flight submission keep publication disabled', asy
   c.branchSelect.listeners.change();
   assert.equal(c.confirmBranchDeploy.disabled, true);
 });
+
+test('retrying a release in the same dialog reuses its request ID', async () => {
+  const { context: c } = setup();
+  const bodies = [];
+  let ids = 0;
+  c.window.crypto = { randomUUID: () => `request-${++ids}` };
+  c.window.alert = () => {};
+  c.window.setTimeout = () => {};
+  c.state.currentUser = { username: 'admin' };
+  c.state.selectedTaskIds = new Set(['1']);
+  c.branchDeployText = { textContent: '' };
+  c.nextPaint = async () => {};
+  c.render = () => {};
+  c.refreshRemoteState = () => {};
+  c.mutateJson = async (_url, body) => { bodies.push(body); if (bodies.length === 1) throw new Error('ACK lost'); };
+  c.writeBranchCache(c.tasks[0], 'a', ['main']);
+  await c.openBranchDialog(1);
+  vm.runInContext(source.slice(source.indexOf('async function runTask('), source.indexOf('async function rollbackWindowsTask(')), c);
+  await c.runTask(1, 'main');
+  await c.runTask(1, 'main');
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[0].requestId, bodies[1].requestId);
+  assert.equal(ids, 1);
+});

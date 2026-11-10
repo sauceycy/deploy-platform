@@ -118,7 +118,8 @@ def package_and_dispatch(s, execution_id, task, app_dir):
             raise RuntimeError("发布已取消")
         dispatch(s, state, execution, task, "deploy", {"sha256": digest, "size": destination.stat().st_size})
 
-    s.mutate_state(update)
+    _result, state = s.mutate_execution(execution_id, update, agent_tasks=True)
+    s.persist_queued_state(state, state["revision"])
 
 
 def rollback(s, task_id, actor, config_id):
@@ -136,7 +137,9 @@ def rollback(s, task_id, actor, config_id):
         dispatch(s, state, execution, s.effective_task_for_deploy_config(task, config), "rollback")
         return execution
 
-    return s.mutate_state(update)
+    execution, state = s.mutate_state(update, read_only_history=True)
+    s.persist_queued_state(state, state["revision"])
+    return execution, state
 
 
 class WindowsRoutes:
@@ -145,7 +148,7 @@ class WindowsRoutes:
 
     def windows_identity(self, parsed, cluster, instance):
         s = self.windows_server()
-        state = s.read_state()
+        state = s.state_snapshot()
         known = any(s.normalize_cluster_key(c.get("name")) == s.normalize_cluster_key(cluster) for c in state["clusters"])
         if not cluster or not instance or not known:
             self.send_json({"error": "Windows Agent 服务器或实例未登记"}, status=400)
@@ -172,12 +175,24 @@ class WindowsRoutes:
                 if task:
                     task.update(status="running", assignedAgent=instance, updatedAt=s.now_text())
                 return task
-            task, _ = s.mutate_state(claim, detect_changes=True)
+            with s.STATE_LOCK:
+                candidates = [t for t in s.state_snapshot()["agentTasks"] if t.get("kind") == "windows" and s.agent_task_matches_cluster(t, cluster)]
+                running = next((t for t in candidates if t["status"] == "running"), None)
+                pending = next((t for t in candidates if t["status"] == "pending"), None)
+                if running:
+                    task = running if running.get("assignedAgent") == instance else None
+                elif pending:
+                    task, _ = s.mutate_execution(pending["executionId"], claim, agent_tasks=True)
+                else:
+                    task = None
+            if task:
+                latest = s.state_snapshot()
+                s.persist_queued_state(latest, int(latest.get("revision") or 0))
             self.send_json({"task": task})
             return True
         match = re.fullmatch(r"/api/windows-agent/artifacts/([a-f0-9]{12})", parsed.path)
         if match:
-            task = s.find_by_id(s.read_state()["agentTasks"], match.group(1))
+            task = s.find_by_id(s.state_snapshot()["agentTasks"], match.group(1))
             if not task or task.get("kind") != "windows" or not s.agent_task_matches_cluster(task, cluster) or task.get("assignedAgent") != instance or task["status"] != "running":
                 self.send_json({"error": "产物无访问权限"}, status=403)
                 return True
@@ -220,39 +235,40 @@ class WindowsRoutes:
                 state["agentHeartbeats"] = [h for h in state["agentHeartbeats"] if s.normalize_cluster_key(h.get("cluster")) != s.normalize_cluster_key(cluster)]
                 capabilities = ['dotenv-v1'] if isinstance(body.get('capabilities'), list) and 'dotenv-v1' in body['capabilities'] else []
                 state["agentHeartbeats"].append({"cluster": cluster, "instanceId": instance, "version": "windows-0.1", "kind": "windows", "time": s.now_text(), "capabilities": capabilities})
-            s.mutate_state(heartbeat)
+            s.mutate_state(heartbeat, read_only_history=True)
             self.send_json({"ok": True})
             return True
         match = re.fullmatch(r"/api/windows-agent/tasks/([a-f0-9]{12})/(progress|result)", parsed.path)
         if match:
-            with s.STATE_LOCK:
-                task = s.find_by_id(s.read_state()["agentTasks"], match.group(1))
-                if not task:
-                    self.send_json({"error": "任务已删除"}, status=404)
-                    return True
-                if not task or task.get("kind") != "windows" or not s.agent_task_matches_cluster(task, cluster) or task.get("assignedAgent") != instance:
-                    self.send_json({"error": "任务无访问权限"}, status=403)
-                    return True
-                if match.group(2) == "result":
-                    if task["status"] == "running" and body.get("logs"):
-                        s.append_log(task["executionId"], str(body["logs"])[-32000:])
-                    item, _ = s.update_agent_result(task["id"], body.get("status"), str(body.get("logs") or "")[-32000:], instance)
-                    self.send_json({"ok": True, "status": item["status"]})
-                    return True
-                def progress(state):
-                    item = s.find_by_id(state["agentTasks"], task["id"])
-                    if item["status"] != "running":
-                        return item["status"]
-                    item["updatedAt"] = s.now_text()
-                    message = str(body.get("message") or "")[:2000]
-                    if message:
-                        item["logs"].append({"time": s.now_text(), "message": message})
-                        execution = s.find_by_id(state["executions"], item["executionId"])
-                        if execution and execution["status"] == "deploying":
-                            execution["logs"].append({"time": s.now_text(), "message": message})
+            task = s.find_by_id(s.state_snapshot()["agentTasks"], match.group(1))
+            if not task:
+                self.send_json({"error": "任务已删除"}, status=404)
+                return True
+            if not task or task.get("kind") != "windows" or not s.agent_task_matches_cluster(task, cluster) or task.get("assignedAgent") != instance:
+                self.send_json({"error": "任务无访问权限"}, status=403)
+                return True
+            if match.group(2) == "result":
+                if task["status"] == "running" and body.get("logs"):
+                    s.append_log(task["executionId"], str(body["logs"])[-32000:])
+                item, _ = s.update_agent_result(task["id"], body.get("status"), str(body.get("logs") or "")[-32000:], instance)
+                self.send_json({"ok": True, "status": item["status"]})
+                return True
+            def progress(state):
+                item = s.find_by_id(state["agentTasks"], task["id"])
+                if not item:
+                    return "cancelled"
+                if item["status"] != "running":
                     return item["status"]
-                status, _ = s.mutate_state(progress, detect_changes=True)
-                self.send_json({"ok": True, "status": status})
+                item["updatedAt"] = s.now_text()
+                message = str(body.get("message") or "")[:2000]
+                if message:
+                    item["logs"].append({"time": s.now_text(), "message": message})
+                    execution = s.find_by_id(state["executions"], item["executionId"])
+                    if execution and execution["status"] == "deploying":
+                        execution["logs"].append({"time": s.now_text(), "message": message})
+                return item["status"]
+            status, _ = s.mutate_execution(task["executionId"], progress, agent_tasks=True)
+            self.send_json({"ok": True, "status": status})
             return True
         self.send_json({"error": "not found"}, status=404)
         return True

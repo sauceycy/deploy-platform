@@ -17,6 +17,8 @@ class StatePerformanceTests(unittest.TestCase):
                         patch.object(s, 'PENDING_STATE_PAYLOAD', None),
                         patch.object(s, 'PENDING_STATE_REVISION', 0),
                         patch.object(s, 'LAST_PERSISTED_REVISION', -1),
+                        patch.object(s, 'LAST_PERSISTED_STATE', None),
+                        patch.object(s, 'LAST_PERSISTED_TARGET', None),
                         patch.object(s, 'STATE_WRITE_EVENT', threading.Event()),
                         patch.object(s, 'WS_CLIENTS', set())]
         for item in self.patches:
@@ -34,13 +36,15 @@ class StatePerformanceTests(unittest.TestCase):
 
         with patch.object(s.copy, 'deepcopy', side_effect=copy_without_history), \
                 patch.object(s, 'state_payload', side_effect=AssertionError('foreground serialization')):
+            s.set_execution_status('build', 'building', stage='执行编译', progress=35)
+            s.set_execution_commit_info('build', {'hash': 'abc'})
             s.append_log('build', 'new')
             self.assertFalse(s.is_execution_cancelled('build'))
             user, _ = s.session_user(token)
             self.assertEqual(user['username'], s.STATE_CACHE['users'][0]['username'])
-        with patch.object(s, 'persist_state_payload') as persist:
+        with patch.object(s, 'persist_state_snapshot') as persist:
             s.flush_pending_state_write()
-            self.assertEqual(json.loads(persist.call_args.args[0])['executions'][0]['logs'][-1]['message'], 'new')
+            self.assertEqual(persist.call_args.args[0]['executions'][0]['logs'][-1]['message'], 'new')
 
     def test_generations_and_read_copies_are_isolated(self):
         old = s.state_snapshot()
@@ -59,12 +63,12 @@ class StatePerformanceTests(unittest.TestCase):
         entered, release = threading.Event(), threading.Event()
         saved = []
         def persist(payload):
-            saved.append(json.loads(payload))
+            saved.append(payload)
             entered.set()
             release.wait(3)
         s.append_log('build', 'first')
         token = s.issue_session_token(s.STATE_CACHE['users'][0])
-        with patch.object(s, 'persist_state_payload', side_effect=persist):
+        with patch.object(s, 'persist_state_snapshot', side_effect=persist):
             thread = threading.Thread(target=s.flush_pending_state_write)
             thread.start()
             try:
@@ -84,18 +88,18 @@ class StatePerformanceTests(unittest.TestCase):
         def fail(_payload):
             s.append_log('build', 'second')
             raise OSError('offline')
-        with patch.object(s, 'persist_state_payload', side_effect=fail):
+        with patch.object(s, 'persist_state_snapshot', side_effect=fail):
             with self.assertRaises(OSError):
                 s.flush_pending_state_write()
-        with patch.object(s, 'persist_state_payload') as persist:
+        with patch.object(s, 'persist_state_snapshot') as persist:
             s.flush_pending_state_write()
-        self.assertEqual(len(json.loads(persist.call_args.args[0])['executions'][0]['logs']), 3)
+        self.assertEqual(len(persist.call_args.args[0]['executions'][0]['logs']), 3)
 
     def test_old_snapshot_cannot_overwrite_newer_save(self):
         s.append_log('build', 'first')
         old, revision = s.PENDING_STATE_PAYLOAD, s.PENDING_STATE_REVISION
         s.append_log('build', 'second')
-        with patch.object(s, 'persist_state_payload') as persist:
+        with patch.object(s, 'persist_state_snapshot') as persist:
             s.flush_pending_state_write()
             s.persist_queued_state(old, revision)
             self.assertEqual(persist.call_count, 1)
@@ -129,6 +133,48 @@ class StatePerformanceTests(unittest.TestCase):
                 handler.do_GET()
             self.assertTrue(handler.send_json.call_args.args[0]['unchanged'])
         self.assertEqual(len(s.STATE_CACHE['executions'][0]['logs']), 1)
+
+    def test_configuration_and_enqueue_do_not_copy_old_log_entries(self):
+        class HistoricalLog(dict):
+            def __deepcopy__(self, memo):
+                raise AssertionError('historical log copied')
+        original = s.STATE_CACHE['executions'][0]
+        original['logs'] = [HistoricalLog(message='old')]
+        s.mutate_state(lambda state: state['auditLogs'].append({'action': 'config'}), read_only_history=True)
+        self.assertIs(s.STATE_CACHE['executions'][0], original)
+        s.mutate_state(lambda state: state['executions'].insert(0, {'id': 'next', 'logs': []}), read_only_history=True)
+        self.assertIs(s.STATE_CACHE['executions'][1], original)
+
+    def test_failed_runtime_mutation_does_not_modify_published_generation(self):
+        old = s.state_snapshot()
+        def fail(state):
+            state['executions'][0]['logs'].append({'message': 'uncommitted'})
+            state['executions'][0]['status'] = 'failed'
+            raise ValueError('abort')
+        with self.assertRaises(ValueError):
+            s.mutate_execution('build', fail)
+        self.assertIs(s.STATE_CACHE, old)
+        self.assertEqual(len(old['executions'][0]['logs']), 1)
+
+    def test_state_patch_contains_only_changed_sections_and_redacts(self):
+        with patch.object(s, 'WS_CLIENTS', {Mock(delta=True)}), patch.object(s, 'broadcast_ws') as broadcast:
+            old = s.state_snapshot()
+            s.set_execution_status('build', 'building', stage='compile')
+            message = broadcast.call_args.args[0]
+            self.assertEqual(message['type'], 'state_patch')
+            self.assertEqual(message['baseRevision'], old.get('revision', 0))
+            self.assertEqual(set(message['patch']), {'executions', 'revision'})
+            s.mutate_state(lambda state: state['secrets'].append({'id': 'x', 'secret': 'private'}), read_only_history=True)
+            message = broadcast.call_args.args[0]
+            self.assertEqual(message['patch']['secrets'][-1]['secret'], '')
+            self.assertTrue(message['patch']['secrets'][-1]['hasSecret'])
+
+    def test_idle_scheduler_does_not_copy_or_write_state(self):
+        with patch.object(s, 'read_state', side_effect=AssertionError('full read')), \
+                patch.object(s, 'mutate_state', side_effect=AssertionError('idle write')):
+            s.trigger_due_schedules()
+            s.recover_waiting_deployments()
+            s.recover_stuck_agent_deployments()
 
     def test_saved_logs_and_configuration_survive_reload(self):
         with tempfile.TemporaryDirectory() as folder, \

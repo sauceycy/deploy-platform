@@ -103,7 +103,7 @@ const APP_USER_KEY = "deploy-platform-user";
 const APP_VIEW_KEY = "deploy-platform-view";
 const BRANCH_CACHE_KEY = "deploy-platform-branch-cache";
 const STATE_SAVE_TIMEOUT_MS = 20000;
-const MAX_BATCH_DEPLOY_TASKS = 5;
+let MAX_BATCH_DEPLOY_TASKS = 50;
 const STATE_REFRESH_INTERVAL_MS = 10000;
 const LIST_PAGE_SIZE = 10;
 const AUDIT_PAGE_SIZE = 12;
@@ -614,6 +614,9 @@ function reconcileTaskRuntime() {
 function hydrateState(nextState, options = {}) {
   if (!nextState || typeof nextState !== "object" || nextState.unchanged) return false;
   const incomingRevision = Number(nextState.revision || 0);
+  if (Number.isInteger(nextState.executionLimits?.batchSize) && nextState.executionLimits.batchSize >= 5) {
+    MAX_BATCH_DEPLOY_TASKS = nextState.executionLimits.batchSize;
+  }
   if (!options.force && incomingRevision < currentStateRevision) return false;
   const compact = Boolean(nextState.compact);
   const previousSelectedId = state.selectedId;
@@ -3892,6 +3895,7 @@ async function openBranchDialog(taskId) {
     return;
   }
 
+  branchForm.releaseRequest = null;
   branchForm.elements.taskId.value = task.id;
   branchForm.elements.taskName.value = task.name;
   const deployConfigs = renderDeployConfigSelect(task, branchDeployConfigSelect, branchDeployConfigSearch);
@@ -3981,7 +3985,12 @@ async function runTask(taskId, branch) {
   if (branchDeployText) branchDeployText.textContent = "发布中...";
   try {
     await nextPaint();
-    await mutateJson(`/api/tasks/${taskId}/run`, { actor: state.currentUser?.username || "system", branch, deployConfigId: branchDeployConfigSelect.value });
+    const signature = JSON.stringify([taskId, branch, branchDeployConfigSelect.value]);
+    if (branchForm.releaseRequest?.signature !== signature) {
+      branchForm.releaseRequest = { signature, id: window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}` };
+    }
+    await mutateJson(`/api/tasks/${taskId}/run`, { actor: state.currentUser?.username || "system", branch,
+      deployConfigId: branchDeployConfigSelect.value, requestId: branchForm.releaseRequest.id });
     if (branchStatus) branchStatus.textContent = "发布请求已提交，正在进入执行队列...";
     if (branchDeployText) branchDeployText.textContent = "已提交";
     await nextPaint();
@@ -4034,6 +4043,7 @@ function startBatchDeploy() {
 }
 
 async function openBatchDialog(taskIds) {
+  batchTaskList.releaseRequest = null;
   const selectedTasks = taskIds.map((id) => tasks.find((task) => String(task.id) === String(id))).filter(Boolean);
   batchTaskList.innerHTML = selectedTasks
     .map(
@@ -4087,6 +4097,11 @@ async function submitBatchDeploy(event) {
     return;
   }
   const submitter = event.submitter;
+  const signature = JSON.stringify(items);
+  if (batchTaskList.releaseRequest?.signature !== signature) {
+    batchTaskList.releaseRequest = { signature, ids: items.map(() => window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`) };
+  }
+  items.forEach((item, index) => { item.requestId = batchTaskList.releaseRequest.ids[index]; });
   if (submitter) submitter.disabled = true;
   try {
     await mutateJson("/api/tasks/batch-run", { actor: state.currentUser?.username || "system", items });
@@ -5176,7 +5191,7 @@ function syncAutoRefresh() {
 
 function wsUrl() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/api/ws`;
+  return `${protocol}//${window.location.host}/api/ws?protocol=2`;
 }
 
 function closeStateSocket() {
@@ -5208,6 +5223,26 @@ function scheduleStateSocketReconnect() {
 
 function applySocketMessage(message) {
   if (!message || typeof message !== "object") return;
+  if ((message.type === "state_patch" || message.type === "execution_log") && message.revision !== undefined) {
+    const revision = Number(message.revision);
+    if (revision <= currentStateRevision) return;
+    if (Number(message.baseRevision) !== currentStateRevision) {
+      // A reconnect establishes a fresh snapshot and an ordered subscription.
+      // Do not apply a delta to the wrong base, even during an HTTP save race.
+      closeStateSocket();
+      connectStateSocket();
+      return;
+    }
+  }
+  if (message.type === "state_patch" && message.patch) {
+    rememberLogFollowState();
+    const changed = hydrateState({ ...exportState(), ...message.patch, revision: message.revision, compact: true });
+    if (changed) {
+      render();
+      restoreLogScrollAfterRender();
+    }
+    return;
+  }
   if (message.type === "state" && message.state) {
     rememberLogFollowState();
     const changed = hydrateState(message.state);
@@ -5218,8 +5253,10 @@ function applySocketMessage(message) {
     return;
   }
   if (message.type === "execution_log") {
+    if (message.revision !== undefined) currentStateRevision = Number(message.revision);
     const execution = executions.find((item) => String(item.id) === String(message.executionId));
     if (!execution || !message.log) return;
+    if (Number(message.logCount) <= Number(execution.logCount || 0)) return;
     execution.logs = Array.isArray(execution.logs) ? execution.logs : [];
     execution.logs.push(message.log);
     execution.logCount = Number(message.logCount || execution.logs.length);

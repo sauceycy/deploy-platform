@@ -37,6 +37,7 @@ class WindowsDeploymentTests(unittest.TestCase):
                         patch.object(s, "enqueue_state_write", side_effect=lambda snapshot, revision: setattr(self, "state", snapshot)),
                         patch.object(s, "read_state", side_effect=lambda: copy.deepcopy(self.state)),
                         patch.object(s, "mutate_state", side_effect=self.mutate),
+                        patch.object(s, "persist_queued_state"),
                         patch.object(s, "DATA_DIR", self.root), patch.object(s, "send_notification")]
         for item in self.patches:
             item.start()

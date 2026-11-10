@@ -40,13 +40,9 @@ class NotificationConfigurationTests(unittest.TestCase):
             "status": "pending",
         }]
 
-        def fake_mutate(callback, **_kwargs):
-            callback_state = copy.deepcopy(state)
-            result = callback(callback_state)
-            return result, callback_state
-
         sent = []
-        with patch.object(s, "mutate_state", side_effect=fake_mutate), \
+        with patch.object(s, "STATE_CACHE", state), \
+                patch.object(s, "persist_queued_state"), patch.object(s, "enqueue_state_write"), patch.object(s, "WS_CLIENTS", set()), \
                 patch.object(s, "send_notification", side_effect=lambda *args: sent.append(args)), \
                 patch.object(s, "append_publish_commit_log"):
             s.update_agent_result("agent-task-1", "success", "部署完成")

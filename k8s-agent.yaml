@@ -44,6 +44,8 @@ metadata:
   namespace: deploy-system
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: deploy-agent
@@ -57,6 +59,16 @@ spec:
         - name: agent
           image: your-registry.example.com/deploy-platform:latest
           imagePullPolicy: Always
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "1Gi"
+          volumeMounts:
+            - name: agent-state
+              mountPath: /data/agent
           env:
             - name: MODE
               value: agent
@@ -67,8 +79,28 @@ spec:
             # 每个集群可使用自己的 Agent Token，需与平台里该集群配置保持一致
             - name: AGENT_TOKEN
               value: dev-agent-token
+            - name: AGENT_MAX_CONCURRENT_TASKS
+              value: "5"
+            - name: AGENT_STATE_DIR
+              value: /data/agent
             # 如果平台域名开启了 Cloudflare Access，可填写服务令牌；未开启则留空或删除
             - name: CF_ACCESS_CLIENT_ID
               value: ""
             - name: CF_ACCESS_CLIENT_SECRET
               value: ""
+      volumes:
+        - name: agent-state
+          persistentVolumeClaim:
+            claimName: deploy-agent-state
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: deploy-agent-state
+  namespace: deploy-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

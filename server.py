@@ -16,9 +16,9 @@ import threading
 import time
 import socket
 import uuid
+import state_store
 from contextlib import closing
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,6 +26,8 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 from xml.sax.saxutils import escape as xml_escape
 from windows_deploy import WindowsRoutes, package_and_dispatch, parse_windows_env
+from build_cache import cache_lock, checkout_source
+from execution_pool import ExecutionPool, ExecutionQueueFull, stage_slot
 
 try:
     import psycopg
@@ -48,8 +50,6 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 RESET_ADMIN_PASSWORD = os.environ.get("RESET_ADMIN_PASSWORD", "false").lower() == "true"
 AGENT_SHARED_TOKEN = os.environ.get("AGENT_SHARED_TOKEN", "dev-agent-token")
 SESSION_SECRET = os.environ.get("SESSION_SECRET") or AGENT_SHARED_TOKEN or "deploy-platform-session"
-AGENT_TASK_RETRY_SECONDS = int(os.environ.get("AGENT_TASK_RETRY_SECONDS", "300"))
-AGENT_TASK_TAKEOVER_SECONDS = int(os.environ.get("AGENT_TASK_TAKEOVER_SECONDS", "45"))
 AGENT_TASK_PENDING_TIMEOUT_SECONDS = int(os.environ.get("AGENT_TASK_PENDING_TIMEOUT_SECONDS", "180"))
 AGENT_HEARTBEAT_STALE_SECONDS = int(os.environ.get("AGENT_HEARTBEAT_STALE_SECONDS", "90"))
 WAITING_DEPLOY_RECOVERY_SECONDS = int(os.environ.get("WAITING_DEPLOY_RECOVERY_SECONDS", "45"))
@@ -59,9 +59,19 @@ CLEAN_WORKSPACE_AFTER_BUILD = os.environ.get("CLEAN_WORKSPACE_AFTER_BUILD", "tru
 CLEAN_LOCAL_IMAGE_AFTER_BUILD = os.environ.get("CLEAN_LOCAL_IMAGE_AFTER_BUILD", "true").lower() != "false"
 DOCKER_PRUNE_AFTER_BUILD = os.environ.get("DOCKER_PRUNE_AFTER_BUILD", "false").lower() == "true"
 CLIENT_LOG_TAIL = int(os.environ.get("CLIENT_LOG_TAIL", "30"))
-MAX_CONCURRENT_EXECUTIONS = max(1, int(os.environ.get("MAX_CONCURRENT_EXECUTIONS", "1")))
+MAX_CONCURRENT_EXECUTIONS = max(1, int(os.environ.get("MAX_CONCURRENT_EXECUTIONS", "5")))
+MAX_QUEUED_EXECUTIONS = max(1, int(os.environ.get("MAX_QUEUED_EXECUTIONS", "100")))
+MAX_BATCH_DEPLOY_TASKS = max(5, int(os.environ.get("MAX_BATCH_DEPLOY_TASKS", "50")))
+MAX_DOCKER_BUILDS = max(1, int(os.environ.get("MAX_DOCKER_BUILDS", "2")))
+MAX_IMAGE_PUSHES = max(1, int(os.environ.get("MAX_IMAGE_PUSHES", "2")))
+MAX_AGENT_DEPLOYS_PER_CLUSTER = max(1, int(os.environ.get("MAX_AGENT_DEPLOYS_PER_CLUSTER", "5")))
+SDK_BUILD_CPUS = os.environ.get("SDK_BUILD_CPUS", "2").strip()
+SDK_BUILD_MEMORY = os.environ.get("SDK_BUILD_MEMORY", "4g").strip()
 MAVEN_DOWNLOAD_THREADS = max(1, int(os.environ.get("MAVEN_DOWNLOAD_THREADS", "8")))
-BUILD_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_EXECUTIONS, thread_name_prefix="deploy-build")
+GIT_SOURCE_CACHE = os.environ.get("GIT_SOURCE_CACHE", "true").lower() != "false"
+BUILD_EXECUTOR = ExecutionPool(MAX_CONCURRENT_EXECUTIONS, MAX_QUEUED_EXECUTIONS)
+DOCKER_BUILD_SLOTS = threading.BoundedSemaphore(MAX_DOCKER_BUILDS)
+IMAGE_PUSH_SLOTS = threading.BoundedSemaphore(MAX_IMAGE_PUSHES)
 
 SDK_OPTIONS = {
     "java": ["jdk8", "oraclejdk8u381", "jdk11", "jdk17", "jdk21", "jdk25"],
@@ -187,6 +197,8 @@ PENDING_STATE_REVISION = 0
 STATE_WRITE_ERROR = ""
 STATE_PERSIST_LOCK = threading.RLock()
 LAST_PERSISTED_REVISION = -1
+LAST_PERSISTED_STATE = None
+LAST_PERSISTED_TARGET = None
 REQUEST_CONTEXT = threading.local()
 
 
@@ -523,9 +535,15 @@ def connect_postgres():
 def read_raw_state():
     if use_postgres():
         with connect_postgres() as conn:
+            incremental = state_store.load(conn)
+            if incremental is not None:
+                return merge_defaults(incremental)
             row = conn.execute("SELECT value FROM app_state WHERE key = 'state'").fetchone()
     else:
         with closing(connect_sqlite()) as conn, conn:
+            incremental = state_store.load(conn)
+            if incremental is not None:
+                return merge_defaults(incremental)
             row = conn.execute("SELECT value FROM app_state WHERE key = 'state'").fetchone()
     if not row:
         return None
@@ -552,6 +570,22 @@ def state_payload(state):
     return json.dumps(state, ensure_ascii=False, separators=(",", ":"))
 
 
+def persist_state_snapshot(snapshot):
+    global LAST_PERSISTED_STATE, LAST_PERSISTED_TARGET
+    postgres = use_postgres()
+    target = (postgres, DATABASE_URL if postgres else str(DB_PATH))
+    previous = LAST_PERSISTED_STATE if target == LAST_PERSISTED_TARGET else None
+    if postgres:
+        with connect_postgres() as conn:
+            stats = state_store.save(conn, snapshot, previous, postgres=True)
+    else:
+        with closing(connect_sqlite()) as conn, conn:
+            stats = state_store.save(conn, snapshot, previous)
+    # Context managers above have committed successfully. Never cache a failed write.
+    LAST_PERSISTED_STATE, LAST_PERSISTED_TARGET = snapshot, target
+    return stats
+
+
 def enqueue_state_write(payload, revision):
     global PENDING_STATE_PAYLOAD, PENDING_STATE_REVISION
     with STATE_WRITE_LOCK:
@@ -569,12 +603,14 @@ def persist_queued_state(snapshot, revision):
         if revision <= LAST_PERSISTED_REVISION:
             return
         started = time.monotonic()
-        payload = state_payload(snapshot) if isinstance(snapshot, dict) else snapshot
-        persist_state_payload(payload)
+        if isinstance(snapshot, dict):
+            stats = persist_state_snapshot(snapshot)
+        else:
+            stats = persist_state_snapshot(json.loads(snapshot))
         LAST_PERSISTED_REVISION = revision
         elapsed = time.monotonic() - started
         if elapsed >= 2:
-            print(f"Slow state persistence: revision={revision} duration={elapsed:.3f}s bytes={len(payload.encode('utf-8'))}", flush=True)
+            print(f"Slow state persistence: revision={revision} duration={elapsed:.3f}s changed_bytes={stats['bytes']} changed_rows={stats['rows']}", flush=True)
 
 
 def state_writer_loop():
@@ -688,7 +724,7 @@ def preserve_runtime_fields(next_state, current_state=None):
     # Executions, Agent work and schedules are server-owned runtime data. Browser
     # configuration saves only carry compact snapshots and must never replace them.
     for key in ("executions", "agentTasks", "agentHeartbeats", "schedules"):
-        next_state[key] = copy.deepcopy(current_state.get(key, []))
+        next_state[key] = current_state.get(key, [])
     return next_state
 
 
@@ -723,7 +759,7 @@ def execution_summary(execution, compact=False):
     if logs:
         item["latestLog"] = compact_log_entry(logs[-1]) if compact else copy.deepcopy(logs[-1])
     if compact:
-        item["errorSummary"] = compact_error_logs(logs)
+        item["errorSummary"] = compact_error_logs(logs[-200:])
         item["logs"] = []
     else:
         item["logs"] = copy.deepcopy(logs[-CLIENT_LOG_TAIL:])
@@ -779,6 +815,9 @@ def client_state(state, compact=False):
     else:
         data["auditLogs"] = copy.deepcopy(state.get("auditLogs", []))
     data["compact"] = bool(compact)
+    data["executionLimits"] = {"batchSize": MAX_BATCH_DEPLOY_TASKS, "builds": MAX_CONCURRENT_EXECUTIONS,
+                               "queued": MAX_QUEUED_EXECUTIONS, "dockerBuilds": MAX_DOCKER_BUILDS,
+                               "imagePushes": MAX_IMAGE_PUSHES, "clusterDeploys": MAX_AGENT_DEPLOYS_PER_CLUSTER}
     return data
 
 
@@ -805,9 +844,10 @@ def read_state(keys=None):
     return copy.deepcopy(snapshot)
 
 
-def write_state(state, current_state=None, broadcast=True):
+def write_state(state, current_state=None, broadcast=True, history_memo=None):
     global STATE_CACHE
-    current_state = current_state if current_state is not None else read_state()
+    previous = state_snapshot()
+    current_state = current_state if current_state is not None else previous
     state = merge_defaults(state)
     state = preserve_existing_user_passwords(state, current_state)
     state = preserve_sensitive_values(state, current_state)
@@ -815,12 +855,17 @@ def write_state(state, current_state=None, broadcast=True):
     current_revision = int((current_state or {}).get("revision") or 0)
     incoming_revision = int(state.get("revision") or 0)
     state["revision"] = max(current_revision, incoming_revision) + 1
-    snapshot = copy.deepcopy(state)
+    # Browser configuration writes retain server-owned history by identity.
+    memo = dict(history_memo or {})
+    for key in ("executions", "agentTasks"):
+        if state.get(key) is previous.get(key):
+            memo.update({id(item): item for item in previous.get(key, [])})
+    snapshot = copy.deepcopy(state, memo)
     with STATE_LOCK:
         STATE_CACHE = snapshot
         enqueue_state_write(snapshot, state.get("revision"))
     if broadcast:
-        broadcast_state(state)
+        broadcast_state(snapshot, previous=previous)
 
 
 def websocket_accept_key(key):
@@ -866,8 +911,9 @@ def read_exact(conn, length):
 class WebSocketClient:
     """Keep slow browser sockets off request threads and the shared state lock."""
 
-    def __init__(self, connection):
+    def __init__(self, connection, delta=False):
         self.connection = connection
+        self.delta = delta
         self.frames = queue.Queue(maxsize=64)
         self.stopped = threading.Event()
 
@@ -905,9 +951,10 @@ class WebSocketClient:
             self.close()
 
 
-def broadcast_ws(payload):
-    with WS_LOCK:
-        clients = list(WS_CLIENTS)
+def broadcast_ws(payload, clients=None):
+    if clients is None:
+        with WS_LOCK:
+            clients = list(WS_CLIENTS)
     if not clients:
         return
     frame = websocket_frame(payload)
@@ -921,24 +968,74 @@ def broadcast_ws(payload):
                 WS_CLIENTS.discard(client)
 
 
-def broadcast_state(state):
-    if not WS_CLIENTS:
+def broadcast_state(state, previous=None):
+    with WS_LOCK:
+        clients = list(WS_CLIENTS)
+    if not clients:
         return
-    broadcast_ws({"type": "state", "state": client_state(state, compact=True)})
+    legacy = [client for client in clients if previous is None or not getattr(client, "delta", False)]
+    if legacy:
+        broadcast_ws({"type": "state", "state": client_state(state, compact=True)}, clients=legacy)
+    incremental = [client for client in clients if previous is not None and getattr(client, "delta", False)]
+    if not incremental:
+        return
+    changed = {key for key in state if state[key] is not previous.get(key) and state[key] != previous.get(key)}
+    # Use the existing redaction/summary path; select only changed sections.
+    partial = client_state({key: state[key] for key in changed}, compact=True)
+    patch = {key: partial[key] for key in changed if key in partial}
+    broadcast_ws({"type": "state_patch", "baseRevision": previous.get("revision") or 0,
+                  "revision": state.get("revision") or 0, "patch": patch}, clients=incremental)
 
 
-def mutate_state(fn, detect_changes=False, broadcast=True):
+def mutate_execution(execution_id, fn, agent_tasks=False, audit=False):
+    """Internal runtime mutation: callbacks only edit this execution/its task.
+
+    Log entries are append-only here. Unrelated records and configuration remain
+    shared read-only; public read_state() still returns a fully detached copy.
+    """
+    global STATE_CACHE
+    with STATE_LOCK:
+        previous = state_snapshot()
+        original = find_by_id(previous["executions"], execution_id)
+        if original is None:
+            return None, previous
+        execution = {key: copy.deepcopy(value) for key, value in original.items() if key != "logs"}
+        execution["logs"] = list(original.get("logs") or [])
+        state = {**previous,
+                 "executions": [execution if item is original else item for item in previous["executions"]],
+                 "tasks": [copy.deepcopy(item) if str(item["id"]) == str(original["taskId"]) else item for item in previous["tasks"]]}
+        if audit:
+            state["auditLogs"] = list(previous.get("auditLogs", []))
+        if agent_tasks:
+            state["agentTasks"] = [copy.deepcopy(item) if str(item.get("executionId")) == str(execution_id) else item for item in previous["agentTasks"]]
+        result = fn(state)
+        if state == previous:
+            return result, previous
+        state["revision"] = int(previous.get("revision") or 0) + 1
+        STATE_CACHE = state
+        enqueue_state_write(state, state["revision"])
+        broadcast_state(state, previous)
+        return result, state
+
+
+def mutate_state(fn, detect_changes=False, broadcast=True, read_only_history=False):
     started = time.monotonic()
     acquired = started
     try:
         with STATE_LOCK:
             acquired = time.monotonic()
             previous = state_snapshot()
-            state = copy.deepcopy(previous)
+            # For enqueue/configuration callbacks, old runtime records are read
+            # only. Lists remain private so adding/removing records is safe.
+            # Callbacks editing existing records must use the default path or
+            # mutate_execution; never opt them into this sharing contract.
+            history_memo = {id(item): item for key in ("executions", "agentTasks")
+                            for item in previous.get(key, [])} if read_only_history else {}
+            state = copy.deepcopy(previous, dict(history_memo))
             result = fn(state)
             if detect_changes and state == previous:
                 return result, state
-            write_state(state, current_state=state, broadcast=broadcast)
+            write_state(state, current_state=state, broadcast=broadcast, history_memo=history_memo)
             return result, state
     finally:
         elapsed = time.monotonic() - started
@@ -964,7 +1061,8 @@ def append_log(execution_id, message):
         # Keep concurrent log frames in the same order as persisted logCount.
         broadcast_ws({"type": "execution_log", "executionId": execution.get("id"),
                       "taskId": execution.get("taskId"), "log": log_entry,
-                      "logCount": len(updated["logs"])})
+                      "logCount": len(updated["logs"]), "baseRevision": current.get("revision") or 0,
+                      "revision": snapshot["revision"]})
 
 
 def set_execution_commit_info(execution_id, commit_info):
@@ -979,7 +1077,7 @@ def set_execution_commit_info(execution_id, commit_info):
             execution["commitTime"] = commit_info.get("time") or ""
             execution["commitMessage"] = commit_info.get("message") or ""
 
-    mutate_state(update, detect_changes=True)
+    mutate_execution(execution_id, update)
 
 
 def set_execution_status(execution_id, status, message=None, image=None, stage=None, progress=None):
@@ -1011,7 +1109,7 @@ def set_execution_status(execution_id, status, message=None, image=None, stage=N
             if progress is not None:
                 task["progress"] = max(0, min(100, int(progress)))
 
-    mutate_state(update)
+    mutate_execution(execution_id, update)
 
 
 def find_by_id(items, item_id):
@@ -1566,6 +1664,9 @@ def node_dependency_cache_name(task, src_dir):
     fingerprint.update(str(task.get("repo") or "").encode("utf-8"))
     fingerprint.update(relative_workdir.encode("utf-8"))
     fingerprint.update(str(task.get("sdk") or "").encode("utf-8"))
+    fingerprint.update(builder_image(task).encode("utf-8"))
+    fingerprint.update(str(task.get("organizationIds") or task.get("organizationId") or "default").encode("utf-8"))
+    fingerprint.update(build_cache_namespace(task).encode("utf-8"))
     if package_json.exists():
         fingerprint.update(package_json.read_bytes())
     for filename in NODE_LOCK_FILES:
@@ -1579,6 +1680,13 @@ def node_dependency_cache_name(task, src_dir):
     return f"frontend-node-modules/{repo_hint}-{workdir_hint}-{fingerprint.hexdigest()[:20]}"
 
 
+def build_cache_namespace(task):
+    identity = [task.get("id"), task.get("repo"), task.get("deployConfigId"),
+                task.get("organizationIds") or task.get("organizationId"),
+                task.get("sdk"), builder_image(task)]
+    return hashlib.sha256(canonical_json(identity).encode()).hexdigest()[:24]
+
+
 def build_cache_config(task, src_dir=None):
     language = str(task.get("language") or "").lower()
     sdk = str(task.get("sdk") or "").lower()
@@ -1587,8 +1695,10 @@ def build_cache_config(task, src_dir=None):
     mounts = []
     env = {}
     labels = []
+    namespace = build_cache_namespace(task)
 
     def add_cache(name, container_path, label):
+        name = f"tasks/{namespace}/{name}"
         (cache_dir / name).mkdir(parents=True, exist_ok=True)
         mounts.extend(["-v", f"{host_cache_dir / name}:{container_path}"])
         labels.append(label)
@@ -1756,6 +1866,8 @@ def run_sdk_command(execution_id, task, command, src_dir, build_env):
         "--rm",
         "--name",
         container_name,
+        *(["--cpus", SDK_BUILD_CPUS] if SDK_BUILD_CPUS else []),
+        *(["--memory", SDK_BUILD_MEMORY] if SDK_BUILD_MEMORY else []),
         "-v",
         f"{docker_src_dir}:/workspace",
         *cache_mounts,
@@ -1771,7 +1883,14 @@ def run_sdk_command(execution_id, task, command, src_dir, build_env):
     def remove_build_container():
         run_command(["docker", "rm", "-f", container_name])
 
-    return run_command_stream(docker_cmd, execution_id, env=docker_env, on_cancel=remove_build_container)
+    # Mutable Maven repositories and node_modules are scoped to a task/config.
+    # A lock also protects the brief overlap between a cancelled build stopping
+    # its SDK container and a replacement execution starting.
+    started = time.monotonic()
+    lock_path = DATA_DIR / "cache" / "locks" / (build_cache_namespace(task) + ".lock")
+    with cache_lock(lock_path, lambda: ensure_execution_active(execution_id)):
+        append_log(execution_id, f"等待依赖缓存锁耗时: {format_duration(time.monotonic() - started)}")
+        return run_command_stream(docker_cmd, execution_id, env=docker_env, on_cancel=remove_build_container)
 
 
 def registry_config(state):
@@ -1914,7 +2033,7 @@ def execution_commit_text(execution):
 
 
 def append_publish_commit_log(execution_id):
-    execution = find_by_id(read_state().get("executions", []), execution_id)
+    execution = find_by_id(state_snapshot().get("executions", []), execution_id)
     commit_text = execution_commit_text(execution)
     if commit_text:
         append_log(execution_id, f"发布成功分支 commit: {commit_text}")
@@ -2034,11 +2153,7 @@ def cleanup_build_artifacts(execution_id, work_dir, image=None, image_built=Fals
             append_log(execution_id, f"本地镜像清理失败: {output.strip() or image}")
 
     if DOCKER_PRUNE_AFTER_BUILD:
-        code, output = run_command(["docker", "image", "prune", "-f"])
-        if code == 0:
-            cleaned.append("Docker dangling 镜像")
-        else:
-            append_log(execution_id, f"Docker dangling 镜像清理失败: {output.strip()}")
+        append_log(execution_id, "并行发布期间跳过全局 Docker prune；请在停止构建后统一维护镜像缓存")
 
     if cleaned:
         append_log(execution_id, f"构建后清理完成: {', '.join(cleaned)}")
@@ -2121,7 +2236,7 @@ def clone_environment(work_dir, secret):
 
 
 def list_repository_branches(repo, secret_id=None):
-    state = read_state()
+    state = state_snapshot()
     secret = git_secret_by_id(state, secret_id) if secret_id else None
     work_dir = WORKSPACE_DIR / f"branch-check-{uuid.uuid4().hex[:8]}"
     work_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -2594,7 +2709,8 @@ def dispatch_agent_tasks(execution_id, task, image):
             task_ref["stage"] = "Agent 部署"
             task_ref["progress"] = 88
 
-    mutate_state(update)
+    _result, committed = mutate_execution(execution_id, update, agent_tasks=True)
+    persist_queued_state(committed, int(committed.get("revision") or 0))
 
 
 def trim_notice_text(value, limit=1800):
@@ -2731,7 +2847,7 @@ def send_notification(task, event, message, execution_id=None):
     enabled_events = task.get("notify", {}).get("events") or []
     if enabled_events and event_label not in enabled_events:
         return
-    channels = read_state().get("notifyChannels", [])
+    channels = state_snapshot().get("notifyChannels", [])
     target = str(task.get("notify", {}).get("target") or "").strip()
     channel = resolve_notify_channel(task, channels)
     url = (channel or {}).get("target") or target
@@ -2774,11 +2890,11 @@ def send_notification(task, event, message, execution_id=None):
 
 
 def build_and_dispatch(execution_id):
-    state = read_state()
+    state = state_snapshot()
     execution = find_by_id(state["executions"], execution_id)
     if not execution:
         return
-    if execution.get("status") == "cancelled":
+    if execution.get("status") != "queued":
         return
     task = find_by_id(state["tasks"], execution["taskId"])
     if not task:
@@ -2805,6 +2921,8 @@ def build_and_dispatch(execution_id):
             append_log(execution_id, f"等待构建槽耗时: {format_duration(max(0, (datetime.now() - queued_at).total_seconds()))}")
         append_log(execution_id, f"已获得执行槽，当前平台最多同时发布 {MAX_CONCURRENT_EXECUTIONS} 个任务")
         set_execution_status(execution_id, "building", "开始拉取代码", stage="拉取代码", progress=10)
+        started_state = state_snapshot()
+        persist_queued_state(started_state, started_state["revision"])
         if work_dir.exists():
             shutil.rmtree(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -2816,15 +2934,7 @@ def build_and_dispatch(execution_id):
         git_secret = git_secret_by_id(state, task.get("gitCredentialId")) if task.get("gitCredentialId") else None
         clone_repo = authenticated_repo_url(task["repo"], git_secret)
         clone_env = clone_environment(work_dir, git_secret)
-        clone_cmd = ["git", "clone", "--depth", "1", "--branch", branch, clone_repo, str(src_dir)]
-        code, output, elapsed = run_command_stream(
-            clone_cmd,
-            execution_id,
-            env=clone_env,
-            redact=lambda text: redact_secret_text(text, git_secret),
-        )
-        if code != 0:
-            raise RuntimeError("代码拉取失败")
+        elapsed = checkout_source(sys.modules[__name__], execution_id, task, branch, src_dir, clone_repo, clone_env, git_secret)
         append_log(execution_id, f"代码拉取耗时: {format_duration(elapsed)}")
         commit_info = read_git_commit_info(src_dir, clone_env)
         if commit_info:
@@ -2916,7 +3026,10 @@ def build_and_dispatch(execution_id):
         if task_app_type(task) != "frontend" and task.get("language") in {"java", "node", "python"}:
             runtime_image = runtime_base(task)
             build_env = docker_login_env_for_secret(execution_id, sdk_pull_secret(task, runtime_image), runtime_image, work_dir / ".docker-build", "运行基础镜像")
-        code, output, elapsed = run_command_stream(["docker", "build", "-t", image, "-f", str(dockerfile), "."], execution_id, cwd=docker_context, env=build_env)
+        waiting = time.monotonic()
+        with stage_slot(DOCKER_BUILD_SLOTS, lambda: ensure_execution_active(execution_id)):
+            append_log(execution_id, f"等待镜像构建槽耗时: {format_duration(time.monotonic() - waiting)}")
+            code, output, elapsed = run_command_stream(["docker", "build", "-t", image, "-f", str(dockerfile), "."], execution_id, cwd=docker_context, env=build_env)
         append_log(execution_id, f"Docker 镜像构建耗时: {format_duration(elapsed)}，退出码: {code}")
         if code != 0:
             raise RuntimeError("Docker 镜像构建失败")
@@ -2943,7 +3056,10 @@ def build_and_dispatch(execution_id):
                     raise RuntimeError("镜像仓库登录失败")
             ensure_execution_active(execution_id)
             set_execution_status(execution_id, "building", f"推送镜像 {image}", stage="推送镜像", progress=78)
-            code, output, elapsed = run_command_stream(["docker", "push", image], execution_id, env=registry_env)
+            waiting = time.monotonic()
+            with stage_slot(IMAGE_PUSH_SLOTS, lambda: ensure_execution_active(execution_id)):
+                append_log(execution_id, f"等待镜像推送槽耗时: {format_duration(time.monotonic() - waiting)}")
+                code, output, elapsed = run_command_stream(["docker", "push", image], execution_id, env=registry_env)
             append_log(execution_id, f"镜像推送耗时: {format_duration(elapsed)}，退出码: {code}")
             if code != 0:
                 raise RuntimeError("镜像推送失败")
@@ -2954,7 +3070,7 @@ def build_and_dispatch(execution_id):
             append_log(execution_id, "未配置 REGISTRY_URL，镜像只保留在本机 Docker，远端集群可能无法拉取。")
             set_execution_status(execution_id, "building", "镜像保留在本机 Docker", image=image, stage="等待部署", progress=84)
 
-        state = read_state()
+        state = state_snapshot()
         if not task.get("clusters"):
             raise RuntimeError("任务未绑定部署集群")
         offline_clusters = []
@@ -2972,7 +3088,7 @@ def build_and_dispatch(execution_id):
     except Exception as exc:
         if str(exc) == "发布已取消":
             return
-        latest = read_state()
+        latest = state_snapshot()
         current = find_by_id(latest["executions"], execution_id) or {}
         set_execution_status(execution_id, "failed", str(exc), stage=current.get("stage") or "执行失败", progress=current.get("progress") or 100)
         send_notification(task, failure_event, str(exc), execution_id)
@@ -2981,6 +3097,8 @@ def build_and_dispatch(execution_id):
 
 
 def create_execution_record(state, task, actor, branch, action="触发发布", deploy_config=None):
+    if sum(item.get("status") == "queued" for item in state["executions"]) >= MAX_QUEUED_EXECUTIONS:
+        raise ExecutionQueueFull(f"等待发布的任务已达到上限 {MAX_QUEUED_EXECUTIONS}，请稍后重试")
     execution_id = uuid.uuid4().hex[:12]
     execution_actor = actor or "system"
     deploy_config = deploy_config or deploy_config_by_id(task, None)
@@ -3046,7 +3164,11 @@ def cancel_execution(execution_id, actor):
         state["auditLogs"].insert(0, audit_entry(actor, "取消发布", execution.get("taskName"), "成功"))
         return execution
 
-    execution, state = mutate_state(update)
+    execution, state = mutate_execution(execution_id, update, agent_tasks=True, audit=True)
+    if execution is None:
+        raise ValueError("执行记录不存在")
+    BUILD_EXECUTOR.cancel(execution_id)
+    persist_queued_state(state, state["revision"])
     return execution, state
 
 
@@ -3057,6 +3179,10 @@ def recover_interrupted_executions():
         for execution in state.get("executions", []):
             if not is_active_status(execution.get("status")):
                 continue
+            if execution.get("status") == "queued":
+                continue  # Durable queued work is dispatched again after startup.
+            if execution.get("status") == "deploying" and execution_has_agent_tasks(state, execution["id"]):
+                continue  # Agent still owns the command/result; never replay it.
             execution["status"] = "failed"
             execution["stage"] = "执行中断"
             execution["progress"] = execution.get("progress") or 0
@@ -3064,7 +3190,7 @@ def recover_interrupted_executions():
             execution.setdefault("logs", []).append(
                 {
                     "time": now_text(),
-                    "message": "平台服务已重启，内存执行队列无法恢复，本次发布已自动释放，请重新发布",
+                    "message": "平台服务已重启，正在运行的编译命令无法安全续跑，本次执行已标记中断；请检查残留构建容器后重新发布。排队任务和已下发 Agent 任务会保留。",
                 }
             )
             recovered.append(execution.get("id"))
@@ -3076,6 +3202,9 @@ def recover_interrupted_executions():
                 task["lastRun"] = now_text()
         for item in state.get("agentTasks", []):
             if item.get("status") in {"pending", "running"}:
+                execution = find_by_id(state["executions"], item.get("executionId"))
+                if execution and execution.get("status") == "deploying":
+                    continue
                 item["status"] = "cancelled"
                 item["updatedAt"] = now_text()
                 item.setdefault("logs", []).append({"time": now_text(), "message": "平台服务重启，发布执行已释放"})
@@ -3094,6 +3223,8 @@ def recover_interrupted_executions():
 
     recovered, _state = mutate_state(update, detect_changes=True)
     if recovered:
+        persist_queued_state(_state, _state["revision"])
+    if recovered:
         print(f"Recovered interrupted executions: {', '.join(str(item) for item in recovered)}", flush=True)
     return recovered
 
@@ -3107,6 +3238,8 @@ def delete_task(task_id, actor):
         active_execution = next((item for item in state["executions"] if str(item.get("taskId")) == str(task_id) and is_active_status(item.get("status"))), None)
         if active_execution:
             raise ValueError("任务正在发布中，请先取消发布")
+        if any(str(item.get("taskId")) == str(task_id) and item.get("resourceHeld") for item in state["agentTasks"]):
+            raise ValueError("Agent 尚未确认部署结束，请等待结果回报或确认进程停止后释放部署锁")
         state["tasks"] = [item for item in state["tasks"] if str(item.get("id")) != str(task_id)]
         state["executions"] = [item for item in state["executions"] if str(item.get("taskId")) != str(task_id)]
         state["agentTasks"] = [item for item in state["agentTasks"] if str(item.get("taskId")) != str(task_id)]
@@ -3114,7 +3247,7 @@ def delete_task(task_id, actor):
         state["auditLogs"].insert(0, audit_entry(actor, "删除任务", task.get("name"), "成功"))
         return task
 
-    task, state = mutate_state(update)
+    task, state = mutate_state(update, read_only_history=True)
     return task, state
 
 
@@ -3136,7 +3269,7 @@ def delete_user_config(username, actor):
         state["auditLogs"].insert(0, audit_entry(actor, "删除用户", user.get("username"), "成功"))
         return user
 
-    user, state = mutate_state(update)
+    user, state = mutate_state(update, read_only_history=True)
     return user, state
 
 
@@ -3167,7 +3300,7 @@ def delete_cluster_config(cluster_id, actor):
         state["auditLogs"].insert(0, audit_entry(actor, "删除集群", cluster.get("name"), "成功"))
         return cluster
 
-    cluster, state = mutate_state(update)
+    cluster, state = mutate_state(update, read_only_history=True)
     return cluster, state
 
 
@@ -3365,7 +3498,7 @@ def save_task_config(task_id, payload, actor):
         state["auditLogs"].insert(0, audit_entry(actor, "创建任务", task.get("name"), "成功"))
         return task
 
-    task, state = mutate_state(update)
+    task, state = mutate_state(update, read_only_history=True)
     return task, state
 
 
@@ -3450,7 +3583,7 @@ def save_secret_config(secret_id, payload, actor):
         state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "添加秘钥", "target": f"{secret.get('name')} / {secret.get('type')}", "result": "成功"})
         return secret
 
-    secret, state = mutate_state(update)
+    secret, state = mutate_state(update, read_only_history=True)
     return secret, state
 
 
@@ -3519,11 +3652,23 @@ def delete_secret_config(secret_id, actor):
         state["auditLogs"].insert(0, {"time": now_text(), "actor": actor or "system", "action": "删除秘钥", "target": f"{secret.get('name')} / {secret.get('type')}", "result": "成功"})
         return secret
 
-    secret, state = mutate_state(update)
+    secret, state = mutate_state(update, read_only_history=True)
     return secret, state
 
 
-def create_execution(task_id, actor, branch, deploy_config_id=None):
+def execution_for_request(state, task_id, actor, branch, config_id, request_id):
+    if request_id is None:
+        return None
+    if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128:
+        raise ValueError("requestId 必须为 1 到 128 个字符")
+    existing = next((item for item in state["executions"] if item.get("requestId") == request_id
+                     and str(item.get("taskId")) == str(task_id) and item.get("actor") == actor), None)
+    if existing and (existing.get("branch") != branch or existing.get("deployConfigId") != config_id):
+        raise ValueError("相同 requestId 不能用于不同的发布参数")
+    return existing
+
+
+def create_execution(task_id, actor, branch, deploy_config_id=None, request_id=None):
     def update(state):
         task = find_by_id(state["tasks"], task_id)
         if not task:
@@ -3535,24 +3680,36 @@ def create_execution(task_id, actor, branch, deploy_config_id=None):
             raise ValueError(f"当前用户组无权发布配置 {deploy_config.get('name')}")
         if not branch:
             raise ValueError("请选择发布分支")
+        existing = execution_for_request(state, task_id, actor, branch, deploy_config.get("id"), request_id)
+        if existing:
+            return existing
         active = active_execution_for_task(state, task["id"])
         if active:
             raise ValueError(f"任务正在执行中: {active.get('id')} / {active.get('stage') or active.get('status')}")
-        return create_execution_record(state, task, actor, branch, deploy_config=deploy_config)
+        ensure_build_capacity(1)
+        execution = create_execution_record(state, task, actor, branch, deploy_config=deploy_config)
+        if request_id:
+            execution["requestId"] = request_id
+        return execution
 
-    execution, state = mutate_state(update)
-    BUILD_EXECUTOR.submit(build_and_dispatch, execution["id"])
+    with STATE_LOCK:
+        execution, state = mutate_state(update, detect_changes=True, read_only_history=True)
+    # The database is the durable queue. Acknowledgement and execution both
+    # follow a successful commit; no database IO holds STATE_LOCK.
+    persist_queued_state(state, state["revision"])
+    dispatch_queued_executions()
     return execution, state
 
 
 def create_batch_executions(items, actor):
     if not isinstance(items, list) or not items:
         raise ValueError("请选择要批量发布的任务")
-    if len(items) > MAX_CONCURRENT_EXECUTIONS:
-        raise ValueError(f"批量发布一次最多选择 {MAX_CONCURRENT_EXECUTIONS} 个任务")
+    if len(items) > MAX_BATCH_DEPLOY_TASKS:
+        raise ValueError(f"批量发布一次最多选择 {MAX_BATCH_DEPLOY_TASKS} 个任务")
 
     def update(state):
         executions = []
+        new_count = 0
         for item in items:
             task = find_by_id(state["tasks"], item.get("taskId"))
             if not task:
@@ -3565,16 +3722,64 @@ def create_batch_executions(items, actor):
             branch = item.get("branch")
             if not branch:
                 raise ValueError(f"{task['name']} 未选择发布分支")
+            existing = execution_for_request(state, task["id"], actor, branch, deploy_config.get("id"), item.get("requestId"))
+            if existing:
+                executions.append(existing)
+                continue
+            ensure_build_capacity(new_count + 1)
             active = active_execution_for_task(state, task["id"])
             if active:
                 raise ValueError(f"任务 {task['name']} 正在执行中: {active.get('id')}")
-            executions.append(create_execution_record(state, task, actor, branch, "批量发布", deploy_config=deploy_config))
+            execution = create_execution_record(state, task, actor, branch, "批量发布", deploy_config=deploy_config)
+            if item.get("requestId"):
+                execution["requestId"] = item["requestId"]
+            executions.append(execution)
+            new_count += 1
         return executions
 
-    executions, state = mutate_state(update)
-    for execution in executions:
-        BUILD_EXECUTOR.submit(build_and_dispatch, execution["id"])
+    with STATE_LOCK:
+        executions, state = mutate_state(update, detect_changes=True, read_only_history=True)
+    persist_queued_state(state, state["revision"])
+    dispatch_queued_executions()
     return executions, state
+
+
+def ensure_build_capacity(count):
+    if BUILD_EXECUTOR.available() < count:
+        raise ExecutionQueueFull("发布队列容量不足，请等待已有任务完成后重试")
+
+
+def submit_build(execution_id):
+    try:
+        BUILD_EXECUTOR.submit(run_build_safely, execution_id)
+    except Exception as exc:
+        set_execution_status(execution_id, "failed", f"任务提交失败: {exc}", stage="入队失败", progress=100)
+        raise
+
+
+def run_build_safely(execution_id):
+    try:
+        build_and_dispatch(execution_id)
+    except Exception as exc:
+        set_execution_status(execution_id, "failed", f"执行线程异常: {exc}", stage="执行异常", progress=100)
+
+
+def dispatch_queued_executions():
+    # Persist a generation containing every selected queue record before handing
+    # it to a thread. Submission is serialized; the executor also deduplicates IDs.
+    snapshot = state_snapshot()
+    pending = [item for item in reversed(snapshot["executions"]) if item.get("status") == "queued"]
+    if not pending:
+        return
+    persist_queued_state(snapshot, int(snapshot.get("revision") or 0))
+    with STATE_LOCK:
+        current = state_snapshot()
+        for item in pending:
+            if BUILD_EXECUTOR.available() <= 0:
+                break
+            latest = find_by_id(current["executions"], item["id"])
+            if latest and latest.get("status") == "queued":
+                submit_build(latest["id"])
 
 
 def schedule_execution(task_id, actor, branch, scheduled_at, deploy_config_id=None):
@@ -3625,7 +3830,8 @@ def schedule_execution(task_id, actor, branch, scheduled_at, deploy_config_id=No
         state["auditLogs"].insert(0, audit_entry(actor, "创建定时发布", f"{task_display_name(task, deploy_config)} / {deploy_config.get('name') or '默认配置'} / {branch}", scheduled_at))
         return schedule
 
-    schedule, state = mutate_state(update)
+    schedule, state = mutate_state(update, read_only_history=True)
+    persist_queued_state(state, state["revision"])
     return schedule, state
 
 
@@ -3647,11 +3853,22 @@ def cancel_schedule(schedule_id, actor):
         state["auditLogs"].insert(0, audit_entry(actor, "取消定时发布", schedule.get("taskName"), "成功"))
         return schedule
 
-    schedule, state = mutate_state(update)
+    schedule, state = mutate_state(update, read_only_history=True)
+    persist_queued_state(state, state["revision"])
     return schedule, state
 
 
 def trigger_due_schedules():
+    snapshot = state_snapshot()
+    now = datetime.now()
+    pending = [item for item in snapshot.get("schedules", []) if item.get("status") == "pending" and item.get("enabled", True)]
+    if not pending:
+        return
+    try:
+        if all(parse_schedule_time(item.get("scheduledAt")) > now for item in pending):
+            return
+    except (ValueError, TypeError):
+        pass  # The mutation below marks invalid schedules failed.
     due_execution_ids = []
 
     def update(state):
@@ -3662,6 +3879,8 @@ def trigger_due_schedules():
             try:
                 if parse_schedule_time(schedule.get("scheduledAt")) > now:
                     continue
+                if BUILD_EXECUTOR.available() <= len(due_execution_ids):
+                    continue  # Keep due schedules pending under backpressure.
                 task = find_by_id(state["tasks"], schedule["taskId"])
                 if not task:
                     schedule["status"] = "failed"
@@ -3681,15 +3900,18 @@ def trigger_due_schedules():
                     task["schedule"]["status"] = "triggered"
                     task["schedule"]["executionId"] = execution["id"]
                 due_execution_ids.append(execution["id"])
+            except ExecutionQueueFull:
+                continue
             except Exception as exc:
                 schedule["status"] = "failed"
                 schedule["error"] = str(exc)
                 schedule["updatedAt"] = now_text()
         return None
 
-    mutate_state(update)
-    for execution_id in due_execution_ids:
-        BUILD_EXECUTOR.submit(build_and_dispatch, execution_id)
+    with STATE_LOCK:
+        mutate_state(update, detect_changes=True, read_only_history=True)
+    if due_execution_ids:
+        dispatch_queued_executions()
 
 
 def execution_has_agent_tasks(state, execution_id):
@@ -3699,7 +3921,7 @@ def execution_has_agent_tasks(state, execution_id):
 def recover_waiting_deployments():
     recovery_items = []
     with STATE_LOCK:
-        state = read_state()
+        state = state_snapshot()
         now = datetime.now()
         for execution in state.get("executions", []):
             if execution.get("status") != "building":
@@ -3726,7 +3948,7 @@ def recover_waiting_deployments():
 def recover_stuck_agent_deployments():
     recovery_items = []
     with STATE_LOCK:
-        state = read_state()
+        state = state_snapshot()
         now = datetime.now()
         for execution in state.get("executions", []):
             if execution.get("status") != "deploying" or execution.get("stage") != "Agent 部署":
@@ -3738,6 +3960,8 @@ def recover_stuck_agent_deployments():
             for item in agent_tasks:
                 if item.get("status") != "pending":
                     continue
+                if item.get("kind") != "windows" and agent_claim_blocked(state, item):
+                    continue  # Target/cluster backpressure is legitimate waiting.
                 created_at = parse_time_text(item.get("updatedAt") or item.get("createdAt"))
                 if not created_at:
                     stale_pending_clusters.append(item.get("clusterName"))
@@ -3776,7 +4000,7 @@ def recover_stuck_agent_deployments():
                     task_ref["stage"] = "部署异常"
                     task_ref["progress"] = 100
                     task_ref["lastRun"] = now_text()
-            mutate_state(update)
+            mutate_execution(execution_id, update, agent_tasks=True)
         except Exception as exc:
             print(f"stuck deployment recovery failed: {execution_id} / {exc}", flush=True)
 
@@ -3785,6 +4009,7 @@ def scheduler_loop():
     while True:
         try:
             trigger_due_schedules()
+            dispatch_queued_executions()
             recover_waiting_deployments()
             recover_stuck_agent_deployments()
         except Exception as exc:
@@ -3792,47 +4017,90 @@ def scheduler_loop():
         time.sleep(15)
 
 
-def mark_agent_task_running(agent_task, agent_instance=None):
-    def update(state):
-        item = find_by_id(state["agentTasks"], agent_task["id"])
-        if not item or item.get("status") not in {"pending", "running"}:
-            return
-        item["status"] = "running"
-        item["updatedAt"] = now_text()
-        if agent_instance:
-            item["assignedAgent"] = agent_instance
-        execution = find_by_id(state["executions"], agent_task["executionId"])
-        if execution and execution.get("status") in ACTIVE_STATUSES:
-            execution.setdefault("clusterResults", {})[agent_task["clusterName"]] = "running"
-
-    mutate_state(update, detect_changes=True)
-
-
 def agent_task_matches_cluster(item, cluster):
     return normalize_cluster_key(item.get("clusterName")) == normalize_cluster_key(cluster)
 
 
-def agent_task_is_stale(item):
-    updated_at = parse_time_text(item.get("updatedAt") or item.get("createdAt"))
-    if not updated_at:
-        return True
-    return (datetime.now() - updated_at).total_seconds() >= AGENT_TASK_RETRY_SECONDS
+def agent_deployment_key(item):
+    payload = item.get("payload") or {}
+    return (normalize_cluster_key(item.get("clusterName")), payload.get("namespace") or "default",
+            payload.get("deployment") or payload.get("appName") or str(item.get("taskId")))
 
 
-def agent_task_can_be_taken_over(item):
-    if item.get("assignedAgent"):
-        return False
-    updated_at = parse_time_text(item.get("updatedAt") or item.get("createdAt"))
-    if not updated_at:
-        return True
-    return (datetime.now() - updated_at).total_seconds() >= AGENT_TASK_TAKEOVER_SECONDS
+def agent_claim_blocked(state, candidate):
+    busy = [item for item in state["agentTasks"] if item.get("kind") != "windows"
+            and agent_task_matches_cluster(item, candidate.get("clusterName"))
+            and (item.get("resourceHeld") or item.get("status") == "running")]
+    return len(busy) >= MAX_AGENT_DEPLOYS_PER_CLUSTER or any(agent_deployment_key(item) == agent_deployment_key(candidate) for item in busy)
 
 
-def next_agent_task_for_cluster(agent_tasks, cluster):
-    pending = next((item for item in agent_tasks if agent_task_matches_cluster(item, cluster) and item.get("status") == "pending"), None)
-    if pending:
-        return pending
-    return next((item for item in agent_tasks if agent_task_matches_cluster(item, cluster) and item.get("status") == "running" and (agent_task_is_stale(item) or agent_task_can_be_taken_over(item))), None)
+def release_agent_reservation(agent_task_id, actor, confirmed_stopped=False):
+    if confirmed_stopped is not True:
+        raise ValueError("请先确认旧 Agent 的 kubectl 进程已经停止，再提交 confirmedStopped=true")
+    with STATE_LOCK:
+        snapshot = state_snapshot()
+        item = find_by_id(snapshot["agentTasks"], agent_task_id)
+        if not item or item.get("kind") == "windows":
+            raise ValueError("Kubernetes Agent 任务不存在")
+        cluster = next((value for value in snapshot["clusters"] if agent_task_matches_cluster(item, value.get("name"))), None)
+        if not cluster:
+            raise ValueError("集群不存在")
+        require_actor_asset_access(snapshot, actor, "cluster.manage", cluster, "释放部署锁")
+        task = find_by_id(snapshot["tasks"], item["taskId"])
+        if task:
+            require_actor_asset_access(snapshot, actor, "task.deploy", task, "释放部署锁")
+        execution = find_by_id(snapshot["executions"], item["executionId"])
+        if not execution or execution.get("status") in ACTIVE_STATUSES:
+            raise ValueError("请先取消对应的发布执行，再释放部署锁")
+
+        def release(state):
+            target = find_by_id(state["agentTasks"], agent_task_id)
+            target.update(resourceHeld=False, status="cancelled", updatedAt=now_text())
+            state["auditLogs"].insert(0, audit_entry(actor, "释放部署锁", agent_task_id, "已确认旧进程停止"))
+            return target
+
+        result, committed = mutate_execution(item["executionId"], release, agent_tasks=True, audit=True)
+    persist_queued_state(committed, committed["revision"])
+    return result, committed
+
+
+def claim_agent_task(cluster, instance, request_id=""):
+    """Claim and reserve the actual deployment target in the same state lock.
+
+    An assigned command is never replayed automatically: a timed-out request is
+    not proof kubectl stopped. The owner keeps its slot through result retries.
+    """
+    if not instance:
+        raise ValueError("Agent 需要提供 instanceId")
+    with STATE_LOCK:
+        state = state_snapshot()
+        items = [item for item in state["agentTasks"] if item.get("kind") != "windows" and agent_task_matches_cluster(item, cluster)]
+        if request_id:
+            existing = next((item for item in items if item.get("claimRequestId") == request_id and item.get("assignedAgent") == instance), None)
+            if existing:
+                return existing  # Retry a lost HTTP response, not a new claim.
+        busy = [item for item in items if item.get("resourceHeld") or item.get("status") == "running"]
+        if len(busy) >= MAX_AGENT_DEPLOYS_PER_CLUSTER:
+            return None
+        keys = {agent_deployment_key(item) for item in busy}
+        candidate = next((item for item in items if item.get("status") == "pending"
+                          and agent_deployment_key(item) not in keys), None)
+        if candidate is None:
+            return None
+
+        def claim(current):
+            item = find_by_id(current["agentTasks"], candidate["id"])
+            execution = find_by_id(current["executions"], item["executionId"])
+            if not execution or execution.get("status") not in ACTIVE_STATUSES:
+                return None
+            item.update(status="running", assignedAgent=instance, resourceHeld=True, updatedAt=now_text())
+            if request_id:
+                item["claimRequestId"] = request_id
+            execution.setdefault("clusterResults", {})[item["clusterName"]] = "running"
+            return item
+
+        result, _state = mutate_execution(candidate["executionId"], claim, agent_tasks=True)
+        return result
 
 
 def cluster_heartbeat_for_name(state, cluster_name):
@@ -3876,9 +4144,10 @@ def update_agent_result(agent_task_id, status, logs, agent_instance=None):
         if not item:
             return None
         assigned_agent = item.get("assignedAgent")
-        if assigned_agent and agent_instance and assigned_agent != agent_instance:
+        if assigned_agent and assigned_agent != agent_instance:
             item.setdefault("logs", []).append({"time": now_text(), "message": f"忽略非当前 Agent 实例回报: {agent_instance}"})
             return item
+        item["resourceHeld"] = False
         if item.get("status") in {"success", "failed", "cancelled"}:
             return item
         item["status"] = status
@@ -3918,7 +4187,17 @@ def update_agent_result(agent_task_id, status, logs, agent_instance=None):
                     notification = (effective_task_for_deploy_config(task, deploy_config), "DEPLOY_FAILED", logs or f"集群 {item['clusterName']} 部署失败", execution.get("id"))
         return item
 
-    item, state = mutate_state(update)
+    with STATE_LOCK:
+        snapshot = state_snapshot()
+        agent_task = find_by_id(snapshot["agentTasks"], agent_task_id)
+        if agent_task is None:
+            return None, snapshot
+        if find_by_id(snapshot["executions"], agent_task["executionId"]):
+            item, state = mutate_execution(agent_task["executionId"], update, agent_tasks=True)
+        else:
+            # Preserve handling of orphaned records from legacy data.
+            item, state = mutate_state(update)
+    persist_queued_state(state, int(state.get("revision") or 0))
     if notification:
         send_notification(*notification)
         if notification[1] == "BUILD_SUCCESS":
@@ -4001,6 +4280,13 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
             return None
         return user.get("username") or "system"
 
+    def send_execution_error(self, error):
+        status = 429 if isinstance(error, ExecutionQueueFull) else 400 if isinstance(error, ValueError) else 503
+        message = str(error)
+        if status == 503:
+            message = "发布结果尚未确认，请刷新状态或使用原 requestId 重试：" + message
+        self.send_json({"error": message}, status=status)
+
     def websocket_handshake(self):
         key = self.headers.get("Sec-WebSocket-Key", "")
         if not key:
@@ -4018,10 +4304,14 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
         if not self.websocket_handshake():
             return
         self.connection.settimeout(1.0)
-        client = WebSocketClient(self.connection)
-        client.enqueue(websocket_frame({"type": "state", "state": client_state(initial_state, compact=True)}))
-        with WS_LOCK:
-            WS_CLIENTS.add(client)
+        query = parse_qs(urlparse(self.path).query)
+        client = WebSocketClient(self.connection, delta=query.get("protocol") == ["2"])
+        # Register at the same revision as the initial frame, so a concurrent
+        # mutation cannot be lost between taking a snapshot and subscribing.
+        with STATE_LOCK:
+            client.enqueue(websocket_frame({"type": "state", "state": client_state(state_snapshot(), compact=True)}))
+            with WS_LOCK:
+                WS_CLIENTS.add(client)
         threading.Thread(target=client.send_loop, daemon=True).start()
         try:
             while not client.stopped.is_set():
@@ -4096,14 +4386,18 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
             query = parse_qs(parsed.query)
             cluster = query.get("cluster", [""])[0].strip()
             agent_instance = query.get("instanceId", [""])[0].strip()
-            state = read_state()
+            request_id = query.get("requestId", [""])[0].strip()[:128]
+            state = state_snapshot()
             if not self.require_agent_token(parsed, cluster_agent_token(state, cluster)):
                 return
-            task = next_agent_task_for_cluster([item for item in state["agentTasks"] if item.get("kind") != "windows"], cluster)
-            if not task:
-                self.send_json({"task": None})
+            try:
+                task = claim_agent_task(cluster, agent_instance, request_id)
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
                 return
-            mark_agent_task_running(task, agent_instance)
+            if task:
+                snapshot = state_snapshot()
+                persist_queued_state(snapshot, int(snapshot.get("revision") or 0))
             self.send_json({"task": task})
             return
         if self.is_spa_route(parsed):
@@ -4115,6 +4409,19 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
         self.request_started = time.monotonic()
         parsed = urlparse(self.path)
         if self.windows_post(parsed):
+            return
+        release_match = re.fullmatch(r"/api/agent/tasks/([^/]+)/release", parsed.path)
+        if release_match:
+            actor = self.require_session_actor()
+            if not actor:
+                return
+            try:
+                body = self.read_json_body()
+                item, _state = release_agent_reservation(release_match.group(1), actor, body.get("confirmedStopped"))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, status=400)
+                return
+            self.send_json({"ok": True, "taskId": item["id"]})
             return
         if parsed.path == "/api/auth/login":
             body = self.read_json_body()
@@ -4171,7 +4478,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
             try:
                 executions, state = create_batch_executions(body.get("items"), actor)
             except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
+                self.send_execution_error(exc)
                 return
             self.send_json({"executions": [execution_summary(item) for item in executions], "state": client_state(state, compact=True)})
             return
@@ -4182,9 +4489,12 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
             if not actor:
                 return
             try:
-                execution, state = create_execution(match.group(1), actor, body.get("branch"), body.get("deployConfigId"))
+                request_id = body.get("requestId")
+                if request_id is not None and (not isinstance(request_id, str) or not 1 <= len(request_id) <= 128):
+                    raise ValueError("requestId 必须为 1 到 128 个字符")
+                execution, state = create_execution(match.group(1), actor, body.get("branch"), body.get("deployConfigId"), request_id)
             except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
+                self.send_execution_error(exc)
                 return
             self.send_json({"execution": execution_summary(execution), "state": client_state(state, compact=True)})
             return
@@ -4197,7 +4507,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
             try:
                 schedule, state = schedule_execution(match.group(1), actor, body.get("branch"), body.get("scheduledAt"), body.get("deployConfigId"))
             except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
+                self.send_execution_error(exc)
                 return
             self.send_json({"schedule": schedule, "state": client_state(state, compact=True)})
             return
@@ -4210,7 +4520,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
             try:
                 execution, state = cancel_execution(match.group(1), actor)
             except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
+                self.send_execution_error(exc)
                 return
             self.send_json({"execution": execution_summary(execution), "state": client_state(state, compact=True)})
             return
@@ -4223,7 +4533,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
             try:
                 schedule, state = cancel_schedule(match.group(1), actor)
             except Exception as exc:
-                self.send_json({"error": str(exc)}, status=400)
+                self.send_execution_error(exc)
                 return
             self.send_json({"schedule": schedule, "state": client_state(state, compact=True)})
             return
@@ -4233,7 +4543,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
             if not actor:
                 return
             try:
-                state = read_state()
+                state = state_snapshot()
                 task_id = body.get("taskId")
                 if task_id is not None:
                     task = find_by_id(state.get("tasks", []), task_id)
@@ -4267,13 +4577,19 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
         match = re.match(r"^/api/agent/tasks/([^/]+)/result$", parsed.path)
         if match:
             body = self.read_json_body()
-            state = read_state()
+            state = state_snapshot()
             agent_task = find_by_id(state.get("agentTasks", []), match.group(1))
+            if not agent_task:
+                self.send_json({"error": "Agent 任务不存在；请核对平台与 Agent 持久卷，待回报结果应保留"}, status=404)
+                return
             if agent_task and agent_task.get("kind") == "windows":
                 self.send_json({"error": "Windows 任务请使用 Windows Agent 接口"}, status=400)
                 return
             cluster_name = (agent_task or {}).get("clusterName") or str(body.get("cluster") or "").strip()
             if not self.require_agent_token(parsed, cluster_agent_token(state, cluster_name)):
+                return
+            if agent_task.get("assignedAgent") and agent_task["assignedAgent"] != str(body.get("instanceId") or ""):
+                self.send_json({"error": "Agent 任务不属于当前实例"}, status=403)
                 return
             item, state = update_agent_result(match.group(1), body.get("status") or "failed", body.get("logs") or "", body.get("instanceId") or "")
             self.send_json({"ok": True, "task": {"id": match.group(1), "status": (item or {}).get("status")}})
@@ -4281,7 +4597,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
         if parsed.path == "/api/agent/heartbeat":
             body = self.read_json_body()
             cluster = str(body.get("cluster") or "").strip()
-            state = read_state()
+            state = state_snapshot()
             if not self.require_agent_token(parsed, cluster_agent_token(state, cluster)):
                 return
 
@@ -4289,7 +4605,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
                 state["agentHeartbeats"] = [item for item in state["agentHeartbeats"] if normalize_cluster_key(item.get("cluster")) != normalize_cluster_key(cluster)]
                 state["agentHeartbeats"].append({"cluster": cluster, "time": now_text(), "version": body.get("version", "dev"), "instanceId": body.get("instanceId") or ""})
 
-            mutate_state(update)
+            mutate_state(update, read_only_history=True)
             self.send_json({"ok": True})
             return
         self.send_error(404)
@@ -4392,7 +4708,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
                     return
                 state = body
             with STATE_LOCK:
-                current_state = read_state()
+                current_state = state_snapshot()
                 state = merge_defaults(state)
                 state = preserve_existing_user_passwords(state, current_state)
                 state = preserve_sensitive_values(state, current_state)

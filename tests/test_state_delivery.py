@@ -7,6 +7,20 @@ import server as s
 
 
 class StateDeliveryTests(unittest.TestCase):
+    def test_legacy_browsers_get_snapshots_and_new_browsers_get_deltas(self):
+        old = s.default_state_copy()
+        new = {**old, 'revision': 1, 'agentHeartbeats': [{'cluster': 'new'}]}
+        legacy = s.WebSocketClient(Mock())
+        modern = s.WebSocketClient(Mock(), delta=True)
+        with patch.object(s, 'WS_CLIENTS', {legacy, modern}), patch.object(s, 'broadcast_ws') as broadcast:
+            s.broadcast_state(new, old)
+        snapshot, delta = broadcast.call_args_list
+        self.assertEqual(snapshot.args[0]['type'], 'state')
+        self.assertEqual(snapshot.kwargs['clients'], [legacy])
+        self.assertEqual(delta.args[0]['type'], 'state_patch')
+        self.assertEqual(delta.kwargs['clients'], [modern])
+        self.assertEqual(set(delta.args[0]['patch']), {'agentHeartbeats', 'revision'})
+
     def test_slow_browser_does_not_block_state_mutation_or_other_browsers(self):
         entered = threading.Event()
         release = threading.Event()
