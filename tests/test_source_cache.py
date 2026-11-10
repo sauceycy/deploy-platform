@@ -57,6 +57,13 @@ class SourceCacheTests(unittest.TestCase):
         self.assertEqual(sum("fetch" in cmd for cmd in self.commands), 2)
         cached = next((self.s.DATA_DIR / "cache/git").glob("*.git"))
         self.assertFalse((cached / "FETCH_HEAD").exists())
+        clones = [cmd for cmd in self.commands if cmd[:2] == ["git", "clone"]]
+        self.assertEqual(len(clones), 2)
+        self.assertTrue(all(cmd[-2] == cached.resolve().as_uri() for cmd in clones))
+        self.assertTrue(all("--depth" in cmd and "--no-local" in cmd for cmd in clones))
+        # Local cache transport must never become a fresh remote clone per run.
+        self.assertNotIn(str(self.repo), [cmd[-2] for cmd in clones])
+        self.assertNotIn(str(self.repo), (cached / "config").read_text())
         # Forced branch rewrites must also resolve the current remote commit.
         self.git("reset", "--hard", "HEAD~1")
         self.assertEqual((self.checkout("third") / "app.txt").read_text(), "one")

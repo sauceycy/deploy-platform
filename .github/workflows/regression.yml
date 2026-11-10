@@ -1,0 +1,54 @@
+name: Release performance and reliability
+
+on:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-regression-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: release_regression
+          POSTGRES_USER: regression
+          POSTGRES_PASSWORD: local-regression-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U regression -d release_regression"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Test state, concurrency, durable queue and PostgreSQL
+        env:
+          TEST_POSTGRES_URL: postgresql://regression:local-regression-only@127.0.0.1:5432/release_regression
+        run: python -m unittest discover -s tests -q
+      - name: Test browser state and release forms
+        run: node --test tests/*.test.cjs
+      - name: Validate compose and patch formatting
+        run: |
+          docker compose config --quiet
+          git diff --check
