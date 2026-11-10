@@ -83,6 +83,8 @@ def dispatch(s, state, execution, task, action, artifact=None):
             "taskId": task["id"], "clusterName": name, "status": "pending",
             "payload": payload, "logs": [], "createdAt": s.now_text(), "updatedAt": s.now_text(),
         })
+        queued = state["agentTasks"][-1]
+        queued["claimWaitSince"] = None if s.agent_claim_blocked(state, queued) else queued["createdAt"]
         execution.setdefault("clusterResults", {})[name] = "pending"
     execution.update(status="deploying", stage="Agent 部署", progress=86, updatedAt=s.now_text())
     execution["logs"].append({"time": s.now_text(), "message": f"Windows {action}: {', '.join(names)}"})

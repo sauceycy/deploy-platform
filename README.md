@@ -244,6 +244,25 @@ dev-agent-token
 
 如果你修改了平台的 `AGENT_SHARED_TOKEN`，需要同步修改每个集群 Agent 的 `AGENT_TOKEN`，然后重启 Agent Deployment。
 
+### Agent 超时未领取与升级检查
+
+平台镜像更新不会自动更新业务集群里的 Agent。两端应使用包含本次代码的明确版本标签或 digest；只替换 `latest` 指向的镜像内容、再次 apply 相同 YAML，不会让已运行的 Pod 自动拉新镜像。新版 Agent 启动日志包含 `version=0.2.0` 和 `concurrency=5`，心跳会上报真实工作槽数。未上报槽数的旧 Agent，平台保守按 1 槽排队；升级后仍默认支持 5 个不同部署目标并行。
+
+`AGENT_TASK_PENDING_TIMEOUT_SECONDS` 默认 180 秒，仅计算有可用部署槽且部署目标未锁定后的等待。等待同目标锁、集群容量或单台 Windows 服务器的任务暂停计时；解除阻塞后重新获得完整领取窗口。超时检查不会终止已领取的命令或自动释放其部署锁。真正超时的记录保留，通过新的发布请求人工重试，不自动重放部署。
+
+排查时先读取带时间戳的日志：
+
+```bash
+kubectl -n deploy-system logs deployment/deploy-agent --tail=100 --timestamps
+kubectl -n deploy-system get deployment deploy-agent -o jsonpath='{.spec.template.spec.containers[*].image}'
+# 新版镜像内可执行，使用该容器已有的 URL、网络及请求头；不领取任务或改写本地账本
+kubectl -n deploy-system exec deployment/deploy-agent -- python /app/agent.py --check
+```
+
+`--check` 仅验证健康接口可达，不能证明 Token 正确或任务接口的代理规则正确。`GET /api/agent/tasks` 与心跳同时读取超时，或出现 `502/503/504/522/524`，应检查 Agent → Cloudflare/反向代理 → 平台源站的链路，以及源站日志中的 `Slow state mutation`、`Slow state persistence`、数据库连接/磁盘负载。健康接口当前成功也不能排除历史或特定路径的间歇故障。403 浏览器挑战需要调整 `/api/agent/*` 的 WAF/Access 规则或配置服务令牌，401 则核对集群 Token。Agent HTTP 单次超时默认 20 秒，可通过 `AGENT_HTTP_TIMEOUT_SECONDS` 显式设置；延长它不能修复不可达源站。
+
+升级顺序为先平台、再 Agent：先等待运行中的发布结束，构建并推送明确版本的镜像，更新清单里的实际 `image`、`PLATFORM_URL`、`CLUSTER_NAME` 和 Token，再应用 `k8s-agent.yaml` 并等待 `kubectl -n deploy-system rollout status deployment/deploy-agent`。该清单同时配置 5 个线程、独立持久化 PVC 和 `Recreate` 策略，避免两个进程共用账本。旧版无账本的 Agent 不能通过重启恢复正在执行的命令，升级前尤其需要确认没有运行中的部署。升级后确认新启动日志和平台心跳版本/并发数，再用不同部署目标验证并行。
+
 ## 秘钥管理
 
 进入「秘钥管理」可以新增并持久化以下类型：
