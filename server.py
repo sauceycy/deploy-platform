@@ -28,6 +28,7 @@ from xml.sax.saxutils import escape as xml_escape
 from windows_deploy import WindowsRoutes, package_and_dispatch, parse_windows_env
 from build_cache import cache_lock, checkout_source
 from execution_pool import ExecutionPool, ExecutionQueueFull, stage_slot
+from log_sequence import LogDraft, LogSequence, json_default
 
 try:
     import psycopg
@@ -569,7 +570,7 @@ def persist_state_payload(payload):
 
 
 def state_payload(state):
-    return json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(state, ensure_ascii=False, separators=(",", ":"), default=json_default)
 
 
 def persist_state_snapshot(snapshot):
@@ -754,7 +755,7 @@ def compact_error_logs(logs):
 
 
 def execution_summary(execution, compact=False):
-    logs = execution.get("logs") if isinstance(execution.get("logs"), list) else []
+    logs = execution.get("logs") if isinstance(execution.get("logs"), (list, LogSequence)) else []
     item = {key: copy.deepcopy(value) for key, value in execution.items() if key != "logs"}
     if isinstance(item.get('deployConfigSnapshot'), dict):
         item['deployConfigSnapshot'].pop('windowsEnv', None)
@@ -837,6 +838,9 @@ def state_snapshot():
                 state = default_state_copy()
                 persist_state_payload(state_payload(state))
             STATE_CACHE = merge_defaults(state)
+            # One startup conversion; subsequent log appends share immutable blocks.
+            for execution in STATE_CACHE.get("executions", []):
+                execution["logs"] = LogSequence(execution.get("logs") or [])
         return STATE_CACHE
 
 
@@ -877,7 +881,7 @@ def websocket_accept_key(key):
 
 
 def websocket_frame(payload):
-    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=json_default).encode("utf-8")
     length = len(data)
     if length < 126:
         header = bytes([0x81, length])
@@ -1006,7 +1010,7 @@ def mutate_execution(execution_id, fn, agent_tasks=False, audit=False, read_only
             return None, previous
         execution = {key: copy.deepcopy(value) for key, value in original.items() if key != "logs"}
         logs = original.get("logs")
-        execution["logs"] = (logs if logs is not None else []) if read_only_logs else list(logs or [])
+        execution["logs"] = (logs if logs is not None else []) if read_only_logs else LogDraft(logs or [])
         state = {**previous,
                  "executions": [execution if item is original else item for item in previous["executions"]],
                  "tasks": [copy.deepcopy(item) if str(item["id"]) == str(original["taskId"]) else item for item in previous["tasks"]]}
@@ -1015,6 +1019,8 @@ def mutate_execution(execution_id, fn, agent_tasks=False, audit=False, read_only
         if agent_tasks:
             state["agentTasks"] = [copy.deepcopy(item) if str(item.get("executionId")) == str(execution_id) else item for item in previous["agentTasks"]]
         result = fn(state)
+        if isinstance(execution.get("logs"), LogDraft):
+            execution["logs"] = execution["logs"].freeze()
         if any(execution.get(key) != original.get(key) for key in ("status", "stage", "progress")):
             refresh_task_execution_summary(state, original["taskId"])
         if state == previous:
@@ -1053,7 +1059,7 @@ def mutate_state(fn, detect_changes=False, broadcast=True, read_only_history=Fal
 
 def append_log(execution_id, message):
     global STATE_CACHE
-    # Copy only the changed execution and its list; prior generations stay immutable
+    # Copy only the changed execution and log tree path; prior generations stay immutable
     # for the async writer and HTTP readers. Log entries are never edited in place.
     with STATE_LOCK:
         current = state_snapshot()
@@ -1061,7 +1067,8 @@ def append_log(execution_id, message):
         if execution is None:
             return
         log_entry = {"time": now_text(), "message": message}
-        updated = {**execution, "logs": [*(execution.get("logs") or []), log_entry]}
+        logs = execution.get("logs") or []
+        updated = {**execution, "logs": LogSequence(logs).appended(log_entry)}
         snapshot = {**current, "revision": int(current.get("revision") or 0) + 1,
                     "executions": [updated if item is execution else item for item in current["executions"]]}
         STATE_CACHE = snapshot
@@ -1313,7 +1320,7 @@ def require_actor_asset_access(state, actor, permission, asset, action):
 
 
 def canonical_json(value):
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=json_default)
 
 
 def validate_asset_state_changes(current_state, next_state, actor):
@@ -4784,7 +4791,7 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
         self.send_json({"ok": True, "state": client_state(state, compact=True)})
 
     def send_json(self, payload, status=200, headers=None):
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        data = json.dumps(payload, ensure_ascii=False, default=json_default).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))

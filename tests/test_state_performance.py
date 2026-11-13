@@ -1,4 +1,5 @@
 import json
+import io
 import sqlite3
 import threading
 import tempfile
@@ -7,6 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import server as s
+from log_sequence import LogSequence
 
 
 class StatePerformanceTests(unittest.TestCase):
@@ -247,6 +249,89 @@ class StatePerformanceTests(unittest.TestCase):
         s.mutate_state(lambda state: state['users'][0].update(authVersion=999))
         with self.assertRaisesRegex(ValueError, '权限已变更'):
             s.session_user(token)
+
+    def test_streaming_and_callback_appends_do_not_iterate_or_copy_old_logs(self):
+        s.STATE_CACHE['executions'][0]['logs'] = LogSequence({'message': str(i)} for i in range(16383))
+        original = s.state_snapshot()
+        with patch.object(LogSequence, '__iter__', side_effect=AssertionError('scanned old logs')), \
+                patch.object(LogSequence, '__deepcopy__', side_effect=AssertionError('copied old logs')):
+            s.append_log('build', 'streamed')
+            s.set_execution_status('build', 'building', message='stage changed', stage='compile')
+            before_failed = s.state_snapshot()
+            def fail(state):
+                state['executions'][0]['logs'].append({'message': 'uncommitted'})
+                raise ValueError('abort')
+            with self.assertRaisesRegex(ValueError, 'abort'):
+                s.mutate_execution('build', fail)
+        self.assertIs(s.STATE_CACHE, before_failed)
+        self.assertEqual(len(original['executions'][0]['logs']), 16383)
+        self.assertEqual(s.STATE_CACHE['executions'][0]['logs'][-2]['message'], 'streamed')
+        self.assertEqual(s.STATE_CACHE['executions'][0]['logs'][-1]['message'], 'stage changed')
+
+    def test_persistent_log_summaries_are_bounded_and_full_log_json_remains_compatible(self):
+        entries = [{'message': str(i)} for i in range(1000)]
+        execution = {**s.STATE_CACHE['executions'][0], 'logs': LogSequence(entries)}
+        with patch.object(LogSequence, '__iter__', side_effect=AssertionError('full scan for summary')):
+            summary = s.execution_summary(execution, compact=True)
+        self.assertEqual(summary['logCount'], 1000)
+        self.assertEqual(summary['latestLog']['message'], '999')
+        self.assertEqual(summary['logs'], [])
+        self.assertEqual(json.loads(s.state_payload({'executions': [execution]}))['executions'][0]['logs'], entries)
+        handler = s.Handler.__new__(s.Handler)
+        handler.send_response = Mock()
+        handler.send_header = Mock()
+        handler.end_headers = Mock()
+        handler.wfile = io.BytesIO()
+        handler.send_json({'logs': execution['logs']})
+        self.assertEqual(json.loads(handler.wfile.getvalue())['logs'], entries)
+        with patch.object(s, 'STATE_CACHE', {**s.STATE_CACHE, 'executions': [execution]}):
+            external = s.read_state()
+            external['executions'][0]['logs'][0]['message'] = 'external'
+        self.assertEqual(execution['logs'][0]['message'], '0')
+
+    def test_five_execution_log_streams_persist_and_recover_independently(self):
+        s.STATE_CACHE['executions'] = [
+            {'id': str(i), 'taskId': str(i), 'status': 'building', 'logs': LogSequence([{'message': 'initial'}])}
+            for i in range(5)]
+        original = s.state_snapshot()
+        barrier = threading.Barrier(6)
+        errors = []
+        def stream(index):
+            try:
+                barrier.wait(3)
+                for n in range(129):
+                    s.append_log(str(index), f'{index}:{n}')
+            except Exception as exc:
+                errors.append(exc)
+        workers = [threading.Thread(target=stream, args=(i,)) for i in range(5)]
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(s, 'DB_PATH', Path(folder) / 'state.db'), \
+                patch.object(s, 'use_postgres', return_value=False):
+            s.persist_state_snapshot(original)
+            for worker in workers:
+                worker.start()
+            barrier.wait(3)
+            for worker in workers:
+                worker.join(5)
+                self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+            s.flush_pending_state_write()
+            restored = s.read_raw_state()
+            # Switching database targets must initialize, not reuse a foreign baseline.
+            with patch.object(s, 'DB_PATH', Path(folder) / 'other.db'):
+                s.persist_state_snapshot(s.state_snapshot())
+                self.assertEqual(s.read_raw_state(), restored)
+            with patch.object(s, 'STATE_CACHE', None):
+                restarted = s.state_snapshot()
+                self.assertIsInstance(restarted['executions'][0]['logs'], LogSequence)
+                s.append_log('0', 'after restart')
+                s.flush_pending_state_write()
+                self.assertEqual(s.read_raw_state()['executions'][0]['logs'][-1]['message'], 'after restart')
+                self.assertEqual(len(restarted['executions'][0]['logs']), 130)
+        for index, execution in enumerate(restored['executions']):
+            self.assertEqual([entry['message'] for entry in execution['logs']],
+                             ['initial', *[f'{index}:{n}' for n in range(129)]])
+        self.assertTrue(all(len(execution['logs']) == 1 for execution in original['executions']))
 
 
 if __name__ == '__main__':

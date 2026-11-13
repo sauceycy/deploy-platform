@@ -4,6 +4,7 @@ import sqlite3
 import unittest
 
 import state_store as store
+from log_sequence import LogSequence
 
 
 class IncrementalStoreTests(unittest.TestCase):
@@ -80,6 +81,30 @@ class IncrementalStoreTests(unittest.TestCase):
         stats = self.save(new, self.state)
         self.assertEqual(stats["rows"], 1)
         self.assertLess(stats["bytes"], 100)
+
+    def test_persistent_logs_coalesce_rollback_retry_replace_and_truncate(self):
+        self.state['executions'][0]['logs'] = LogSequence({'message': str(i)} for i in range(255))
+        self.save(self.state)
+        logs = self.state['executions'][0]['logs']
+        for i in range(255, 513):
+            logs = logs.appended({'message': str(i)})
+        new = {**self.state, 'revision': 2, 'executions': [{**self.state['executions'][0], 'logs': logs}]}
+        # A failed coalesced flush must not advance the committed baseline.
+        with self.assertRaisesRegex(RuntimeError, 'abort'), self.conn:
+            store.save(self.conn, new, self.state)
+            raise RuntimeError('abort')
+        self.assertEqual(store.load(self.conn), self.state)
+        self.save(new, self.state)
+        self.assertEqual(store.load(self.conn), new)
+        self.assertEqual(self.save(new)['rows'], 0)  # Reconcile after restart.
+        replacement = {**new, 'executions': [{**new['executions'][0],
+            'logs': LogSequence([{'message': 'replacement'}, *logs[1:129]])}]}
+        self.save(replacement, new)
+        self.assertEqual(store.load(self.conn), replacement)
+        empty = {**replacement, 'executions': [{**replacement['executions'][0], 'logs': LogSequence()}]}
+        self.save(empty, replacement)
+        self.assertEqual(store.load(self.conn), empty)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM state_log_chunks').fetchone()[0], 0)
 
 
 if __name__ == "__main__":

@@ -633,7 +633,10 @@ function hydrateState(nextState, options = {}) {
   mergeAgentTaskSnapshots(nextState.agentTasks, compact);
   replaceArray(agentHeartbeats, nextState.agentHeartbeats);
   replaceArray(schedules, nextState.schedules);
-  Object.assign(platformSettings, { registrySecretId: "", imageNamespace: "deploy-platform", sdkImages: [], sdkImagesInitialized: false }, nextState.platformSettings || {});
+  // State patches reuse exportState(), whose settings may be this same object.
+  // Capture its fields before assigning defaults so they cannot erase the source.
+  const incomingPlatformSettings = { ...nextState.platformSettings };
+  Object.assign(platformSettings, { registrySecretId: "", imageNamespace: "deploy-platform", sdkImages: [], sdkImagesInitialized: false }, incomingPlatformSettings);
   platformSettings.sdkImages = normalizeSdkImages(platformSettings.sdkImages);
   if (!platformSettings.sdkImagesInitialized && platformSettings.sdkImages.length === 0) {
     platformSettings.sdkImages = defaultSdkImages();

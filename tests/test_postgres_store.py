@@ -9,6 +9,7 @@ import unittest
 import uuid
 
 import state_store as store
+from log_sequence import LogSequence
 
 
 @unittest.skipUnless(os.environ.get("TEST_POSTGRES_URL"), "dedicated TEST_POSTGRES_URL not configured")
@@ -131,6 +132,26 @@ class PostgresStoreTests(unittest.TestCase):
         self.assertTrue(statements[0].startswith('INSERT INTO state_sections '))
         self.assertEqual(stats['rows'], 1)
         self.assertEqual(self.reloaded(), new)
+
+    def test_persistent_blocks_rollback_coalesce_and_reload(self):
+        self.state['executions'][0]['logs'] = LogSequence(self.state['executions'][0]['logs'])
+        self.save(self.state)
+        logs = self.state['executions'][0]['logs']
+        for i in range(258):
+            logs = logs.appended({'message': str(i)})
+        changed = {**self.state, 'revision': 2,
+                   'executions': [{**self.state['executions'][0], 'logs': logs}]}
+        with self.assertRaisesRegex(RuntimeError, 'abort'):
+            with self.connection.transaction():
+                store.save(self.connection, changed, self.state, postgres=True)
+                raise RuntimeError('abort')
+        self.assertEqual(self.reloaded(), self.state)
+        self.save(changed, self.state)
+        self.assertEqual(self.reloaded(), changed)
+        truncated = {**changed, 'executions': [{**changed['executions'][0], 'logs': LogSequence(logs[-129:])}]}
+        self.save(truncated, changed)
+        self.assertEqual(self.reloaded(), truncated)
+        self.assertEqual(self.save(truncated)['rows'], 0)
 
 
 if __name__ == "__main__":
