@@ -3,16 +3,18 @@ import os
 import queue
 import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from agent_store import AgentStore
 
 
 PLATFORM_URL = os.environ.get("PLATFORM_URL", "http://deploy-platform-web").rstrip("/")
+AGENT_VERSION = "0.2.0"
 CLUSTER_NAME = os.environ.get("CLUSTER_NAME", "dev-01")
 AGENT_TOKEN = os.environ.get("AGENT_TOKEN", "dev-agent-token")
 AGENT_INSTANCE_ID = os.environ.get("AGENT_INSTANCE_ID") or socket.gethostname()
@@ -20,6 +22,7 @@ POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
 AGENT_MAX_CONCURRENT_TASKS = max(1, int(os.environ.get("AGENT_MAX_CONCURRENT_TASKS", "5")))
 KUBECTL_TIMEOUT_SECONDS = max(180, int(os.environ.get("KUBECTL_TIMEOUT_SECONDS", "300")))
 AGENT_STATE_DIR = os.environ.get("AGENT_STATE_DIR", "/data/agent")
+AGENT_HTTP_TIMEOUT_SECONDS = max(1, int(os.environ.get("AGENT_HTTP_TIMEOUT_SECONDS", "20")))
 CF_ACCESS_CLIENT_ID = os.environ.get("CF_ACCESS_CLIENT_ID", "").strip()
 CF_ACCESS_CLIENT_SECRET = os.environ.get("CF_ACCESS_CLIENT_SECRET", "").strip()
 AGENT_HEADERS = {
@@ -59,18 +62,26 @@ def api_request(method, path, payload=None, query=None):
         headers=headers,
         method=method,
     )
+    started = time.monotonic()
     try:
-        with urlopen(req, timeout=20) as response:
+        with urlopen(req, timeout=AGENT_HTTP_TIMEOUT_SECONDS) as response:
             body = response.read().decode("utf-8")
             return json.loads(body) if body else {}
     except HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:500]
+        with exc:
+            body = exc.read(2048).decode("utf-8", errors="replace")[:500]
         if exc.code == 403 and "Attention Required" in body and "Cloudflare" in body:
             raise RuntimeError(
                 f"{method} {path} 被 Cloudflare 拦截，平台后端未收到请求。请给 /api/agent/* 配置 WAF 跳过规则，"
                 "或在 Agent 环境变量中配置 CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET。"
             ) from exc
+        if exc.code in {502, 503, 504, 522, 524}:
+            raise RuntimeError(f"{method} {path} HTTP {exc.code}: 平台源站或代理不可用，请检查源站健康、反向代理和网络链路") from exc
         raise RuntimeError(f"{method} {path} HTTP {exc.code}: {body}") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        elapsed = time.monotonic() - started
+        raise RuntimeError(f"{method} {path} timed out after {elapsed:.1f}s "
+                           f"(timeout={AGENT_HTTP_TIMEOUT_SECONDS}s)，请检查 Agent 到平台的网络、代理和源站响应") from exc
     except URLError as exc:
         raise RuntimeError(f"{method} {path} failed: {exc.reason}") from exc
 
@@ -210,7 +221,8 @@ def execute_task(task):
 
 def heartbeat():
     try:
-        api_post("/api/agent/heartbeat", {"cluster": CLUSTER_NAME, "instanceId": AGENT_INSTANCE_ID, "version": "0.1.0"})
+        api_post("/api/agent/heartbeat", {"cluster": CLUSTER_NAME, "instanceId": AGENT_INSTANCE_ID,
+                                        "version": AGENT_VERSION, "maxConcurrentTasks": AGENT_MAX_CONCURRENT_TASKS})
     except Exception as exc:
         print(f"agent heartbeat error: {exc}", flush=True)
 
@@ -286,7 +298,29 @@ def deployment_worker_loop(stop_event, store, recovered):
             return
 
 
-if __name__ == "__main__":
+def check_platform():
+    """Probe with the Agent's network/header settings, without claiming work."""
+    target = urlsplit(PLATFORM_URL)
+    print(f"Agent version={AGENT_VERSION} cluster={CLUSTER_NAME} concurrency={AGENT_MAX_CONCURRENT_TASKS} "
+          f"platform_host={target.hostname} timeout={AGENT_HTTP_TIMEOUT_SECONDS}s", flush=True)
+    try:
+        response = api_get("/api/health")
+        if response.get("status") != "ok":
+            raise RuntimeError("平台健康接口未返回 status=ok")
+    except Exception as exc:
+        print(f"CHECK FAILED: {exc}", flush=True)
+        return 1
+    print("CHECK OK: 平台健康接口可达；此检查不领取任务，不验证集群 Token 或任务接口规则", flush=True)
+    return 0
+
+
+def main():
+    global AGENT_INSTANCE_ID
+    if sys.argv[1:] == ["--check"]:
+        return check_platform()
+    if sys.argv[1:]:
+        print("Usage: agent.py [--check]", flush=True)
+        return 2
     store = AgentStore(os.path.join(AGENT_STATE_DIR, "jobs.sqlite3"))
     # Persist identity with the ledger, including when a Pod is replaced using
     # the same persistent volume. Different Agent replicas need different volumes.
@@ -294,7 +328,8 @@ if __name__ == "__main__":
     recovered = queue.Queue()
     for record in store.recover():
         recovered.put(record)
-    print(f"Deploy Agent started cluster={CLUSTER_NAME} instance={AGENT_INSTANCE_ID} platform={PLATFORM_URL} concurrency={AGENT_MAX_CONCURRENT_TASKS}", flush=True)
+    print(f"Deploy Agent started version={AGENT_VERSION} cluster={CLUSTER_NAME} instance={AGENT_INSTANCE_ID} "
+          f"platform_host={urlsplit(PLATFORM_URL).hostname} concurrency={AGENT_MAX_CONCURRENT_TASKS}", flush=True)
     heartbeat_stop = threading.Event()
     threading.Thread(target=heartbeat_loop, args=(heartbeat_stop,), daemon=True, name="agent-heartbeat").start()
     workers = [threading.Thread(target=deployment_worker_loop, args=(heartbeat_stop, store, recovered),
@@ -306,3 +341,7 @@ if __name__ == "__main__":
             worker.join()
     finally:
         heartbeat_stop.set()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

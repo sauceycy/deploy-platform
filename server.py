@@ -2734,6 +2734,8 @@ def dispatch_agent_tasks(execution_id, task, image):
                     "updatedAt": now_text(),
                 }
             )
+            queued = state["agentTasks"][-1]
+            queued["claimWaitSince"] = None if agent_claim_blocked(state, queued) else queued["createdAt"]
             execution.setdefault("clusterResults", {})[cluster_name] = "pending"
             if pull_image != image:
                 execution.setdefault("logs", []).append({"time": now_text(), "message": f"集群 {cluster_name} 使用拉取镜像地址: {pull_image}"})
@@ -3970,56 +3972,86 @@ def recover_waiting_deployments():
             set_execution_status(execution_id, "failed", f"Agent 发布任务补发失败: {exc}", stage="部署异常", progress=100)
 
 
-def recover_stuck_agent_deployments():
-    recovery_items = []
-    with STATE_LOCK:
-        state = state_snapshot()
-        now = datetime.now()
-        for execution in state.get("executions", []):
-            if execution.get("status") != "deploying" or execution.get("stage") != "Agent 部署":
-                continue
-            agent_tasks = [item for item in state.get("agentTasks", []) if str(item.get("executionId")) == str(execution.get("id"))]
-            if not agent_tasks:
-                continue
-            stale_pending_clusters = []
-            for item in agent_tasks:
-                if item.get("status") != "pending":
-                    continue
-                if item.get("kind") != "windows" and agent_claim_blocked(state, item):
-                    continue  # Target/cluster backpressure is legitimate waiting.
-                created_at = parse_time_text(item.get("updatedAt") or item.get("createdAt"))
-                if not created_at:
-                    stale_pending_clusters.append(item.get("clusterName"))
-                    continue
-                if (now - created_at).total_seconds() >= AGENT_TASK_PENDING_TIMEOUT_SECONDS:
-                    stale_pending_clusters.append(item.get("clusterName"))
-            if stale_pending_clusters:
-                recovery_items.append((execution.get("id"), stale_pending_clusters))
+def agent_pending_wait_since(item):
+    # None explicitly means waiting for a deployment slot/target. Older records
+    # use their original timestamp until the scheduler first observes blocking.
+    value = item.get("claimWaitSince") if "claimWaitSince" in item else item.get("updatedAt") or item.get("createdAt")
+    return parse_time_text(value)
 
-    for execution_id, stale_pending_clusters in recovery_items:
-        message = f"Agent 任务超时未领取: {', '.join(str(item) for item in stale_pending_clusters if item)}"
-        message = f"{message}。{deployment_agent_issue_message('、'.join(str(item) for item in stale_pending_clusters if item))}"
+
+def agent_pending_timeout_message(state, clusters):
+    details = []
+    for cluster in clusters:
+        if cluster_agent_is_fresh(state, cluster):
+            details.append(f"集群 {cluster} 的 Agent 心跳正常但未领取，请检查 Agent 工作线程、领取接口 /api/agent/tasks"
+                           "（Windows 使用 /api/windows-agent/tasks）的 HTTP 错误及平台/Agent 并发配置")
+        else:
+            details.append(deployment_agent_issue_message(cluster))
+    return f"Agent 任务超时未领取: {', '.join(clusters)}。{'；'.join(details)}"
+
+
+def recover_stuck_agent_deployments():
+    state = state_snapshot()
+    now = datetime.now()
+    recovery_items = []
+    for execution in state.get("executions", []):
+        if execution.get("status") != "deploying" or execution.get("stage") != "Agent 部署":
+            continue
+        needs_update = may_timeout = False
+        for item in state.get("agentTasks", []):
+            if str(item.get("executionId")) != str(execution["id"]) or item.get("status") != "pending":
+                continue
+            if agent_claim_blocked(state, item):
+                needs_update |= "claimWaitSince" not in item or item["claimWaitSince"] is not None
+            else:
+                since = agent_pending_wait_since(item)
+                expired = since is not None and (now - since).total_seconds() >= AGENT_TASK_PENDING_TIMEOUT_SECONDS
+                needs_update |= since is None or expired
+                may_timeout |= expired
+        if needs_update:
+            recovery_items.append((execution["id"], may_timeout))
+
+    for execution_id, may_timeout in recovery_items:
         try:
-            append_log(execution_id, message)
-            def update(state):
-                execution = find_by_id(state.get("executions", []), execution_id)
-                if not execution or execution.get("status") not in {"deploying", "building"}:
-                    return
-                if execution.get("status") == "cancelled":
-                    return
-                execution["status"] = "failed"
-                execution["stage"] = "部署异常"
-                execution["progress"] = 100
-                execution["updatedAt"] = now_text()
-                execution.setdefault("logs", []).append({"time": now_text(), "message": message})
-                for item in state.get("agentTasks", []):
-                    if str(item.get("executionId")) != str(execution_id):
+            def update(current):
+                execution = find_by_id(current["executions"], execution_id)
+                if execution.get("status") != "deploying" or execution.get("stage") != "Agent 部署":
+                    return False
+                pending = [item for item in current["agentTasks"]
+                           if str(item.get("executionId")) == str(execution_id) and item.get("status") == "pending"]
+                stale = []
+                now = datetime.now()
+                timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+                for item in pending:
+                    # Recheck ownership and blocking in the mutation lock: the
+                    # Agent may have claimed a task since the initial scan.
+                    if agent_claim_blocked(current, item):
+                        item["claimWaitSince"] = None
                         continue
-                    if item.get("status") in {"pending", "running"}:
-                        item["status"] = "failed"
-                        item["updatedAt"] = now_text()
-                        item.setdefault("logs", []).append({"time": now_text(), "message": message})
-            mutate_execution(execution_id, update, agent_tasks=True)
+                    since = agent_pending_wait_since(item)
+                    if since is None:
+                        item["claimWaitSince"] = timestamp
+                    elif may_timeout and (now - since).total_seconds() >= AGENT_TASK_PENDING_TIMEOUT_SECONDS:
+                        stale.append(item)
+                if not stale:
+                    return False
+                clusters = list(dict.fromkeys(str(item.get("clusterName") or "未知集群") for item in stale))
+                message = agent_pending_timeout_message(current, clusters)
+                execution.update(status="failed", stage="部署异常", progress=100, updatedAt=timestamp)
+                execution.setdefault("logs", []).append({"time": timestamp, "message": message})
+                stale_ids = {item["id"] for item in stale}
+                for item in pending:
+                    status = "failed" if item["id"] in stale_ids else "cancelled"
+                    item.update(status=status, updatedAt=timestamp)
+                    item.setdefault("logs", []).append({"time": timestamp, "message": message})
+                    execution.setdefault("clusterResults", {})[item["clusterName"]] = status
+                # Already running commands retain their owner, status and lock
+                # until the original Agent reports; never pretend they stopped.
+                return True
+
+            failed, committed = mutate_execution(execution_id, update, agent_tasks=True, read_only_logs=not may_timeout)
+            if failed:
+                persist_queued_state(committed, committed["revision"])
         except Exception as exc:
             print(f"stuck deployment recovery failed: {execution_id} / {exc}", flush=True)
 
@@ -4046,11 +4078,27 @@ def agent_deployment_key(item):
             payload.get("deployment") or payload.get("appName") or str(item.get("taskId")))
 
 
+def cluster_agent_capacity(state, cluster):
+    heartbeat = cluster_heartbeat_for_name(state, cluster)
+    if heartbeat is None:
+        return MAX_AGENT_DEPLOYS_PER_CLUSTER
+    # Legacy Agents execute serially and do not advertise their worker count.
+    # Do not assume the platform's five slots are five actual Agent workers.
+    try:
+        capacity = int(heartbeat.get("maxConcurrentTasks") or 1)
+    except (TypeError, ValueError):
+        capacity = 1
+    return max(1, min(MAX_AGENT_DEPLOYS_PER_CLUSTER, capacity))
+
+
 def agent_claim_blocked(state, candidate):
+    if candidate.get("kind") == "windows":
+        return any(item.get("kind") == "windows" and item.get("status") == "running"
+                   and agent_task_matches_cluster(item, candidate.get("clusterName")) for item in state["agentTasks"])
     busy = [item for item in state["agentTasks"] if item.get("kind") != "windows"
             and agent_task_matches_cluster(item, candidate.get("clusterName"))
             and (item.get("resourceHeld") or item.get("status") == "running")]
-    return len(busy) >= MAX_AGENT_DEPLOYS_PER_CLUSTER or any(agent_deployment_key(item) == agent_deployment_key(candidate) for item in busy)
+    return len(busy) >= cluster_agent_capacity(state, candidate.get("clusterName")) or any(agent_deployment_key(item) == agent_deployment_key(candidate) for item in busy)
 
 
 def release_agent_reservation(agent_task_id, actor, confirmed_stopped=False):
@@ -4099,11 +4147,17 @@ def claim_agent_task(cluster, instance, request_id=""):
             if existing:
                 return existing  # Retry a lost HTTP response, not a new claim.
         busy = [item for item in items if item.get("resourceHeld") or item.get("status") == "running"]
-        if len(busy) >= MAX_AGENT_DEPLOYS_PER_CLUSTER:
+        if len(busy) >= cluster_agent_capacity(state, cluster):
             return None
         keys = {agent_deployment_key(item) for item in busy}
-        candidate = next((item for item in items if item.get("status") == "pending"
-                          and agent_deployment_key(item) not in keys), None)
+        candidate = None
+        for item in items:
+            if item.get("status") != "pending" or agent_deployment_key(item) in keys:
+                continue
+            execution = find_by_id(state["executions"], item.get("executionId"))
+            if execution and execution.get("status") in ACTIVE_STATUSES:
+                candidate = item
+                break
         if candidate is None:
             return None
 
@@ -4118,7 +4172,7 @@ def claim_agent_task(cluster, instance, request_id=""):
             execution.setdefault("clusterResults", {})[item["clusterName"]] = "running"
             return item
 
-        result, _state = mutate_execution(candidate["executionId"], claim, agent_tasks=True)
+        result, _state = mutate_execution(candidate["executionId"], claim, agent_tasks=True, read_only_logs=True)
         return result
 
 
@@ -4614,7 +4668,12 @@ class Handler(WindowsRoutes, SimpleHTTPRequestHandler):
 
             def update(state):
                 state["agentHeartbeats"] = [item for item in state["agentHeartbeats"] if normalize_cluster_key(item.get("cluster")) != normalize_cluster_key(cluster)]
-                state["agentHeartbeats"].append({"cluster": cluster, "time": now_text(), "version": body.get("version", "dev"), "instanceId": body.get("instanceId") or ""})
+                heartbeat = {"cluster": cluster, "time": now_text(), "version": body.get("version", "dev"), "instanceId": body.get("instanceId") or ""}
+                try:
+                    heartbeat["maxConcurrentTasks"] = max(1, min(1024, int(body.get("maxConcurrentTasks") or 1)))
+                except (TypeError, ValueError):
+                    heartbeat["maxConcurrentTasks"] = 1
+                state["agentHeartbeats"].append(heartbeat)
 
             mutate_state(update, read_only_history=True)
             self.send_json({"ok": True})
