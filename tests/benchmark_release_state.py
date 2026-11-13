@@ -14,6 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server as s
 import state_store
+from log_sequence import LogSequence
 
 
 def timed(fn, rounds=5):
@@ -36,17 +37,26 @@ def main():
     result["legacy_two_deepcopies_ms"] = timed(lambda: copy.deepcopy(copy.deepcopy(state)))
     result["legacy_full_serialize_ms"] = timed(lambda: s.state_payload(state))
     result["legacy_payload_bytes"] = len(s.state_payload(state).encode())
-    with patch.object(s, "STATE_CACHE", state), patch.object(s, "enqueue_state_write"), patch.object(s, "broadcast_state"):
+    # Startup conversion is outside the warm-path measurements, as in the server.
+    for execution in state['executions']:
+        execution['logs'] = LogSequence(execution['logs'])
+    with patch.object(s, "STATE_CACHE", state), patch.object(s, "enqueue_state_write"), \
+            patch.object(s, "broadcast_state"), patch.object(s, 'broadcast_ws'):
         progress = iter(range(30, 40))
         result["runtime_update_ms"] = timed(lambda: s.set_execution_status("0", "building", progress=next(progress)))
         result["config_update_ms"] = timed(lambda: s.mutate_state(lambda value: value["platformSettings"].update(imageNamespace="benchmark"), read_only_history=True))
+        result['streaming_append_ms'] = timed(lambda: s.append_log('0', 'benchmark line'))
+    result['log_sequence_append_ms_by_length'] = {}
+    for count in (1000, 100000):
+        sequence = LogSequence({'message': 'x' * 1000} for _ in range(count))
+        result['log_sequence_append_ms_by_length'][str(count)] = timed(lambda: sequence.appended({'message': 'new line'}))
     conn = sqlite3.connect(":memory:")
     try:
         conn.execute("CREATE TABLE app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         with conn:
             state_store.save(conn, state)
         next_state = {**state, "revision": int(state.get("revision") or 0) + 1, "executions": [
-            {**state["executions"][0], "logs": [*state["executions"][0]["logs"], {"message": "new line"}]},
+            {**state["executions"][0], "logs": state["executions"][0]["logs"].appended({"message": "new line"})},
             *state["executions"][1:]]}
         started = time.perf_counter()
         with conn:

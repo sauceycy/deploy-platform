@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import server as s
 import state_store as store
+import log_sequence
 
 
 class RecordingConnection:
@@ -155,6 +156,29 @@ class PerformanceContracts(unittest.TestCase):
         self.assertEqual(frames[0], frames[1])
         self.assertEqual(set(frames[0]["patch"]), {"executions", "revision"})
         self.assertLessEqual(len(store.encode(frames[0]).encode()), 100_000)
+
+    def test_persistent_log_append_skips_shared_prefix_without_relaxing_write_budget(self):
+        budgets = []
+        for count in (511, 16383):
+            with self.subTest(logs=count):
+                connection = self.database()
+                logs = log_sequence.LogSequence({'message': 'x' * 1024} for _ in range(count))
+                old = {'revision': 1, 'agentTasks': [], 'executions': [{'id': 'build', 'logs': logs}]}
+                with connection:
+                    store.save(connection, old)
+                new = {**old, 'revision': 2, 'executions': [
+                    {**old['executions'][0], 'logs': logs.appended({'message': 'new'})}]}
+                observed = RecordingConnection(connection)
+                with patch.object(log_sequence.LogSequence, '__iter__', side_effect=AssertionError('iterated old logs')), \
+                        patch.object(log_sequence, '_different_chunks', wraps=log_sequence._different_chunks) as compared, connection:
+                    stats = store.save(observed, new, old)
+                self.assertLessEqual(compared.call_count, 15)
+                self.assertEqual(stats['rows'], 2)
+                self.assertEqual(len(observed.statements), 2)
+                self.assertLessEqual(stats['bytes'], 140_000)
+                self.assertEqual(store.load(connection), new)
+                budgets.append(stats)
+        self.assertEqual(budgets[0], budgets[1])
 
 
 if __name__ == "__main__":

@@ -5,14 +5,14 @@ switches reads to the new tables; a failed migration never exposes partial data.
 The caller owns the single-writer lock and only advances its baseline on commit.
 """
 import json
+from log_sequence import LOG_CHUNK_SIZE, LogSequence, json_default
 
 
 COLLECTIONS = ("executions", "agentTasks")
-LOG_CHUNK_SIZE = 128
 
 
 def encode(value):
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=json_default)
 
 
 def ensure_schema(conn):
@@ -100,11 +100,16 @@ def save(conn, state, previous=None, postgres=False):
                 continue
             # Also supports replacement/truncation, not just append. Only changed
             # chunks cross the database connection, including after a retry.
-            for start in range(0, len(logs), LOG_CHUNK_SIZE):
-                chunk = logs[start:start + LOG_CHUNK_SIZE]
-                if chunk == old_logs[start:start + LOG_CHUNK_SIZE]:
-                    continue
-                execute("INSERT INTO state_log_chunks (collection, id, chunk, value) VALUES (?, ?, ?, ?) ON CONFLICT(collection, id, chunk) DO UPDATE SET value = excluded.value", (collection, record_id, start // LOG_CHUNK_SIZE, serialize(chunk)))
+            if isinstance(logs, LogSequence) and isinstance(old_logs, LogSequence):
+                chunks = logs.changed_chunks(old_logs)
+            else:
+                # Plain lists (legacy load, replacement or management edits)
+                # retain the complete comparison fallback.
+                chunks = ((start // LOG_CHUNK_SIZE, logs[start:start + LOG_CHUNK_SIZE])
+                          for start in range(0, len(logs), LOG_CHUNK_SIZE)
+                          if logs[start:start + LOG_CHUNK_SIZE] != old_logs[start:start + LOG_CHUNK_SIZE])
+            for index, chunk in chunks:
+                execute("INSERT INTO state_log_chunks (collection, id, chunk, value) VALUES (?, ?, ?, ?) ON CONFLICT(collection, id, chunk) DO UPDATE SET value = excluded.value", (collection, record_id, index, serialize(chunk)))
             if len(logs) < len(old_logs):
                 execute("DELETE FROM state_log_chunks WHERE collection = ? AND id = ? AND chunk >= ?", (collection, record_id, (len(logs) + LOG_CHUNK_SIZE - 1) // LOG_CHUNK_SIZE))
         for record_id in old.keys() - seen:
